@@ -2,7 +2,9 @@
 """Download ingest source files from Cloudflare R2.
 
 Uses only stdlib (urllib.request, hashlib, json).
-Fetches manifest.json, then downloads files whose size or SHA-256 don't match.
+Fetches both the root manifest (ingest sources like IPDB, OPDB, Fandom)
+and the pinbase/ manifest (catalog exports from pindata), then downloads
+files whose size or SHA-256 don't match.
 
 Usage:
     python scripts/pull_ingest_sources.py [--url URL] [--dest DIR]
@@ -35,6 +37,56 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _pull_manifest(base_url: str, manifest_path: str, dest: str) -> tuple[int, int]:
+    """Fetch a manifest and download any changed files.
+
+    Returns (downloaded, skipped) counts.
+    """
+    manifest_url = f"{base_url}/{manifest_path}"
+    print(f"Fetching manifest from {manifest_url}")
+    with _urlopen(manifest_url) as resp:
+        manifest = json.loads(resp.read())
+
+    # Determine the URL prefix and local prefix from the manifest path.
+    # e.g. "pinbase/manifest.json" -> url prefix "pinbase/", local prefix "pinbase/"
+    prefix = manifest_path.rsplit("manifest.json", 1)[0]
+
+    downloaded = 0
+    skipped = 0
+
+    for entry in manifest:
+        rel_path = entry["path"]
+        expected_size = entry["size"]
+        expected_sha = entry["sha256"]
+        local_path = os.path.join(dest, prefix + rel_path)
+
+        if (
+            os.path.exists(local_path)
+            and os.path.getsize(local_path) == expected_size
+        ):
+            if _sha256(local_path) == expected_sha:
+                skipped += 1
+                continue
+
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        file_url = f"{base_url}/{prefix}{rel_path}"
+        print(f"  {prefix}{rel_path}")
+        with _urlopen(file_url) as resp, open(local_path, "wb") as f:
+            f.write(resp.read())
+
+        actual_sha = _sha256(local_path)
+        if actual_sha != expected_sha:
+            print(
+                f"ERROR: Checksum mismatch for {prefix}{rel_path}: "
+                f"expected {expected_sha}, got {actual_sha}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        downloaded += 1
+
+    return downloaded, skipped
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download ingest sources from R2.")
     parser.add_argument(
@@ -50,47 +102,21 @@ def main():
     args = parser.parse_args()
 
     base_url = args.url.rstrip("/")
-    dest = args.dest
 
-    manifest_url = f"{base_url}/manifest.json"
-    print(f"Fetching manifest from {manifest_url}")
-    with _urlopen(manifest_url) as resp:
-        manifest = json.loads(resp.read())
+    total_downloaded = 0
+    total_skipped = 0
 
-    downloaded = 0
-    skipped = 0
+    # Pull root manifest (ingest sources: IPDB, OPDB, Fandom, etc.)
+    d, s = _pull_manifest(base_url, "manifest.json", args.dest)
+    total_downloaded += d
+    total_skipped += s
 
-    for entry in manifest:
-        rel_path = entry["path"]
-        expected_size = entry["size"]
-        expected_sha = entry["sha256"]
-        local_path = os.path.join(dest, rel_path)
+    # Pull pinbase manifest (catalog exports from pindata)
+    d, s = _pull_manifest(base_url, "pinbase/manifest.json", args.dest)
+    total_downloaded += d
+    total_skipped += s
 
-        if (
-            os.path.exists(local_path)
-            and os.path.getsize(local_path) == expected_size
-        ):
-            if _sha256(local_path) == expected_sha:
-                skipped += 1
-                continue
-
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        file_url = f"{base_url}/{rel_path}"
-        print(f"  {rel_path}")
-        with _urlopen(file_url) as resp, open(local_path, "wb") as f:
-            f.write(resp.read())
-
-        actual_sha = _sha256(local_path)
-        if actual_sha != expected_sha:
-            print(
-                f"ERROR: Checksum mismatch for {rel_path}: "
-                f"expected {expected_sha}, got {actual_sha}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        downloaded += 1
-
-    print(f"Done. {downloaded} downloaded, {skipped} up-to-date.")
+    print(f"Done. {total_downloaded} downloaded, {total_skipped} up-to-date.")
 
 
 if __name__ == "__main__":
