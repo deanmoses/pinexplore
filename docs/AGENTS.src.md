@@ -33,6 +33,8 @@ DuckDB is purely an audit and exploration tool; the Pindata project is the sourc
 
 ## Querying the Database
 
+Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. Run `make all` first to pull the ingest sources from R2 and build the database. Do **not** run `make explore` alone — it will fail without the ingest sources.
+
 Use the Python `duckdb` package to query `explore.duckdb`. Do **not** use the DuckDB CLI binary — the Python package is the only required dependency.
 
 ```python

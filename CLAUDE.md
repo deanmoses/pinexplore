@@ -22,6 +22,8 @@ DuckDB is purely an audit and exploration tool; the Pindata project is the sourc
 
 ## Querying the Database
 
+Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. Run `make all` first to pull the ingest sources from R2 and build the database. Do **not** run `make explore` alone — it will fail without the ingest sources.
+
 Use the Python `duckdb` package to query `explore.duckdb`. Do **not** use the DuckDB CLI binary — the Python package is the only required dependency.
 
 ```python
@@ -48,9 +50,9 @@ make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
 ```text
 sql/              DuckDB SQL layers (numbered, run in order)
 scripts/          Shell and Python utilities
-docs/             Documentation
+docs/             Documentation source files
 ingest_sources/   External data dumps (gitignored, pulled from R2)
-explore.duckdb    The DuckDB database, a build artifact (gitignored)
+explore.duckdb    Build artifact (gitignored)
 ```
 
 ## SQL Layers
@@ -69,9 +71,9 @@ Files in `sql/` load in numeric order during `make explore`:
 
 The build **fails** if integrity checks don't pass — query `SELECT * FROM _violations` for details.
 
-## Data Sources
+## Remote Data (Cloudflare R2)
 
-The raw source files are stored in Cloudflare R2. `make pull` downloads them locally. The rebuild script also supports reading directly from R2:
+Ingest source files are stored in Cloudflare R2. `make pull` downloads them locally. The rebuild script also supports reading directly from R2:
 
 ```bash
 uv run python scripts/rebuild_explore.py --remote   # reads JSON from R2 instead of local files
