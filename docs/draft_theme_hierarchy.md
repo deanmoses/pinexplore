@@ -292,13 +292,14 @@ Machine counts from IPDB in parentheses.
 - **Media** — _parent_
   - Television Show (26) — absorbs Television (3), Television Game Show (2)
   - Movies (10) — absorbs Action Movie (1), Sci-fi Movie (1), Drive-In Movies (1)
-  - Movie Making (3) — absorbs Hollywood (1), Movie Stars (2), Hollywood Actresses (1), Hollywood Glamour (1)
+  - Movie Making (3) — absorbs Hollywood (1), Hollywood Glamour (1)
   - Comics (23)
   - Cartoon (17) — absorbs Animated (1), Disney (1)
 
 ## People
 
 - **Celebrity** (55) — real famous people; drop from fictional characters (franchise covers those)
+  - Movie Stars (2) — absorbs Hollywood Actresses (1)
 
 ## Miscellaneous standalone themes
 
