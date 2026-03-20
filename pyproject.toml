@@ -1,0 +1,9 @@
+[project]
+name = "pinexplore"
+version = "0.1.0"
+description = "DuckDB-based exploration and validation tool for pinball catalog data"
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.42.72",
+    "duckdb>=1.5.0",
+]
