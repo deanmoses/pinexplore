@@ -225,3 +225,23 @@ SELECT fandom_page_id, fandom_name, fandom_manufacturer, fandom_year, fandom_wik
 FROM compare_games_fandom
 WHERE match_method IS NULL
 ORDER BY fandom_name;
+
+------------------------------------------------------------
+-- Missing: IPDB "Licensed Theme" models without a franchise
+------------------------------------------------------------
+
+CREATE OR REPLACE VIEW missing_franchises_ipdb AS
+SELECT DISTINCT
+  m.ipdb_id,
+  m.slug AS model_slug,
+  m.name AS model_name,
+  t.slug AS title_slug,
+  t.name AS title_name,
+  im.Theme AS ipdb_themes
+FROM ipdb_themes AS it
+JOIN models AS m ON m.ipdb_id = it.IpdbId
+JOIN titles AS t ON t.slug = m.title_slug
+JOIN ipdb_machines AS im ON im.IpdbId = it.IpdbId
+WHERE it.theme IN ('Licensed Theme', 'Licensed')
+  AND (t.franchise_slug IS NULL OR t.franchise_slug = '')
+ORDER BY t.name, m.name;
