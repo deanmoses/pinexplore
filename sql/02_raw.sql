@@ -9,62 +9,62 @@
 --   SET VARIABLE ingest_base = 'https://pub-8f33ea1ac628450298edd0d3243ecf5a.r2.dev';
 
 ------------------------------------------------------------
--- Pinbase Markdown-sourced data (via pinbase_export)
+-- Pinbase catalog data (via pindata export)
 ------------------------------------------------------------
 
 CREATE OR REPLACE TABLE cabinets AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/cabinet.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/cabinet.json');
 
 CREATE OR REPLACE TABLE corporate_entities AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/corporate_entity.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/corporate_entity.json');
 
 CREATE OR REPLACE TABLE credit_roles AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/credit_role.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/credit_role.json');
 
 CREATE OR REPLACE TABLE display_subtypes AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/display_subtype.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/display_subtype.json');
 
 CREATE OR REPLACE TABLE display_types AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/display_type.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/display_type.json');
 
 CREATE OR REPLACE TABLE franchises AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/franchise.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/franchise.json');
 
 CREATE OR REPLACE TABLE game_formats AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/game_format.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/game_format.json');
 
 CREATE OR REPLACE TABLE gameplay_features AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/gameplay_feature.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/gameplay_feature.json');
 
 CREATE OR REPLACE TABLE manufacturers AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/manufacturer.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/manufacturer.json');
 
 CREATE OR REPLACE TABLE models AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/model.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/model.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 CREATE OR REPLACE TABLE people AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/person.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/person.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 CREATE OR REPLACE TABLE series AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/series.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/series.json');
 
 CREATE OR REPLACE TABLE systems AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/system.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/system.json');
 
 CREATE OR REPLACE TABLE tags AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/tag.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/tag.json');
 
 CREATE OR REPLACE TABLE technology_generations AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/technology_generation.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_generation.json');
 
 CREATE OR REPLACE TABLE technology_subgenerations AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/technology_subgeneration.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_subgeneration.json');
 
 CREATE OR REPLACE TABLE themes AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/theme.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/theme.json');
 
 CREATE OR REPLACE TABLE titles AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase_export/title.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/title.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 ------------------------------------------------------------
 -- External source dumps

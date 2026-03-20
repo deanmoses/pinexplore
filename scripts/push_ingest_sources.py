@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Push ingest source files to Cloudflare R2.
 
-Builds a manifest with SHA-256 checksums, then uploads changed files
-using boto3 (S3-compatible API). Manifest is uploaded last so consumers
-never see references to objects that haven't been uploaded yet.
+Uploads raw ingest source files (IPDB, OPDB, Fandom, etc.) and builds a
+root-level manifest.json covering only these files.  The pinbase/
+prefix is owned by pindata's push script and excluded here.
 
 Usage:
     python scripts/push_ingest_sources.py
@@ -51,10 +51,13 @@ def _sha256(path: Path) -> str:
 
 
 def _collect_files(src: Path) -> list[dict]:
-    """Walk src and return manifest entries, excluding dotfiles and stale files."""
+    """Walk src and return manifest entries, excluding dotfiles and stale files.
+
+    Skips the pinbase/ subtree — that prefix is owned by pindata.
+    """
     entries = []
     for root, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "pinbase"]
         for f in files:
             if f.startswith(".") or f in EXCLUDE:
                 continue
