@@ -221,6 +221,76 @@ SELECT * FROM (VALUES
 ) AS t(opdb_manufacturer_id, manufacturer_slug, reason);
 
 ------------------------------------------------------------
+-- IPDB theme normalisation aliases
+------------------------------------------------------------
+
+-- Maps raw IPDB theme tokens (after delimiter splitting) to a canonical form.
+-- Categories: typos, singular/plural, spacing, abbreviations, split artifacts.
+-- Canonical form favours the higher-count variant from IPDB data.
+CREATE OR REPLACE VIEW ref_ipdb_theme_aliases AS
+SELECT * FROM (VALUES
+  -- Typos / misspellings
+  ('Basebal',            'Baseball'),
+  ('Dacing',             'Dancing'),
+  ('Water Skiiing',      'Water Skiing'),
+  ('Medievel Knights',   'Medieval Knights'),
+
+  -- Singular ↔ plural (keep the more common form)
+  ('Airplane',           'Airplanes'),
+  ('Cartoons',           'Cartoon'),
+  ('Comic',              'Comics'),
+  ('Disaster',           'Disasters'),
+  ('Fictional Character','Fictional Characters'),
+  ('Foreign People',     'Foreign Peoples'),
+  ('Marine',             'Marines'),
+  ('Movie',              'Movies'),
+  ('Railroad',           'Railroads'),  -- tied; prefer plural for consistency
+  ('Riverboat',          'Riverboats'),
+  ('Sport',              'Sports'),
+  ('Theaters',           'Theater'),
+  ('Vampire',            'Vampires'),
+  ('Wizards',            'Wizard'),
+  ('Superhero',          'Superheroes'),
+  ('Beaches',            'Beach'),
+
+  -- Spacing / hyphenation variants
+  ('Sky Diving',         'Skydiving'),
+  ('Shuffle Board',      'Shuffleboard'),
+  ('Rollercoasters',     'Roller Coasters'),
+  ('Rollerskating',      'Roller Skating'),
+
+  -- Abbreviations
+  ('Tv',                 'Television'),
+  ('Tv Show',            'Television Show'),
+  ('Tv Game Show',       'Television Game Show'),
+  ('Ufo',               'UFO'),
+  ('Ufo''s',            'UFO'),
+  ('Wwi',                'World War I'),
+  ('World War Ii',       'World War II'),
+
+  -- Split artifacts (bad delimiter handling in source data)
+  ('And Space Exploration', 'Space Exploration'),
+  ('Theme: Sports',         'Sports'),
+  ('Naval- Navy',           'Naval'),
+  ('Water- Women',          'Women'),
+  ('Scooters- Transportation', 'Transportation'),
+
+  -- Obvious synonyms
+  ('Cops & Robbers',     'Cops And Robbers'),
+  ('Car Rallies',        'Car Rally'),
+  ('Night Life',         'Nightlife'),
+  ('Golfing',            'Golf'),
+  ('Traveling',          'Travel'),
+  ('Trucking',           'Truck Driving'),
+  ('Hunting-shooting',   'Hunting'),
+  ('Skateboard',         'Skateboarding'),
+  ('Festivity',          'Festivities'),
+  ('Cops',               'Police'),
+  ('Celebrities',        'Celebrity'),
+  ('Patriotic',          'Patriotism')
+) AS t(raw_theme, canonical_theme);
+
+------------------------------------------------------------
 -- Quality/tag cross-reference mappings
 ------------------------------------------------------------
 

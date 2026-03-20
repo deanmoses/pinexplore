@@ -82,6 +82,67 @@ LEFT JOIN systems AS ps
   ON list_contains(ps.mpu_strings, im.MPU)
 WHERE im.ManufacturerId NOT IN (0, 328);
 
+-- Distinct IPDB themes: split compound Theme strings into individual terms.
+-- IPDB stores themes as "Adventure - Fantasy - Outer Space", sometimes with
+-- slash pairs ("Cards/Gambling"), commas, and mojibake (U+FFFD for dashes).
+-- This view normalises delimiters, splits into atomic terms, title-cases,
+-- and deduplicates so downstream comparison can work term-by-term.
+CREATE OR REPLACE VIEW ipdb_themes AS
+WITH
+  -- 1. Fix encoding damage and normalise delimiters to " - "
+  cleaned AS (
+    SELECT
+      im.IpdbId,
+      -- Replace mojibake (U+FFFD) separator with dash, then comma with dash
+      replace(
+        replace(im.Theme, ' ' || chr(65533) || ' ', ' - '),
+        ', ', ' - '
+      ) AS theme_clean
+    FROM ipdb_machines im
+    WHERE im.Theme IS NOT NULL AND im.Theme <> ''
+  ),
+  -- 2. Split on " - " into individual tokens
+  dash_split AS (
+    SELECT c.IpdbId, trim(t.token) AS token
+    FROM cleaned c,
+    LATERAL unnest(string_split(c.theme_clean, ' - ')) AS t(token)
+    WHERE trim(t.token) <> ''
+  ),
+  -- 3. Expand slash-delimited pairs into separate terms.
+  --    E.g. "Cards/Gambling" → "Cards", "Gambling"
+  --    Also handles "Circus / Carnival" (with spaces around slash).
+  slash_split AS (
+    SELECT d.IpdbId, trim(s.part) AS token
+    FROM dash_split d,
+    LATERAL unnest(string_split(d.token, '/')) AS s(part)
+    WHERE trim(s.part) <> ''
+  ),
+  -- 4. Strip surrounding quotes (e.g. '"21 or Bust"' → '21 or Bust')
+  unquoted AS (
+    SELECT IpdbId, trim(token, '"') AS token
+    FROM slash_split
+    WHERE trim(token, '"') <> ''
+  ),
+  -- 5. Title-case each token
+  title_cased AS (
+    SELECT DISTINCT
+      IpdbId,
+      list_aggregate(
+        list_transform(
+          string_split(lower(token), ' '),
+          w -> upper(w[1]) || w[2:]
+        ),
+        'string_agg', ' '
+      ) AS theme
+    FROM unquoted
+  )
+-- 6. Apply alias table to merge duplicates into canonical forms
+SELECT DISTINCT
+  tc.IpdbId,
+  COALESCE(a.canonical_theme, tc.theme) AS theme
+FROM title_cased tc
+LEFT JOIN ref_ipdb_theme_aliases a ON a.raw_theme = tc.theme;
+
 -- Distinct corporate entities parsed from IPDB manufacturer strings.
 -- Splits the structured string into company name, trade name, years, location,
 -- and HQ city/state/country (with US state detection and override handling).
