@@ -287,14 +287,25 @@ Machine counts from IPDB in parentheses.
 - **Weather** (5) — absorbs Cyclones (1), Volcanoes (3), Earthquake (1)
 - **Disasters** (4) — absorbs Apocalyptic (1), The Great Depression (1)
 
+## Media
+
+- **Media** — _parent_
+  - Television Show (26) — absorbs Television (3), Television Game Show (2)
+  - Movies (10) — absorbs Action Movie (1), Sci-fi Movie (1), Drive-In Movies (1)
+  - Movie Making (3) — absorbs Hollywood (1), Movie Stars (2), Hollywood Actresses (1), Hollywood Glamour (1)
+  - Comics (23)
+  - Cartoon (17) — absorbs Animated (1), Disney (1)
+
+## People
+
+- **Celebrity** (55) — real famous people; drop from fictional characters (franchise covers those)
+
 ## Miscellaneous standalone themes
 
 These don't fit neatly into a parent and aren't big enough to warrant one:
 
 - Adventure (88) — more of a genre/tone than a subject
 - Treasure (2)
-- Comics (23) — distinct from comic-book-as-IP-source
-- Cartoon (17) — distinct from cartoon-as-IP-source
 - Pop Culture (3)
 - Drinking (4)
 - Science (3)
@@ -320,13 +331,8 @@ These don't fit neatly into a parent and aren't big enough to warrant one:
 
 These describe metadata about the machine, not what it's about:
 
-### IP Source (separate field)
-- ~~Licensed Theme~~ (265) / ~~Licensed~~ (23)
-- ~~Television Show~~ (26) / ~~Television~~ (3) / ~~Television Game Show~~ (2)
-- ~~Movies~~ (10) / ~~Action Movie~~ (1) / ~~Sci-fi Movie~~ (1) / ~~Drive-in Movies~~ (1)
-- ~~Disney~~ (1)
-- ~~Animated~~ (1)
-- ~~Movie Making~~ (3) / ~~Movie Stars~~ (2) / ~~Hollywood~~ (1) / ~~Hollywood Actresses~~ (1) / ~~Hollywood Glamour~~ (1)
+### Franchise covers this (drop as theme)
+- ~~Licensed Theme~~ (265) / ~~Licensed~~ (23) — use franchise_slug instead; see `missing_franchises_ipdb` gap view
 
 ### Not descriptive / filler tags (drop)
 - ~~Happiness~~ (232) — everything is happy; adds no info
@@ -334,7 +340,6 @@ These describe metadata about the machine, not what it's about:
 - ~~Fun~~ (1) — too vague
 - ~~Relaxation~~ (5) / ~~Leisure~~ (2) / ~~Leisure Activities~~ (1)
 - ~~Fictional~~ (49) / ~~Fictional Characters~~ (34) / ~~Fiction~~ (1)
-- ~~Celebrity~~ (55)
 - ~~People~~ (11)
 - ~~Activities~~ (1) / ~~Competition~~ (1) / ~~Athletics~~ (1)
 - ~~Games~~ (24) — too vague; specific games are covered
