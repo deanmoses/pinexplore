@@ -303,3 +303,15 @@ SELECT * FROM (VALUES
   ('Conversion kit',  'conversion-kit'),
   ('Export edition',  'export')
 ) AS t(feature, tag_slug);
+
+------------------------------------------------------------
+-- Licensed theme overrides
+------------------------------------------------------------
+
+-- Titles that sources tag as "Licensed Theme" but are not actually licensed.
+-- Investigated and rejected during franchise gap analysis.
+CREATE OR REPLACE VIEW ref_not_licensed AS
+SELECT * FROM (VALUES
+  ('foxy-lady', 'Unlicensed rebrand of Game Plan Black Velvet leftover inventory'),
+  ('king',      'Unlicensed Elvis Presley likeness on 40-unit Italian conversion kit by Bell Coin Matics')
+) AS t(title_slug, reason);

@@ -244,4 +244,5 @@ JOIN titles AS t ON t.slug = m.title_slug
 JOIN ipdb_machines AS im ON im.IpdbId = it.IpdbId
 WHERE it.theme IN ('Licensed Theme', 'Licensed')
   AND (t.franchise_slug IS NULL OR t.franchise_slug = '')
+  AND t.slug NOT IN (SELECT title_slug FROM ref_not_licensed)
 ORDER BY t.name, m.name;
