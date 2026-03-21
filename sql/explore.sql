@@ -8,3 +8,4 @@
 .read 'sql/05_compare.sql'
 .read 'sql/06_gaps.sql'
 .read 'sql/07_quality.sql'
+.read 'sql/08_popularity.sql'
