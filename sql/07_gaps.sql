@@ -1,5 +1,4 @@
--- 06_gaps.sql — What's missing? Gap analysis and fandom cross-reference.
--- Depends on: 02_raw.sql, 03_staging.sql
+--  What's missing from our own data sources? Gap analysis and cross-reference.
 
 ------------------------------------------------------------
 -- Missing: IPDB machines not yet in Pinbase

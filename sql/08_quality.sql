@@ -1,5 +1,4 @@
--- 07_quality.sql — What needs cleanup? Slug quality, themes, files, backfills.
--- Depends on: 01_reference.sql, 02_raw.sql, 03_staging.sql
+-- What needs cleanup? Slug quality, themes, files, backfills.
 
 ------------------------------------------------------------
 -- Slug quality: name faithfulness

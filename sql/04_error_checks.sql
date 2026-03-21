@@ -1,11 +1,8 @@
--- 04_checks.sql — Integrity checks on pinbase data.
--- Depends on: 02_raw.sql, 03_staging.sql
--- Aborts with non-zero exit code if any hard violations are found.
+-- Hard integrity checks on pinbase data.
+-- Aborts on violations.
 
 DROP TABLE IF EXISTS _violations;
-DROP TABLE IF EXISTS _warnings;
 CREATE TEMP TABLE _violations (category VARCHAR, check_name VARCHAR, detail VARCHAR);
-CREATE TEMP TABLE _warnings (check_name VARCHAR, cnt BIGINT);
 
 ------------------------------------------------------------
 -- Slug uniqueness and format
@@ -89,14 +86,8 @@ FROM (
 
 -- Ambiguous alias: one alias string maps to multiple canonical themes.
 -- These are compound terms (e.g. "safari-adventure" → Adventure, Safari)
--- that intentionally resolve to multiple themes. Tracked as a warning.
-INSERT INTO _warnings
-SELECT 'ambiguous_theme_alias', count(*)
-FROM (
-  SELECT raw_theme
-  FROM theme_aliases
-  GROUP BY raw_theme HAVING count(DISTINCT canonical_theme) > 1
-);
+-- that intentionally resolve to multiple themes. Tracked as a warning
+-- in 05_warning_checks.sql rather than a hard violation.
 
 -- Orphan model theme_slugs: model references a theme that doesn't exist
 INSERT INTO _violations
@@ -499,73 +490,8 @@ WHERE om.is_machine = true AND om.physical_machine = 1
   AND NOT EXISTS (SELECT 1 FROM models AS m WHERE m.opdb_id = om.opdb_id);
 
 ------------------------------------------------------------
--- Soft warnings (data quality, not regressions)
-------------------------------------------------------------
-
-INSERT INTO _warnings
-SELECT 'pinbase_opdb_id_not_in_dump', count(*)
-FROM models AS m
-WHERE m.opdb_id IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM opdb_machines AS o WHERE o.opdb_id = m.opdb_id);
-
-INSERT INTO _warnings
-SELECT 'pinbase_ipdb_id_not_in_dump', count(*)
-FROM models AS m
-WHERE m.ipdb_id IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM ipdb_machines AS i WHERE i.IpdbId = m.ipdb_id);
-
-INSERT INTO _warnings
-SELECT 'models_missing_corporate_entity', count(*)
-FROM models m
-WHERE m.corporate_entity_slug IS NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM ipdb_machines i
-    WHERE m.ipdb_id = i.IpdbId
-      AND i.ManufacturerId IS NOT NULL AND i.ManufacturerId != 0 AND i.ManufacturerId != 328
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM opdb_machines om
-    WHERE m.opdb_id = om.opdb_id
-      AND om.manufacturer.name IS NOT NULL
-  );
-
-INSERT INTO _warnings
-SELECT 'titles_missing_opdb_group', count(*)
-FROM titles WHERE opdb_group_id IS NULL;
-
-INSERT INTO _warnings
-SELECT 'conversion_without_source', count(*)
-FROM models WHERE is_conversion AND converted_from IS NULL;
-
-INSERT INTO _warnings
-SELECT 'themes_without_machines', count(*)
-FROM themes th
-WHERE th.slug NOT IN (
-    SELECT unnest(m.theme_slugs) FROM models m WHERE m.theme_slugs IS NOT NULL
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM ipdb_themes it WHERE it.theme = th.name
-  );
-
-INSERT INTO _warnings
-SELECT 'theme_max_parent_depth', max(depth)
-FROM (
-  WITH RECURSIVE walk AS (
-    SELECT theme, parent, 1 AS depth FROM theme_parents
-    UNION ALL
-    SELECT w.theme, p.parent, w.depth + 1
-    FROM walk w JOIN theme_parents p ON p.theme = w.parent
-    WHERE w.depth < 20
-  )
-  SELECT max(depth) AS depth FROM walk GROUP BY theme
-);
-
-------------------------------------------------------------
 -- Results
 ------------------------------------------------------------
-
-SELECT 'WARNING: ' || check_name || ' (' || cnt || ' rows)'
-FROM _warnings WHERE cnt > 0;
 
 -- Per-category violation summary
 SELECT category, count(*) AS violations

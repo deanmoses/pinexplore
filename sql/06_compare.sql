@@ -1,5 +1,4 @@
--- 05_compare.sql — Cross-source comparison: do sources agree?
--- Depends on: 02_raw.sql, 03_staging.sql
+-- Cross-source comparison: do sources agree?
 
 ------------------------------------------------------------
 -- Models vs OPDB (by opdb_id)
@@ -231,3 +230,47 @@ FROM opdb_machines AS o, unnest(o.features) AS t(f)
 INNER JOIN ref_feature_reward_type AS rfrt ON lower(f) = rfrt.feature
 INNER JOIN models AS m ON o.opdb_id = m.opdb_id
 LEFT JOIN reward_types AS rt ON rfrt.reward_type_slug = rt.slug;
+
+------------------------------------------------------------
+-- Gameplay features: IPDB vs pinbase
+------------------------------------------------------------
+
+-- Distinct IPDB gameplay feature names that do not map to any pinbase
+-- gameplay_feature (via name or alias). Each row is a feature term
+-- extracted from NotableFeatures that pinbase has no vocabulary entry
+-- for.
+CREATE OR REPLACE VIEW compare_gameplay_features_ipdb AS
+SELECT
+  ipdb_feature,
+  count(DISTINCT IpdbId) AS machine_count
+FROM ipdb_gameplay_features
+WHERE gameplay_feature_slug IS NULL
+GROUP BY ipdb_feature
+ORDER BY machine_count DESC;
+
+------------------------------------------------------------
+-- Reward types: IPDB vs pinbase
+------------------------------------------------------------
+
+-- Distinct IPDB reward type terms that do not map to any pinbase
+-- reward_type (via name or alias). Currently expected to be empty
+-- since all six reward types are defined.
+CREATE OR REPLACE VIEW compare_reward_types_ipdb AS
+SELECT
+  ipdb_feature,
+  count(DISTINCT IpdbId) AS machine_count
+FROM ipdb_reward_types
+WHERE reward_type_slug IS NULL
+GROUP BY ipdb_feature
+ORDER BY machine_count DESC;
+
+------------------------------------------------------------
+-- Warnings from compare views
+------------------------------------------------------------
+
+INSERT INTO _warnings SELECT 'compare_cabinets_opdb',           count(*) FROM compare_cabinets_opdb;
+INSERT INTO _warnings SELECT 'compare_conversions_opdb',        count(*) FROM compare_conversions_opdb;
+INSERT INTO _warnings SELECT 'compare_gameplay_features_opdb',  count(*) FROM compare_gameplay_features_opdb;
+INSERT INTO _warnings SELECT 'compare_reward_types_opdb',       count(*) FROM compare_reward_types_opdb;
+INSERT INTO _warnings SELECT 'compare_gameplay_features_ipdb',  count(*) FROM compare_gameplay_features_ipdb;
+INSERT INTO _warnings SELECT 'compare_reward_types_ipdb',       count(*) FROM compare_reward_types_ipdb;

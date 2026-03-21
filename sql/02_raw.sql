@@ -1,7 +1,6 @@
--- 02_raw.sql — Raw tables from all JSON data files.
+-- Raw tables generated from all JSON source data files.
 -- No transforms, no joins. Just flatten top-level wrappers where needed.
 -- Tables (not views) so JSON is parsed once at build time.
--- Depends on: nothing
 --
 -- Requires: SET VARIABLE ingest_base = '<path-or-url>';
 -- Local default is set by rebuild_explore.sh.

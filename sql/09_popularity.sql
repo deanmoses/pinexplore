@@ -1,5 +1,7 @@
--- 08_popularity.sql — Title popularity: composite scoring across multiple signals.
--- Depends on: 01_reference.sql, 02_raw.sql, 03_staging.sql, 05_compare.sql
+-- Title popularity: composite scoring across multiple signals.
+--
+-- These are pure analytics views that may eventually be split out  
+-- into a separate analytics database that depends on this database.
 --
 -- Two views:
 --   title_popularity_signals — raw per-title signals for inspection

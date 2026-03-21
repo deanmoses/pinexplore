@@ -1,6 +1,5 @@
--- 01_reference.sql — Hand-maintained reference tables, macros, and exception lists.
+-- Reference tables, macros, and exception lists.
 -- Domain knowledge that doesn't come from any data file.
--- Depends on: nothing
 
 ------------------------------------------------------------
 -- Macros
