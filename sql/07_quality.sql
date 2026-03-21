@@ -254,7 +254,7 @@ ORDER BY rollup_count DESC, th.name;
 -- Proposed backfill: corporate_entity_slug on models
 ------------------------------------------------------------
 
-CREATE OR REPLACE VIEW proposed_ce_backfill AS
+CREATE OR REPLACE VIEW missing_corporate_entities_on_models AS
 WITH target_models AS (
   SELECT DISTINCT m.slug, m.name, m.ipdb_id, m.opdb_id, m.variant_of
   FROM models m
@@ -327,3 +327,22 @@ LEFT JOIN ipdb_ce ON t.slug = ipdb_ce.model_slug
 LEFT JOIN parent_ce ON t.slug = parent_ce.model_slug
 LEFT JOIN opdb_id_ce ON t.slug = opdb_id_ce.model_slug
 LEFT JOIN opdb_name_ce ON t.slug = opdb_name_ce.model_slug;
+
+------------------------------------------------------------
+-- Missing: model theme assignments
+------------------------------------------------------------
+
+-- Models with IPDB themes that resolve to pinbase vocabulary but have no
+-- theme_slugs assigned yet.
+CREATE OR REPLACE VIEW missing_themes_on_models AS
+SELECT
+  m.slug AS model_slug,
+  m.name AS model_name,
+  list(DISTINCT it.theme ORDER BY it.theme) AS ipdb_themes,
+  list(DISTINCT th.slug ORDER BY th.slug) AS proposed_theme_slugs
+FROM models m
+JOIN ipdb_themes it ON m.ipdb_id = it.IpdbId
+JOIN themes th ON it.theme = th.name
+WHERE (m.theme_slugs IS NULL OR len(m.theme_slugs) = 0)
+  AND it.theme NOT IN (SELECT theme FROM ref_themes_dropped)
+GROUP BY m.slug, m.name;

@@ -32,6 +32,10 @@ SELECT 'slugs', 'duplicate_person_slug', slug
 FROM people GROUP BY slug HAVING count(*) > 1;
 
 INSERT INTO _violations
+SELECT 'slugs', 'duplicate_theme_slug', slug
+FROM themes GROUP BY slug HAVING count(*) > 1;
+
+INSERT INTO _violations
 SELECT 'slugs', 'invalid_slug_model', slug FROM models WHERE slug != regexp_replace(slug, '[^a-z0-9-]', '', 'g') OR slug = '';
 INSERT INTO _violations
 SELECT 'slugs', 'invalid_slug_title', slug FROM titles WHERE slug != regexp_replace(slug, '[^a-z0-9-]', '', 'g') OR slug = '';
@@ -41,6 +45,8 @@ INSERT INTO _violations
 SELECT 'slugs', 'invalid_slug_ce', slug FROM corporate_entities WHERE slug != regexp_replace(slug, '[^a-z0-9-]', '', 'g') OR slug = '';
 INSERT INTO _violations
 SELECT 'slugs', 'invalid_slug_person', slug FROM people WHERE slug != regexp_replace(slug, '[^a-z0-9-]', '', 'g') OR slug = '';
+INSERT INTO _violations
+SELECT 'slugs', 'invalid_slug_theme', slug FROM themes WHERE slug != regexp_replace(slug, '[^a-z0-9-]', '', 'g') OR slug = '';
 
 -- Slugs ending in a number (likely a dedup failure, e.g. linda-deal-2)
 INSERT INTO _violations
@@ -81,6 +87,24 @@ FROM (
     AND theme NOT IN (SELECT theme FROM ref_themes_dropped)
 );
 
+-- Ambiguous alias: one alias string maps to multiple canonical themes.
+-- These are compound terms (e.g. "safari-adventure" → Adventure, Safari)
+-- that intentionally resolve to multiple themes. Tracked as a warning.
+INSERT INTO _warnings
+SELECT 'ambiguous_theme_alias', count(*)
+FROM (
+  SELECT raw_theme
+  FROM theme_aliases
+  GROUP BY raw_theme HAVING count(DISTINCT canonical_theme) > 1
+);
+
+-- Orphan model theme_slugs: model references a theme that doesn't exist
+INSERT INTO _violations
+SELECT 'themes', 'orphan_model_theme', m.slug || ' → ' || ts
+FROM models m, unnest(m.theme_slugs) AS t(ts)
+WHERE m.theme_slugs IS NOT NULL
+  AND ts NOT IN (SELECT slug FROM themes);
+
 -- Broken parent: a theme's parent doesn't exist as a canonical theme
 INSERT INTO _violations
 SELECT 'themes', 'broken_parent', theme || ' → ' || parent
@@ -102,6 +126,27 @@ FROM (
   )
   SELECT DISTINCT theme FROM walk WHERE parent = theme
 );
+
+-- Alias shadows a different canonical theme name
+INSERT INTO _violations
+SELECT 'themes', 'theme_alias_shadows_name',
+  ta.raw_theme || ' (alias of ' || ta.canonical_theme || ') shadows theme ' || th.slug
+FROM theme_aliases ta
+JOIN themes th ON ta.raw_theme = th.name
+WHERE th.name != ta.canonical_theme;
+
+-- ref_not_licensed references a title slug that doesn't exist
+INSERT INTO _violations
+SELECT 'themes', 'ref_not_licensed_orphan', title_slug
+FROM ref_not_licensed
+WHERE title_slug NOT IN (SELECT slug FROM titles);
+
+-- ref_themes_dropped entry not found in any source (stale drop rule)
+INSERT INTO _violations
+SELECT 'themes', 'ref_themes_dropped_unused', theme
+FROM ref_themes_dropped
+WHERE theme NOT IN (SELECT theme FROM ipdb_themes)
+  AND theme NOT IN (SELECT unnest(keywords) FROM opdb_machines WHERE len(keywords) > 0);
 
 ------------------------------------------------------------
 -- External ID uniqueness and agreement
@@ -491,6 +536,29 @@ FROM titles WHERE opdb_group_id IS NULL;
 INSERT INTO _warnings
 SELECT 'conversion_without_source', count(*)
 FROM models WHERE is_conversion AND converted_from IS NULL;
+
+INSERT INTO _warnings
+SELECT 'themes_without_machines', count(*)
+FROM themes th
+WHERE th.slug NOT IN (
+    SELECT unnest(m.theme_slugs) FROM models m WHERE m.theme_slugs IS NOT NULL
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM ipdb_themes it WHERE it.theme = th.name
+  );
+
+INSERT INTO _warnings
+SELECT 'theme_max_parent_depth', max(depth)
+FROM (
+  WITH RECURSIVE walk AS (
+    SELECT theme, parent, 1 AS depth FROM theme_parents
+    UNION ALL
+    SELECT w.theme, p.parent, w.depth + 1
+    FROM walk w JOIN theme_parents p ON p.theme = w.parent
+    WHERE w.depth < 20
+  )
+  SELECT max(depth) AS depth FROM walk GROUP BY theme
+);
 
 ------------------------------------------------------------
 -- Results
