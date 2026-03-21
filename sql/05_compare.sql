@@ -117,3 +117,33 @@ WITH RECURSIVE
   )
 SELECT DISTINCT IpdbId, theme
 FROM rollup;
+
+------------------------------------------------------------
+-- Model theme assignments: pinbase vs IPDB
+------------------------------------------------------------
+
+-- Per-model comparison of direct theme assignments. Shows themes that are
+-- in pinbase only, IPDB only, or both. Compares direct assignments only,
+-- not rolled-up parents (ipdb_themes_resolved handles rollup separately).
+CREATE OR REPLACE VIEW compare_model_themes_ipdb AS
+WITH
+  pinbase_themes AS (
+    SELECT DISTINCT m.slug AS model_slug, unnest(m.theme_slugs) AS theme_slug
+    FROM models m
+    WHERE m.theme_slugs IS NOT NULL AND len(m.theme_slugs) > 0
+  ),
+  ipdb_model_themes AS (
+    SELECT DISTINCT m.slug AS model_slug, th.slug AS theme_slug
+    FROM models m
+    JOIN ipdb_themes it ON m.ipdb_id = it.IpdbId
+    JOIN themes th ON it.theme = th.name
+    WHERE it.theme IN (SELECT name FROM themes)
+  )
+SELECT
+  COALESCE(p.model_slug, i.model_slug) AS model_slug,
+  COALESCE(p.theme_slug, i.theme_slug) AS theme_slug,
+  (p.theme_slug IS NOT NULL) AS in_pinbase,
+  (i.theme_slug IS NOT NULL) AS in_ipdb
+FROM pinbase_themes p
+FULL OUTER JOIN ipdb_model_themes i
+  ON p.model_slug = i.model_slug AND p.theme_slug = i.theme_slug;
