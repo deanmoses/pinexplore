@@ -221,74 +221,45 @@ SELECT * FROM (VALUES
 ) AS t(opdb_manufacturer_id, manufacturer_slug, reason);
 
 ------------------------------------------------------------
--- IPDB theme normalisation aliases
+-- Rejected IPDB themes
 ------------------------------------------------------------
 
--- Maps raw IPDB theme tokens (after delimiter splitting) to a canonical form.
--- Categories: typos, singular/plural, spacing, abbreviations, split artifacts.
--- Canonical form favours the higher-count variant from IPDB data.
-CREATE OR REPLACE VIEW ref_ipdb_theme_aliases AS
+-- Theme terms from any source that are not real themes
+-- (metadata, filler, audience tags, gameplay/physical attributes).
+CREATE OR REPLACE VIEW ref_themes_dropped AS
 SELECT * FROM (VALUES
-  -- Typos / misspellings
-  ('Basebal',            'Baseball'),
-  ('Dacing',             'Dancing'),
-  ('Water Skiiing',      'Water Skiing'),
-  ('Medievel Knights',   'Medieval Knights'),
-
-  -- Singular ↔ plural (keep the more common form)
-  ('Airplane',           'Airplanes'),
-  ('Cartoons',           'Cartoon'),
-  ('Comic',              'Comics'),
-  ('Disaster',           'Disasters'),
-  ('Fictional Character','Fictional Characters'),
-  ('Foreign People',     'Foreign Peoples'),
-  ('Marine',             'Marines'),
-  ('Movie',              'Movies'),
-  ('Railroad',           'Railroads'),  -- tied; prefer plural for consistency
-  ('Riverboat',          'Riverboats'),
-  ('Sport',              'Sports'),
-  ('Theaters',           'Theater'),
-  ('Vampire',            'Vampires'),
-  ('Wizards',            'Wizard'),
-  ('Superhero',          'Superheroes'),
-  ('Beaches',            'Beach'),
-
-  -- Spacing / hyphenation variants
-  ('Sky Diving',         'Skydiving'),
-  ('Shuffle Board',      'Shuffleboard'),
-  ('Rollercoasters',     'Roller Coasters'),
-  ('Rollerskating',      'Roller Skating'),
-
-  -- Abbreviations
-  ('Tv',                 'Television'),
-  ('Tv Show',            'Television Show'),
-  ('Tv Game Show',       'Television Game Show'),
-  ('Ufo',               'UFO'),
-  ('Ufo''s',            'UFO'),
-  ('Wwi',                'World War I'),
-  ('World War Ii',       'World War II'),
-
-  -- Split artifacts (bad delimiter handling in source data)
-  ('And Space Exploration', 'Space Exploration'),
-  ('Theme: Sports',         'Sports'),
-  ('Naval- Navy',           'Naval'),
-  ('Water- Women',          'Women'),
-  ('Scooters- Transportation', 'Transportation'),
-
-  -- Obvious synonyms
-  ('Cops & Robbers',     'Cops And Robbers'),
-  ('Car Rallies',        'Car Rally'),
-  ('Night Life',         'Nightlife'),
-  ('Golfing',            'Golf'),
-  ('Traveling',          'Travel'),
-  ('Trucking',           'Truck Driving'),
-  ('Hunting-shooting',   'Hunting'),
-  ('Skateboard',         'Skateboarding'),
-  ('Festivity',          'Festivities'),
-  ('Cops',               'Police'),
-  ('Celebrities',        'Celebrity'),
-  ('Patriotic',          'Patriotism')
-) AS t(raw_theme, canonical_theme);
+  ('Activities'),
+  ('Children''s Games'),
+  ('Commemorative'),
+  ('Competition'),
+  ('Family'),
+  ('Fiction'),
+  ('Fictional'),
+  ('Fictional Character'),
+  ('Fictional Characters'),
+  ('Fun'),
+  ('Guns'),
+  ('Happiness'),
+  ('Industry Inside Jokes'),
+  ('Juvenilia'),
+  ('Land'),
+  ('Licensed'),
+  ('Licensed Theme'),
+  ('Payout'),
+  ('People'),
+  ('Recreation'),
+  ('Weather'),
+  -- OPDB keywords that are gameplay/physical attributes, not themes
+  ('Widebody'),
+  ('action-button'),
+  ('staged-flippers'),
+  ('street-level'),
+  -- OPDB keywords that are tokenized machine names, not themes
+  ('ball'),
+  ('eight'),
+  ('geriatric'),
+  ('brock')
+) AS t(theme);
 
 ------------------------------------------------------------
 -- Quality/tag cross-reference mappings

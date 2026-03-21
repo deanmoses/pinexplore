@@ -68,6 +68,42 @@ INSERT INTO _violations
 SELECT 'slugs', 'empty_name_theme', slug FROM themes WHERE name IS NULL OR trim(name) = '';
 
 ------------------------------------------------------------
+-- Theme vocabulary integrity
+------------------------------------------------------------
+
+-- Orphan: IPDB theme that is not a canonical theme, not an alias, and not dropped
+INSERT INTO _violations
+SELECT 'themes', 'orphan_ipdb_theme', theme
+FROM (
+  SELECT DISTINCT theme FROM ipdb_themes
+  WHERE theme NOT IN (SELECT name FROM themes)
+    AND theme NOT IN (SELECT raw_theme FROM theme_aliases)
+    AND theme NOT IN (SELECT theme FROM ref_themes_dropped)
+);
+
+-- Broken parent: a theme's parent doesn't exist as a canonical theme
+INSERT INTO _violations
+SELECT 'themes', 'broken_parent', theme || ' → ' || parent
+FROM theme_parents
+WHERE parent NOT IN (SELECT name FROM themes);
+
+-- Cycle detection: any theme that is its own ancestor via the parent graph
+INSERT INTO _violations
+SELECT 'themes', 'parent_cycle', theme
+FROM (
+  WITH RECURSIVE walk AS (
+    SELECT theme, parent, 1 AS depth
+    FROM theme_parents
+    UNION ALL
+    SELECT w.theme, p.parent, w.depth + 1
+    FROM walk w
+    JOIN theme_parents p ON p.theme = w.parent
+    WHERE w.depth < 20
+  )
+  SELECT DISTINCT theme FROM walk WHERE parent = theme
+);
+
+------------------------------------------------------------
 -- External ID uniqueness and agreement
 ------------------------------------------------------------
 

@@ -60,8 +60,13 @@ SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_
 CREATE OR REPLACE TABLE technology_subgenerations AS
 SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_subgeneration.json');
 
+-- Explicit columns: DuckDB infers aliases as JSON[] instead of VARCHAR[]
+-- because of an apostrophe in one alias value ("Ufo's").
 CREATE OR REPLACE TABLE themes AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/theme.json');
+SELECT * FROM read_json_auto(
+  getvariable('ingest_base') || '/pinbase/theme.json',
+  columns = {slug: 'VARCHAR', name: 'VARCHAR', aliases: 'VARCHAR[]', parents: 'VARCHAR[]'}
+);
 
 CREATE OR REPLACE TABLE titles AS
 SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/title.json', (union_by_name = CAST('t' AS BOOLEAN)));

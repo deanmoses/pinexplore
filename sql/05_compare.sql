@@ -91,3 +91,29 @@ WHERE ic.person_slug IS NOT NULL
       AND pc.person_slug = ic.person_slug
       AND pc.role = ic.role
   );
+
+------------------------------------------------------------
+-- IPDB themes resolved against pinbase vocabulary
+------------------------------------------------------------
+
+-- Direct IPDB themes plus all implied parents from the pinbase hierarchy.
+CREATE OR REPLACE VIEW ipdb_themes_resolved AS
+WITH RECURSIVE
+  -- Start with direct themes that exist in pinbase vocabulary
+  direct AS (
+    SELECT DISTINCT it.IpdbId, it.theme
+    FROM ipdb_themes it
+    WHERE it.theme IN (SELECT name FROM themes)
+  ),
+  -- Walk up the parent graph
+  rollup AS (
+    SELECT IpdbId, theme, theme AS source, 0 AS depth
+    FROM direct
+    UNION
+    SELECT r.IpdbId, p.parent AS theme, r.theme AS source, r.depth + 1
+    FROM rollup r
+    JOIN theme_parents p ON p.theme = r.theme
+    WHERE r.depth < 20  -- guard against cycles
+  )
+SELECT DISTINCT IpdbId, theme
+FROM rollup;

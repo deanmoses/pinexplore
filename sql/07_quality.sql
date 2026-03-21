@@ -186,22 +186,14 @@ WHERE NOT EXISTS (SELECT 1 FROM ref_feature_tag AS rft WHERE rft.feature = f)
 GROUP BY f
 ORDER BY machine_count DESC;
 
+-- Theme terms from external sources compared against pinbase vocabulary.
+-- Merges normalized IPDB themes and OPDB keywords into a unified view.
 CREATE OR REPLACE VIEW compare_themes AS
 WITH
-  ipdb_themes AS (
-    SELECT DISTINCT Theme AS name
-    FROM ipdb_machines
-    WHERE Theme IS NOT NULL AND Theme <> ''
-  ),
-  opdb_kw AS (
-    SELECT DISTINCT unnest(keywords) AS name
-    FROM opdb_machines
-    WHERE len(keywords) > 0
-  ),
   all_sources AS (
-    (SELECT name, true AS in_ipdb, false AS in_opdb FROM ipdb_themes)
+    (SELECT DISTINCT theme AS name, true AS in_ipdb, false AS in_opdb FROM ipdb_themes)
     UNION ALL
-    (SELECT name, false AS in_ipdb, true AS in_opdb FROM opdb_kw)
+    (SELECT DISTINCT unnest(keywords) AS name, false, true FROM opdb_machines WHERE len(keywords) > 0)
   ),
   merged AS (
     SELECT name, bool_or(in_ipdb) AS in_ipdb, bool_or(in_opdb) AS in_opdb
@@ -209,17 +201,54 @@ WITH
     GROUP BY name
   )
 SELECT
-  m.*,
-  th.slug AS pinbase_slug,
-  (th.slug IS NOT NULL) AS in_pinbase
-FROM merged AS m
-LEFT JOIN themes AS th ON lower(m.name) = lower(th.name);
+  m.name AS theme,
+  m.in_ipdb,
+  m.in_opdb,
+  COALESCE(th1.slug, th2.slug, th3.slug) AS pinbase_slug,
+  (COALESCE(th1.slug, th2.slug, th3.slug) IS NOT NULL) AS in_pinbase,
+  (m.name IN (SELECT theme FROM ref_themes_dropped)
+   OR lower(m.name) IN (SELECT lower(theme) FROM ref_themes_dropped)) AS is_dropped
+FROM merged m
+LEFT JOIN themes th1 ON m.name = th1.name
+LEFT JOIN themes th2 ON m.name = th2.slug
+LEFT JOIN (
+  SELECT DISTINCT
+    regexp_replace(lower(regexp_replace(ta.raw_theme, '[^\w\s-]', '', 'g')), '[\s]+', '-', 'g') AS alias_slug,
+    th.slug
+  FROM theme_aliases ta
+  JOIN themes th ON ta.canonical_theme = th.name
+) th3 ON m.name = th3.alias_slug;
 
+-- Themes from external sources not in pinbase and not dropped.
 CREATE OR REPLACE VIEW missing_themes AS
-SELECT name, in_ipdb, in_opdb
+SELECT theme, in_ipdb, in_opdb
 FROM compare_themes
-WHERE NOT in_pinbase
-ORDER BY name;
+WHERE NOT in_pinbase AND NOT is_dropped
+ORDER BY theme;
+
+-- Theme coverage: each pinbase theme with direct and rollup machine counts.
+CREATE OR REPLACE VIEW theme_coverage AS
+WITH
+  direct_counts AS (
+    SELECT theme, count(DISTINCT IpdbId) AS cnt
+    FROM ipdb_themes
+    WHERE theme IN (SELECT name FROM themes)
+    GROUP BY theme
+  ),
+  rollup_counts AS (
+    SELECT theme, count(DISTINCT IpdbId) AS cnt
+    FROM ipdb_themes_resolved
+    GROUP BY theme
+  )
+SELECT
+  th.name,
+  th.slug,
+  COALESCE(d.cnt, 0) AS direct_count,
+  COALESCE(r.cnt, 0) AS rollup_count
+FROM themes th
+LEFT JOIN direct_counts d ON d.theme = th.name
+LEFT JOIN rollup_counts r ON r.theme = th.name
+ORDER BY rollup_count DESC, th.name;
 
 ------------------------------------------------------------
 -- Proposed backfill: corporate_entity_slug on models

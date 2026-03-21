@@ -82,6 +82,22 @@ LEFT JOIN systems AS ps
   ON list_contains(ps.mpu_strings, im.MPU)
 WHERE im.ManufacturerId NOT IN (0, 328);
 
+------------------------------------------------------------
+-- Theme views (derived from pinbase themes table)
+------------------------------------------------------------
+
+-- Alias → canonical name mapping (one row per alias→theme).
+CREATE OR REPLACE VIEW theme_aliases AS
+SELECT unnest(t.aliases) AS raw_theme, t.name AS canonical_theme
+FROM themes t
+WHERE t.aliases IS NOT NULL;
+
+-- Parent relationships (one row per child→parent edge).
+CREATE OR REPLACE VIEW theme_parents AS
+SELECT t.name AS theme, unnest(t.parents) AS parent
+FROM themes t
+WHERE t.parents IS NOT NULL;
+
 -- Distinct IPDB themes: split compound Theme strings into individual terms.
 -- IPDB stores themes as "Adventure - Fantasy - Outer Space", sometimes with
 -- slash pairs ("Cards/Gambling"), commas, and mojibake (U+FFFD for dashes).
@@ -123,7 +139,13 @@ WITH
     FROM slash_split
     WHERE trim(token, '"') <> ''
   ),
-  -- 5. Title-case each token
+  -- 5. Strip "Theme: " prefix (IPDB split artifact)
+  prefix_cleaned AS (
+    SELECT IpdbId,
+      CASE WHEN token LIKE 'Theme: %' THEN trim(token[8:]) ELSE token END AS token
+    FROM unquoted
+  ),
+  -- 6. Title-case each token
   title_cased AS (
     SELECT DISTINCT
       IpdbId,
@@ -134,14 +156,14 @@ WITH
         ),
         'string_agg', ' '
       ) AS theme
-    FROM unquoted
+    FROM prefix_cleaned
   )
--- 6. Apply alias table to merge duplicates into canonical forms
+-- 7. Apply alias table to merge duplicates into canonical forms
 SELECT DISTINCT
   tc.IpdbId,
   COALESCE(a.canonical_theme, tc.theme) AS theme
 FROM title_cased tc
-LEFT JOIN ref_ipdb_theme_aliases a ON a.raw_theme = tc.theme;
+LEFT JOIN theme_aliases a ON a.raw_theme = tc.theme;
 
 -- Distinct corporate entities parsed from IPDB manufacturer strings.
 -- Splits the structured string into company name, trade name, years, location,
