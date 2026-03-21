@@ -173,7 +173,7 @@ SELECT
   tg.name AS tag_name,
   rft.feature AS opdb_feature
 FROM opdb_machines AS om, unnest(om.features) AS t(f)
-INNER JOIN ref_feature_tag AS rft ON f = rft.feature
+INNER JOIN ref_feature_tag AS rft ON lower(f) = rft.feature
 INNER JOIN models AS m ON om.opdb_id = m.opdb_id
 LEFT JOIN tags AS tg ON rft.tag_slug = tg.slug;
 
@@ -182,7 +182,11 @@ SELECT
   f AS opdb_feature,
   count(DISTINCT om.opdb_id) AS machine_count
 FROM opdb_machines AS om, unnest(om.features) AS t(f)
-WHERE NOT EXISTS (SELECT 1 FROM ref_feature_tag AS rft WHERE rft.feature = f)
+WHERE NOT EXISTS (SELECT 1 FROM ref_feature_tag AS rft WHERE rft.feature = lower(f))
+  AND NOT EXISTS (SELECT 1 FROM ref_feature_gameplay AS rfg WHERE rfg.feature = lower(f))
+  AND NOT EXISTS (SELECT 1 FROM ref_feature_reward_type AS rfrt WHERE rfrt.feature = lower(f))
+  AND NOT EXISTS (SELECT 1 FROM ref_feature_cabinet AS rfc WHERE rfc.feature = lower(f))
+  AND NOT EXISTS (SELECT 1 FROM ref_feature_other AS rfo WHERE rfo.feature = lower(f))
 GROUP BY f
 ORDER BY machine_count DESC;
 

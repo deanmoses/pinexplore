@@ -147,3 +147,87 @@ SELECT
 FROM pinbase_themes p
 FULL OUTER JOIN ipdb_model_themes i
   ON p.model_slug = i.model_slug AND p.theme_slug = i.theme_slug;
+
+------------------------------------------------------------
+-- Cabinet type: pinbase vs OPDB
+------------------------------------------------------------
+
+-- Models where OPDB assigns a cabinet type via its features array but
+-- pinbase disagrees, or vice versa. Uses aliases from the cabinets
+-- entity to match OPDB feature strings to pinbase cabinet slugs.
+CREATE OR REPLACE VIEW compare_cabinets_opdb AS
+SELECT
+  m.slug AS model_slug,
+  m.cabinet_slug AS pinbase_cabinet,
+  m.opdb_id,
+  rfc.cabinet_slug AS opdb_cabinet
+FROM models AS m
+INNER JOIN opdb_machines AS o ON m.opdb_id = o.opdb_id
+INNER JOIN (
+  SELECT om2.opdb_id, rfc2.cabinet_slug
+  FROM opdb_machines AS om2, unnest(om2.features) AS t(f)
+  INNER JOIN ref_feature_cabinet AS rfc2 ON lower(f) = rfc2.feature
+) AS rfc ON o.opdb_id = rfc.opdb_id
+WHERE COALESCE(m.cabinet_slug, '') != rfc.cabinet_slug;
+
+------------------------------------------------------------
+-- Conversion status: pinbase vs OPDB
+------------------------------------------------------------
+
+-- Models where OPDB marks as 'Conversion kit' or 'Converted game' but
+-- pinbase does not have is_conversion=true, or vice versa.
+CREATE OR REPLACE VIEW compare_conversions_opdb AS
+SELECT
+  m.slug AS model_slug,
+  m.is_conversion AS pinbase_is_conversion,
+  m.converted_from AS pinbase_converted_from,
+  m.opdb_id,
+  list_contains(o.features, 'Conversion kit') AS opdb_conversion_kit,
+  list_contains(o.features, 'Converted game') AS opdb_converted_game,
+  (list_contains(o.features, 'Conversion kit')
+    OR list_contains(o.features, 'Converted game')) AS opdb_is_conversion
+FROM models AS m
+INNER JOIN opdb_machines AS o ON m.opdb_id = o.opdb_id
+WHERE COALESCE(m.is_conversion, false)
+   IS DISTINCT FROM (list_contains(o.features, 'Conversion kit')
+                      OR list_contains(o.features, 'Converted game'));
+
+------------------------------------------------------------
+-- Gameplay features: OPDB vs pinbase
+------------------------------------------------------------
+
+-- Models where OPDB assigns a gameplay feature but pinbase does not,
+-- or vice versa. Currently one-directional because models do not yet
+-- have a gameplay_feature_slugs field; rows here represent OPDB claims
+-- that pinbase should eventually match.
+CREATE OR REPLACE VIEW compare_gameplay_features_opdb AS
+SELECT
+  m.slug AS model_slug,
+  m.opdb_id,
+  rfg.gameplay_feature_slug,
+  gf.name AS gameplay_feature_name,
+  rfg.feature AS opdb_feature
+FROM opdb_machines AS o, unnest(o.features) AS t(f)
+INNER JOIN ref_feature_gameplay AS rfg ON lower(f) = rfg.feature
+INNER JOIN models AS m ON o.opdb_id = m.opdb_id
+LEFT JOIN gameplay_features AS gf ON rfg.gameplay_feature_slug = gf.slug;
+
+------------------------------------------------------------
+-- Reward types: OPDB vs pinbase
+------------------------------------------------------------
+
+-- Models where OPDB assigns a reward type but pinbase does not, or
+-- vice versa. Currently one-directional because models do not yet have
+-- a reward_type_slugs field; rows here represent OPDB claims that
+-- pinbase should eventually match.
+CREATE OR REPLACE VIEW compare_reward_types_opdb AS
+SELECT
+  m.slug AS model_slug,
+  m.opdb_id,
+  rfrt.reward_type_slug,
+  rt.name AS reward_type_name,
+  rfrt.feature AS opdb_feature
+FROM opdb_machines AS o, unnest(o.features) AS t(f)
+INNER JOIN ref_feature_reward_type AS rfrt ON lower(f) = rfrt.feature
+INNER JOIN models AS m ON o.opdb_id = m.opdb_id
+LEFT JOIN reward_types AS rt ON rfrt.reward_type_slug = rt.slug;

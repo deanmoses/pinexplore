@@ -265,15 +265,13 @@ SELECT * FROM (VALUES
 -- Quality/tag cross-reference mappings
 ------------------------------------------------------------
 
--- OPDB feature string → pinbase tag slug
-CREATE OR REPLACE VIEW ref_feature_tag AS
+-- OPDB features mapped to model fields rather than entity aliases.
+-- Used by missing_tags_opdb to avoid false positives for features
+-- that are already handled via dedicated model columns.
+CREATE OR REPLACE VIEW ref_feature_other AS
 SELECT * FROM (VALUES
-  ('Home model',      'home-use'),
-  ('Widebody',        'widebody'),
-  ('Remake',          'remake'),
-  ('Conversion kit',  'conversion-kit'),
-  ('Export edition',  'export')
-) AS t(feature, tag_slug);
+  ('converted game',  'is_conversion', 'true')
+) AS t(feature, model_field, field_value);
 
 ------------------------------------------------------------
 -- Licensed theme overrides

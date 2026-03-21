@@ -55,6 +55,37 @@ LEFT JOIN ref_opdb_manufacturer_aliases alias
   ON alias.opdb_manufacturer_id = om.opdb_manufacturer_id
   AND m_exact.slug IS NULL AND m_norm.slug IS NULL;
 
+-- OPDB feature string → pinbase slug mappings.
+-- Matches on name (case-insensitive) or explicit aliases.
+
+CREATE OR REPLACE VIEW ref_feature_tag AS
+SELECT feature, slug AS tag_slug FROM (
+  SELECT lower(name) AS feature, slug FROM tags
+  UNION
+  SELECT lower(unnest(aliases)), slug FROM tags WHERE aliases IS NOT NULL
+);
+
+CREATE OR REPLACE VIEW ref_feature_gameplay AS
+SELECT feature, slug AS gameplay_feature_slug FROM (
+  SELECT lower(name) AS feature, slug FROM gameplay_features
+  UNION
+  SELECT lower(unnest(aliases)), slug FROM gameplay_features WHERE aliases IS NOT NULL
+);
+
+CREATE OR REPLACE VIEW ref_feature_reward_type AS
+SELECT feature, slug AS reward_type_slug FROM (
+  SELECT lower(name) AS feature, slug FROM reward_types
+  UNION
+  SELECT lower(unnest(aliases)), slug FROM reward_types WHERE aliases IS NOT NULL
+);
+
+CREATE OR REPLACE VIEW ref_feature_cabinet AS
+SELECT feature, slug AS cabinet_slug FROM (
+  SELECT lower(name) AS feature, slug FROM cabinets
+  UNION
+  SELECT lower(unnest(aliases)), slug FROM cabinets WHERE aliases IS NOT NULL
+);
+
 -- Unnested keywords per machine
 CREATE OR REPLACE VIEW opdb_keywords AS
 SELECT opdb_id, "name", unnest(keywords) AS keyword

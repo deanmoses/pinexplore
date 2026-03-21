@@ -36,6 +36,9 @@ SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/game_format
 CREATE OR REPLACE TABLE gameplay_features AS
 SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/gameplay_feature.json');
 
+CREATE OR REPLACE TABLE reward_types AS
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/reward_type.json');
+
 CREATE OR REPLACE TABLE manufacturers AS
 SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/manufacturer.json');
 
