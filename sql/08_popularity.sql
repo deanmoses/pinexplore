@@ -7,8 +7,8 @@
 --
 -- Known limitations:
 --   - production_quantity is missing for ~80% of models, including most modern
---     Stern titles. Titles without production data receive 0th percentile on the
---     heaviest-weighted signal, which significantly suppresses their score.
+--     Stern titles. When absent, the production signal is excluded entirely
+--     (omitted from both numerator and denominator) so it neither helps nor hurts.
 --   - IPDB ratings cover ~13% of machines. Unrated titles get 0th percentile.
 --   - Fandom wiki covers ~380 titles. Absence ≠ unpopularity.
 --   - Pinball Map skews toward currently-operating machines.
@@ -112,7 +112,7 @@ LEFT JOIN pinball_map pm ON t.slug = pm.title_slug;
 -- Scoring approach:
 --   1. Normalize each signal to a 0–1 value (see "normalized" CTE)
 --   2. Rank each normalized value as a percentile across ALL titles
---      (missing data = 0, ranked at bottom — not excluded)
+--      (missing data = 0, ranked at bottom; production excluded when absent)
 --   3. Multiply each percentile by its weight, sum, divide by total weight
 --
 -- To change weights: edit the "weights" CTE below. Everything else
