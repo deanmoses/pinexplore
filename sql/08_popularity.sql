@@ -179,7 +179,7 @@ WITH
     SELECT
       r.*,
       (
-        r.production_pct   * w_production.weight
+        CASE WHEN r.total_production > 0 THEN r.production_pct * w_production.weight ELSE 0 END
         + r.model_count_pct * w_model_count.weight
         + r.variant_pct     * w_variant.weight
         + r.rating_pct      * w_rating.weight
@@ -189,7 +189,7 @@ WITH
         + CASE WHEN r.remake_count > 0 THEN w_remake.weight ELSE 0 END
         + CASE WHEN r.in_series THEN w_series.weight ELSE 0 END
         + least(r.conversion_count * 0.25, w_conversion.weight)
-      ) / tw.w AS popularity_score,
+      ) / (tw.w - CASE WHEN r.total_production > 0 THEN 0 ELSE w_production.weight END) AS popularity_score,
 
       (CASE WHEN r.total_production > 0 THEN 1 ELSE 0 END
         + 1  -- model_count always present
