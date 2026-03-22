@@ -202,6 +202,14 @@ WITH
     SELECT name, bool_or(in_ipdb) AS in_ipdb, bool_or(in_opdb) AS in_opdb
     FROM all_sources
     GROUP BY name
+  ),
+  -- Alias raw_theme values slugified: strip punctuation, lowercase, spaces→hyphens
+  theme_alias_slugs AS (
+    SELECT DISTINCT
+      regexp_replace(lower(regexp_replace(ta.raw_theme, '[^\w\s-]', '', 'g')), '[\s]+', '-', 'g') AS alias_slug,
+      th.slug
+    FROM theme_aliases ta
+    JOIN themes th ON ta.canonical_theme = th.name
   )
 SELECT
   m.name AS theme,
@@ -214,13 +222,7 @@ SELECT
 FROM merged m
 LEFT JOIN themes th1 ON m.name = th1.name
 LEFT JOIN themes th2 ON m.name = th2.slug
-LEFT JOIN (
-  SELECT DISTINCT
-    regexp_replace(lower(regexp_replace(ta.raw_theme, '[^\w\s-]', '', 'g')), '[\s]+', '-', 'g') AS alias_slug,
-    th.slug
-  FROM theme_aliases ta
-  JOIN themes th ON ta.canonical_theme = th.name
-) th3 ON m.name = th3.alias_slug;
+LEFT JOIN theme_alias_slugs th3 ON m.name = th3.alias_slug;
 
 -- Themes from external sources not in pinbase and not dropped.
 CREATE OR REPLACE VIEW missing_themes AS
