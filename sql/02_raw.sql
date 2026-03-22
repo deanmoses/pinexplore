@@ -139,3 +139,22 @@ FROM (
   SELECT unnest("Data") AS d
   FROM read_json_auto(getvariable('ingest_base') || '/ipdb_xantari.json', (maximum_object_size = 67108864))
 );
+
+-- Pinball glossaries
+CREATE OR REPLACE TABLE ipdb_glossary AS
+SELECT
+  slug,
+  "name",
+  definition,
+  see_also,
+  aliases,
+  games,
+FROM read_json_auto(getvariable('ingest_base') || '/glossary_ipdb/ipdb_glossary.json', (union_by_name = true));
+
+CREATE OR REPLACE TABLE kineticist_glossary AS
+SELECT *
+FROM read_json_auto(getvariable('ingest_base') || '/glossary_kineticist/kineticist_glossary.json');
+
+CREATE OR REPLACE TABLE pinball_primer_glossary AS
+SELECT *
+FROM read_json_auto(getvariable('ingest_base') || '/glossary_pinball_primer/pinball_primer_glossary.json');

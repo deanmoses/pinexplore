@@ -265,6 +265,43 @@ GROUP BY ipdb_feature
 ORDER BY machine_count DESC;
 
 ------------------------------------------------------------
+-- Glossary comparison across sources
+------------------------------------------------------------
+
+CREATE OR REPLACE VIEW compare_glossaries AS
+WITH
+  -- Deduplicate primer entries per slug (e.g. Add-a-ball has award + game type)
+  primer_deduped AS (
+    SELECT slug, name, definition
+    FROM pinball_primer_glossary
+    QUALIFY row_number() OVER (PARTITION BY slug ORDER BY slug) = 1
+  ),
+  all_terms AS (
+    SELECT slug FROM ipdb_glossary
+    UNION
+    SELECT slug FROM kineticist_glossary
+    UNION
+    SELECT slug FROM primer_deduped
+  )
+SELECT
+  a.slug,
+  coalesce(i.name, k.name, p.name)  AS name,
+  i.name  IS NOT NULL               AS in_ipdb,
+  k.name  IS NOT NULL               AS in_kineticist,
+  p.name  IS NOT NULL               AS in_primer,
+  (i.name IS NOT NULL)::int
+    + (k.name IS NOT NULL)::int
+    + (p.name IS NOT NULL)::int      AS source_count,
+  i.definition                       AS ipdb_definition,
+  k.definition                       AS kineticist_definition,
+  p.definition                       AS primer_definition,
+FROM all_terms AS a
+LEFT JOIN ipdb_glossary     AS i ON i.slug = a.slug
+LEFT JOIN kineticist_glossary AS k ON k.slug = a.slug
+LEFT JOIN primer_deduped    AS p ON p.slug = a.slug
+ORDER BY a.slug;
+
+------------------------------------------------------------
 -- Warnings from compare views
 ------------------------------------------------------------
 
