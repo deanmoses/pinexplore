@@ -117,27 +117,66 @@ WHERE im.ManufacturerId NOT IN (0, 328);
 ------------------------------------------------------------
 
 -- Extract "Feature (N)" patterns from IPDB NotableFeatures free text
--- and resolve against the pinbase gameplay_features vocabulary using
--- names and aliases (case-insensitive). Unmatched features are retained
--- with a NULL slug for gap analysis.
+-- and resolve them against the pinbase gameplay_features vocabulary.
+--
+-- Strategy: split on delimiters first, then look for "(N)" in each
+-- segment. This avoids mid-word false positives (e.g. "LED" → "Ed")
+-- and captures multi-word names (e.g. "Vertical Up-kickers").
+--
+-- Unmatched features are retained with a NULL slug for gap analysis.
 CREATE OR REPLACE VIEW ipdb_gameplay_features AS
-WITH raw_matches AS (
+WITH
+
+-- Step 1: Clean the raw text before splitting.
+cleaned AS (
     SELECT
         i.IpdbId,
-        unnest(regexp_extract_all(
-            i.NotableFeatures,
-            '[A-Z][A-Za-z][a-z ''-]+?\s*\(\d+\)'
-        )) AS raw_match
+        replace(
+            regexp_replace(i.NotableFeatures,
+                '^Notable Features:\s*',  -- some entries have this prefix
+                ''),
+            '�',  -- mojibake U+FFFD replaces hyphens, apostrophes, bullets
+            ' '
+        ) AS features_text
     FROM ipdb_machines_staged i
     WHERE i.NotableFeatures IS NOT NULL
 ),
+
+-- Step 2: Split into segments on comma or period-followed-by-space.
+-- Each segment is one potential "Feature name (count)" entry.
+-- Example: "Flippers (2), Pop bumpers (3). Left kickback."
+--       → ["Flippers (2)", "Pop bumpers (3)", "Left kickback"]
+segments AS (
+    SELECT
+        c.IpdbId,
+        trim(unnest(regexp_split_to_array(
+            c.features_text,
+            ',|\.\s'  -- comma OR period+whitespace
+        ))) AS segment
+    FROM cleaned c
+),
+
+-- Step 3: From segments containing "(N)", extract the feature name
+-- and count. The name is everything before the parenthesized number.
+-- Example: "5-bank drop targets (2)" → name="5-bank drop targets", qty=2
 parsed AS (
     SELECT
         IpdbId,
-        lower(trim(regexp_replace(raw_match, '\s*\(\d+\)$', ''))) AS feature_name,
-        regexp_extract(raw_match, '\((\d+)\)', 1)::INTEGER AS quantity
-    FROM raw_matches
+        lower(trim(
+            regexp_extract(segment,
+                '^(.+?)\s*\((\d+).*\)',  -- name (count...)
+                1)                        -- capture group 1 = name
+        )) AS feature_name,
+        TRY_CAST(
+            regexp_extract(segment,
+                '\((\d+)',  -- first number inside parens
+                1)
+        AS INTEGER) AS quantity
+    FROM segments
+    WHERE regexp_matches(segment, '\(\d+\)')  -- has a parenthesized number
 )
+
+-- Step 4: Resolve feature names against pinbase vocabulary.
 SELECT
     p.IpdbId,
     p.feature_name AS ipdb_feature,
