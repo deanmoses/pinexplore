@@ -128,15 +128,24 @@ CREATE OR REPLACE VIEW ipdb_gameplay_features AS
 WITH
 
 -- Step 1: Clean the raw text before splitting.
+--   - Strip "Notable Features:" prefix
+--   - Replace mojibake U+FFFD with space
+--   - Insert comma before period+uppercase ("5 cents.Flippers" → "5 cents,Flippers")
+--     so the comma split handles it without consuming the first letter
 cleaned AS (
     SELECT
         i.IpdbId,
-        replace(
-            regexp_replace(i.NotableFeatures,
-                '^Notable Features:\s*',  -- some entries have this prefix
-                ''),
-            '�',  -- mojibake U+FFFD replaces hyphens, apostrophes, bullets
-            ' '
+        regexp_replace(
+            replace(
+                regexp_replace(i.NotableFeatures,
+                    '^Notable Features:\s*',  -- some entries have this prefix
+                    ''),
+                '�',  -- mojibake U+FFFD replaces hyphens, apostrophes, bullets
+                ' '
+            ),
+            '\.([A-Z])',  -- period immediately followed by uppercase letter
+            ', \1',       -- replace with comma+space, keeping the letter
+            'g'
         ) AS features_text
     FROM ipdb_machines_staged i
     WHERE i.NotableFeatures IS NOT NULL
@@ -149,10 +158,16 @@ cleaned AS (
 segments AS (
     SELECT
         c.IpdbId,
-        trim(unnest(regexp_split_to_array(
-            c.features_text,
-            ',|\.\s'  -- comma OR period+whitespace
-        ))) AS segment
+        -- Strip preamble text before a colon (e.g. "Each has: Flippers"
+        -- or "The following ... wireforms: Flippers" → "Flippers")
+        trim(regexp_replace(
+            trim(unnest(regexp_split_to_array(
+                c.features_text,
+                ',|\.\s'  -- comma OR period+whitespace
+            ))),
+            '^.*:\s*',  -- strip everything up to last colon+space
+            ''
+        )) AS segment
     FROM cleaned c
 ),
 
