@@ -180,6 +180,20 @@ SELECT t.name AS theme, unnest(t.parents) AS parent
 FROM themes t
 WHERE t.parents IS NOT NULL;
 
+------------------------------------------------------------
+-- Gameplay feature views (derived from pinbase gameplay_features table)
+------------------------------------------------------------
+
+-- Parent relationships (one row per child→parent edge).
+CREATE OR REPLACE VIEW gameplay_feature_parents AS
+SELECT gf.slug AS feature, unnest(gf.is_type_of) AS parent
+FROM gameplay_features gf
+WHERE gf.is_type_of IS NOT NULL;
+
+------------------------------------------------------------
+-- IPDB theme views
+------------------------------------------------------------
+
 -- Distinct IPDB themes: split compound Theme strings into individual terms.
 -- IPDB stores themes as "Adventure - Fantasy - Outer Space", sometimes with
 -- slash pairs ("Cards/Gambling"), commas, and mojibake (U+FFFD for dashes).

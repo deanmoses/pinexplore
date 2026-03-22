@@ -62,16 +62,33 @@ WHERE th.slug NOT IN (
     SELECT 1 FROM ipdb_themes it WHERE it.theme = th.name
   );
 
+-- Theme hierarchy depth: only warn if deeper than 5
 INSERT INTO _warnings
-SELECT 'theme_max_parent_depth', max(depth)
-FROM (
-  WITH RECURSIVE walk AS (
-    SELECT theme, parent, 1 AS depth FROM theme_parents
-    UNION ALL
-    SELECT w.theme, p.parent, w.depth + 1
-    FROM walk w JOIN theme_parents p ON p.theme = w.parent
-    WHERE w.depth < 20
+SELECT 'theme_max_parent_depth', md FROM (
+  SELECT max(depth) AS md FROM (
+    WITH RECURSIVE walk AS (
+      SELECT theme, parent, 1 AS depth FROM theme_parents
+      UNION ALL
+      SELECT w.theme, p.parent, w.depth + 1
+      FROM walk w JOIN theme_parents p ON p.theme = w.parent
+      WHERE w.depth < 20
+    )
+    SELECT max(depth) AS depth FROM walk GROUP BY theme
   )
-  SELECT max(depth) AS depth FROM walk GROUP BY theme
-);
+) WHERE md > 5;
+
+-- Gameplay feature hierarchy depth: only warn if deeper than 5
+INSERT INTO _warnings
+SELECT 'gameplay_feature_max_parent_depth', md FROM (
+  SELECT max(depth) AS md FROM (
+    WITH RECURSIVE walk AS (
+      SELECT feature, parent, 1 AS depth FROM gameplay_feature_parents
+      UNION ALL
+      SELECT w.feature, p.parent, w.depth + 1
+      FROM walk w JOIN gameplay_feature_parents p ON p.feature = w.parent
+      WHERE w.depth < 20
+    )
+    SELECT max(depth) AS depth FROM walk GROUP BY feature
+  )
+) WHERE md > 5;
 

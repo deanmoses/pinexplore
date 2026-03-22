@@ -126,6 +126,59 @@ FROM theme_aliases ta
 JOIN themes th ON ta.raw_theme = th.name
 WHERE th.name != ta.canonical_theme;
 
+------------------------------------------------------------
+-- Gameplay feature hierarchy
+------------------------------------------------------------
+
+-- Broken parent: is_type_of references a slug that doesn't exist
+INSERT INTO _violations
+SELECT 'gameplay_features', 'broken_parent', feature || ' → ' || parent
+FROM gameplay_feature_parents
+WHERE parent NOT IN (SELECT slug FROM gameplay_features);
+
+-- Cycle detection: any feature that is its own ancestor via is_type_of
+INSERT INTO _violations
+SELECT 'gameplay_features', 'parent_cycle', feature
+FROM (
+  WITH RECURSIVE walk AS (
+    SELECT feature, parent, 1 AS depth
+    FROM gameplay_feature_parents
+    UNION ALL
+    SELECT w.feature, p.parent, w.depth + 1
+    FROM walk w
+    JOIN gameplay_feature_parents p ON p.feature = w.parent
+    WHERE w.depth < 20
+  )
+  SELECT DISTINCT feature FROM walk WHERE parent = feature
+);
+
+-- Alias shadows a different gameplay feature's canonical name
+INSERT INTO _violations
+SELECT 'gameplay_features', 'alias_shadows_name',
+  lower(a.alias) || ' (alias of ' || gf.slug || ') shadows feature ' || gf2.slug
+FROM gameplay_features gf, unnest(gf.aliases) AS a(alias)
+JOIN gameplay_features gf2 ON lower(a.alias) = lower(gf2.name)
+WHERE gf.slug != gf2.slug;
+
+-- Duplicate alias: same alias string appears on two different features
+INSERT INTO _violations
+SELECT 'gameplay_features', 'duplicate_alias',
+  lower(a1.alias) || ' claimed by ' || gf1.slug || ' and ' || gf2.slug
+FROM gameplay_features gf1, unnest(gf1.aliases) AS a1(alias)
+JOIN gameplay_features gf2 ON gf1.slug < gf2.slug
+JOIN unnest(gf2.aliases) AS a2(alias) ON lower(a1.alias) = lower(a2.alias);
+
+-- Model references a gameplay feature slug that doesn't exist
+INSERT INTO _violations
+SELECT 'gameplay_features', 'model_broken_feature_ref', m.slug || ' → ' || f
+FROM models m, unnest(m.gameplay_feature_slugs) AS t(f)
+WHERE m.gameplay_feature_slugs IS NOT NULL
+  AND f NOT IN (SELECT slug FROM gameplay_features);
+
+------------------------------------------------------------
+-- Licensed theme integrity
+------------------------------------------------------------
+
 -- ref_not_licensed references a title slug that doesn't exist
 INSERT INTO _violations
 SELECT 'themes', 'ref_not_licensed_orphan', title_slug
