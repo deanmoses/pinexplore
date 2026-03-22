@@ -304,47 +304,46 @@ LEFT JOIN theme_aliases a ON a.raw_theme = tc.theme;
 -- Splits the structured string into company name, trade name, years, location,
 -- and HQ city/state/country (with US state detection and override handling).
 CREATE OR REPLACE VIEW ipdb_corporate_entities AS
-WITH parsed AS (
+WITH raw_extractions AS (
+  -- Run each regex on Manufacturer exactly once, named for what it produces.
   SELECT DISTINCT
-    ManufacturerId AS ipdb_manufacturer_id,
-    Manufacturer AS raw_name,
+    ManufacturerId        AS ipdb_manufacturer_id,
+    Manufacturer          AS raw_name,
     ManufacturerShortName AS short_name,
-
-    -- Company name: strip trade-name bracket, years, and ", of ..." location
-    trim(trailing ',' FROM trim(
-      regexp_replace(
-        regexp_replace(
-          regexp_replace(Manufacturer, '\s*\[Trade Name:.*?\]', ''),
-          '\s*\(\d+.*?\)', ''),
-        ',\s*of\s+.*$', '')
-    )) AS company_name,
-
-    -- Trade name from [Trade Name: X]
-    regexp_extract(Manufacturer, '\[Trade Name:\s*(.+?)\]', 1) AS trade_name,
-
-    -- Year range
-    CASE WHEN regexp_extract(Manufacturer, '\((\d{4})-', 1) != '' THEN
-      CAST(regexp_extract(Manufacturer, '\((\d{4})-', 1) AS INTEGER)
-    END AS year_start,
-    CASE WHEN regexp_extract(Manufacturer, '\(\d{4}-(\d{4})\)', 1) != '' THEN
-      CAST(regexp_extract(Manufacturer, '\(\d{4}-(\d{4})\)', 1) AS INTEGER)
-    END AS year_end,
-    CASE WHEN regexp_extract(Manufacturer, '\((\d{4})\)', 1) != ''
-          AND Manufacturer NOT LIKE '%-%(%' THEN
-      CAST(regexp_extract(Manufacturer, '\((\d{4})\)', 1) AS INTEGER)
-    END AS single_year,
-
-    -- Full location string from ", of ..."
-    COALESCE(
-      trim(trailing ',' FROM
-        regexp_extract(Manufacturer, ',\s*of\s+(.+?)(?:\s*\(\d|\s*\[Trade|\s*$)', 1)
-      ),
-      ''
-    ) AS location
-
+    regexp_replace(Manufacturer, '\s*\[Trade Name:.*?\]', '')                     AS _sans_trade,
+    regexp_extract(Manufacturer, '\[Trade Name:\s*(.+?)\]', 1)                    AS trade_name,
+    regexp_extract(Manufacturer, '\((\d{4})-', 1)                                 AS _year_start_raw,
+    regexp_extract(Manufacturer, '\(\d{4}-(\d{4})\)', 1)                          AS _year_end_raw,
+    regexp_extract(Manufacturer, '\((\d{4})\)', 1)                                AS _single_year_raw,
+    regexp_extract(Manufacturer, ',\s*of\s+(.+?)(?:\s*\(\d|\s*\[Trade|\s*$)', 1) AS _location_raw
   FROM ipdb_machines
   WHERE Manufacturer IS NOT NULL
     AND Manufacturer != 'Unknown Manufacturer'
+),
+parsed AS (
+  SELECT
+    ipdb_manufacturer_id,
+    raw_name,
+    short_name,
+    trade_name,
+
+    -- Company name: strip years and ", of ..." from the already-trade-stripped string
+    trim(trailing ',' FROM trim(
+      regexp_replace(
+        regexp_replace(_sans_trade, '\s*\(\d+.*?\)', ''),
+        ',\s*of\s+.*$', '')
+    )) AS company_name,
+
+    -- Year range: each pattern extracted once above, cast here
+    CASE WHEN _year_start_raw  != '' THEN CAST(_year_start_raw  AS INTEGER) END AS year_start,
+    CASE WHEN _year_end_raw    != '' THEN CAST(_year_end_raw    AS INTEGER) END AS year_end,
+    CASE WHEN _single_year_raw != '' AND raw_name NOT LIKE '%-%(%'
+         THEN CAST(_single_year_raw AS INTEGER) END AS single_year,
+
+    -- Full location string from ", of ..."
+    COALESCE(trim(trailing ',' FROM _location_raw), '') AS location
+
+  FROM raw_extractions
 ),
 -- Split location into raw city/state/country with US state detection
 with_location AS (
