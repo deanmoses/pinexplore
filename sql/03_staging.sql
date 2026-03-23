@@ -3,6 +3,28 @@
 -- No cross-source joins.
 
 ------------------------------------------------------------
+-- Location alias lookup views (depend on locations table from 02_raw)
+------------------------------------------------------------
+
+-- All country name variants → canonical country slug + name
+CREATE OR REPLACE VIEW ref_location_country_aliases AS
+SELECT unnest(list_prepend(name, coalesce(aliases, []))) AS alias,
+       slug AS country_slug, name AS canonical_name
+FROM locations WHERE type = 'country';
+
+-- All US state/district name variants → canonical state slug + name
+CREATE OR REPLACE VIEW ref_location_state_aliases AS
+SELECT unnest(list_prepend(name, coalesce(aliases, []))) AS alias,
+       slug AS state_slug, name AS canonical_name
+FROM locations WHERE location_path LIKE 'usa/%' AND type != 'city';
+
+-- All city name variants → canonical city slug + location_path
+CREATE OR REPLACE VIEW ref_location_city_aliases AS
+SELECT unnest(list_prepend(name, coalesce(aliases, []))) AS alias,
+       slug AS city_slug, location_path
+FROM locations WHERE type = 'city';
+
+------------------------------------------------------------
 -- OPDB staged
 ------------------------------------------------------------
 
@@ -405,10 +427,10 @@ with_raw_hq AS (
       ELSE p.location
     END AS _raw_country
   FROM with_location p
-  LEFT JOIN ref_us_states st2
-    ON p.nparts = 2 AND lower(st2.state_name) = lower(p.parts[2])
-  LEFT JOIN ref_us_states st1
-    ON p.nparts = 1 AND lower(st1.state_name) = lower(p.location)
+  LEFT JOIN ref_location_state_aliases st2
+    ON p.nparts = 2 AND lower(st2.alias) = lower(p.parts[2])
+  LEFT JOIN ref_location_state_aliases st1
+    ON p.nparts = 1 AND lower(st1.alias) = lower(p.location)
 )
 SELECT
   h.ipdb_manufacturer_id, h.raw_name, h.short_name,
@@ -416,11 +438,9 @@ SELECT
   CASE WHEN h.trade_name != '' THEN h.trade_name ELSE h.company_name END AS manufacturer_name,
   h.year_start, h.year_end, h.single_year, h.location,
 
-  CASE WHEN ovr.ipdb_manufacturer_id IS NOT NULL THEN ovr.headquarters_city ELSE h._raw_city END AS headquarters_city,
-  CASE WHEN ovr.ipdb_manufacturer_id IS NOT NULL THEN ovr.headquarters_state ELSE h._raw_state END AS headquarters_state,
-  COALESCE(cn.normalized_country,
-    CASE WHEN ovr.ipdb_manufacturer_id IS NOT NULL THEN ovr.headquarters_country ELSE h._raw_country END
-  ) AS headquarters_country,
+  h._raw_city AS headquarters_city,
+  h._raw_state AS headquarters_state,
+  COALESCE(cn.canonical_name, h._raw_country) AS headquarters_country,
 
   -- Manufacturer resolution — derived purely from IPDB data + pinbase manufacturers.
   -- No dependency on existing corporate_entities or models tables.
@@ -432,10 +452,8 @@ SELECT
   model_years.year_of_first_model,
   model_years.year_of_last_model
 FROM with_raw_hq h
-LEFT JOIN ref_ipdb_location_overrides ovr
-  ON ovr.ipdb_manufacturer_id = h.ipdb_manufacturer_id
-LEFT JOIN ref_country_normalization cn
-  ON cn.raw_country = COALESCE(ovr.headquarters_country, h._raw_country)
+LEFT JOIN ref_location_country_aliases cn
+  ON cn.alias = h._raw_country
 LEFT JOIN manufacturers mfr_exact
   ON lower(mfr_exact.name) = lower(
     CASE WHEN h.trade_name != '' THEN h.trade_name ELSE h.company_name END

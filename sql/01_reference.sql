@@ -22,100 +22,13 @@ CREATE OR REPLACE MACRO normalize_mfr_name(name) AS (
   ))
 );
 
-------------------------------------------------------------
--- Geographic reference data
-------------------------------------------------------------
-
--- US states: canonical name + aliases for IPDB typos/variants
-CREATE OR REPLACE VIEW ref_us_states AS
-SELECT * FROM (VALUES
-  ('Alabama',        'Alabama'),
-  ('Alaska',         'Alaska'),
-  ('Arizona',        'Arizona'),
-  ('Arkansas',       'Arkansas'),
-  ('California',     'California'),
-  ('Colorado',       'Colorado'),
-  ('Connecticut',    'Connecticut'),
-  ('Delaware',       'Delaware'),
-  ('Florida',        'Florida'),
-  ('Georgia',        'Georgia'),
-  ('Hawaii',         'Hawaii'),
-  ('Idaho',          'Idaho'),
-  ('Illinois',       'Illinois'),
-  ('Indiana',        'Indiana'),
-  ('Iowa',           'Iowa'),
-  ('Kansas',         'Kansas'),
-  ('Kentucky',       'Kentucky'),
-  ('Louisiana',      'Louisiana'),
-  ('Maine',          'Maine'),
-  ('Maryland',       'Maryland'),
-  ('Massachusetts',  'Massachusetts'),
-  ('Michigan',       'Michigan'),
-  ('Minnesota',      'Minnesota'),
-  ('Mississippi',    'Mississippi'),
-  ('Missouri',       'Missouri'),
-  ('Montana',        'Montana'),
-  ('Nebraska',       'Nebraska'),
-  ('Nevada',         'Nevada'),
-  ('New Hampshire',  'New Hampshire'),
-  ('New Jersey',     'New Jersey'),
-  ('New Mexico',     'New Mexico'),
-  ('New York',       'New York'),
-  ('North Carolina', 'North Carolina'),
-  ('North Dakota',   'North Dakota'),
-  ('Ohio',           'Ohio'),
-  ('Oklahoma',       'Oklahoma'),
-  ('Oregon',         'Oregon'),
-  ('Pennsylvania',   'Pennsylvania'),
-  ('Rhode Island',   'Rhode Island'),
-  ('South Carolina', 'South Carolina'),
-  ('South Dakota',   'South Dakota'),
-  ('Tennessee',      'Tennessee'),
-  ('Texas',          'Texas'),
-  ('Utah',           'Utah'),
-  ('Vermont',        'Vermont'),
-  ('Virginia',       'Virginia'),
-  ('Washington',     'Washington'),
-  ('West Virginia',  'West Virginia'),
-  ('Wisconsin',      'Wisconsin'),
-  ('Wyoming',        'Wyoming'),
-  -- IPDB typos
-  ('NewYork',        'New York'),
-  ('SouthCarolina',  'South Carolina')
-) AS t(state_name, canonical_name);
-
--- Country name normalization (IPDB inconsistencies)
-CREATE OR REPLACE VIEW ref_country_normalization AS
-SELECT * FROM (VALUES
-  ('England',        'United Kingdom'),
-  ('Britain',        'United Kingdom'),
-  ('UK',             'United Kingdom'),
-  ('U.K.',           'United Kingdom'),
-  ('West Germany',   'Germany'),
-  ('Holland',        'Netherlands'),
-  ('The Netherlands','Netherlands'),
-  ('R.O.C.',         'Taiwan')
-) AS t(raw_country, normalized_country);
-
--- IPDB location overrides for misformatted manufacturer strings.
--- These have missing commas, semicolons, multi-city HQs, etc.
-CREATE OR REPLACE VIEW ref_ipdb_location_overrides AS
-SELECT * FROM (VALUES
-  -- "Chicago Illinois" — missing comma
-  (532, 'Chicago',          'Illinois',  'USA'),
-  -- "Long Island City, Queens, New York" — Queens is a borough, not a state
-  (607, 'Long Island City',  'New York',  'USA'),
-  -- "Lincoln, Nebraska; Des Moines, Iowa" — two cities
-  (764, 'Lincoln',           'Nebraska',  'USA'),
-  -- "Youngstown, Ohio and New York City" — two cities
-  (696, 'Youngstown',        'Ohio',      'USA'),
-  -- "Madrid" — just a city, no country
-  (439, 'Madrid',            NULL,        'Spain'),
-  -- "Marcoussis and Paris, France" — dual city, use primary (Marcoussis is a Paris suburb)
-  (364, 'Marcoussis',        NULL,        'France'),
-  -- "Avenza, Massa-Carrera, Toscana, Italy" — Massa-Carrara is an Italian province, not a state
-  (135, 'Avenza',            NULL,        'Italy')
-) AS t(ipdb_manufacturer_id, headquarters_city, headquarters_state, headquarters_country);
+-- Detect mojibake: UTF-8 multibyte characters misread as Latin-1.
+-- Typical signature: Ã, Â, or Å followed by a non-ASCII byte.
+-- Only apply to `name` fields, never to `aliases` (which intentionally
+-- store the garbled variants for IPDB source matching).
+CREATE OR REPLACE MACRO is_mojibake(s) AS (
+  s IS NOT NULL AND regexp_matches(s, 'Ã[^\x00-\x7F]|Â[^\x00-\x7F]|Å[^\x00-\x7F]')
+);
 
 ------------------------------------------------------------
 -- Source-specific code mappings

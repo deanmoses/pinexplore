@@ -77,6 +77,28 @@ SELECT 'theme_max_parent_depth', md FROM (
   )
 ) WHERE md > 5;
 
+-- IPDB-parsed city not found in pinbase location files
+-- Details: SELECT * FROM ipdb_corporate_entities WHERE headquarters_city IS NOT NULL
+--   AND NOT EXISTS (SELECT 1 FROM ref_location_city_aliases WHERE alias = headquarters_city)
+INSERT INTO _warnings
+SELECT 'ipdb_ce_unresolved_city', count(*)
+FROM ipdb_corporate_entities
+WHERE headquarters_city IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM ref_location_city_aliases WHERE alias = headquarters_city
+  );
+
+-- IPDB-parsed country not found in pinbase location files
+-- Details: SELECT * FROM ipdb_corporate_entities WHERE headquarters_country IS NOT NULL
+--   AND NOT EXISTS (SELECT 1 FROM ref_location_country_aliases WHERE alias = headquarters_country)
+INSERT INTO _warnings
+SELECT 'ipdb_ce_unresolved_country', count(*)
+FROM ipdb_corporate_entities
+WHERE headquarters_country IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM ref_location_country_aliases WHERE alias = headquarters_country
+  );
+
 -- Gameplay feature hierarchy depth: only warn if deeper than 5
 INSERT INTO _warnings
 SELECT 'gameplay_feature_max_parent_depth', md FROM (
