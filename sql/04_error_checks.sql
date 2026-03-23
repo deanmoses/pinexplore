@@ -192,6 +192,12 @@ FROM ref_themes_dropped
 WHERE theme NOT IN (SELECT theme FROM ipdb_themes)
   AND theme NOT IN (SELECT unnest(keywords) FROM opdb_machines WHERE len(keywords) > 0);
 
+-- ref_gameplay_features_dropped entry not found in IPDB (stale drop rule)
+INSERT INTO _violations
+SELECT 'gameplay_features', 'ref_gameplay_features_dropped_unused', feature
+FROM ref_gameplay_features_dropped
+WHERE feature NOT IN (SELECT ipdb_feature FROM ipdb_gameplay_features);
+
 ------------------------------------------------------------
 -- External ID uniqueness and agreement
 ------------------------------------------------------------

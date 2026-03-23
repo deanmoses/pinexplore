@@ -192,11 +192,24 @@ parsed AS (
 )
 
 -- Step 4: Resolve feature names against pinbase vocabulary.
+-- For multiball, the "(N)" means N balls in play, not N mechanisms.
+-- Remap to child features like "2-ball-multiball" with no quantity.
 SELECT
     p.IpdbId,
-    p.feature_name AS ipdb_feature,
-    p.quantity,
-    rfg.gameplay_feature_slug
+    CASE WHEN rfg.gameplay_feature_slug = 'multiball'
+         THEN format('{}-ball-multiball', p.quantity)
+         ELSE p.feature_name
+    END AS ipdb_feature,
+    CASE WHEN rfg.gameplay_feature_slug = 'multiball'
+         THEN NULL
+         ELSE p.quantity
+    END AS quantity,
+    CASE WHEN rfg.gameplay_feature_slug = 'multiball'
+         THEN (SELECT gf.gameplay_feature_slug
+               FROM ref_feature_gameplay gf
+               WHERE gf.feature = format('{}-ball multiball', p.quantity))
+         ELSE rfg.gameplay_feature_slug
+    END AS gameplay_feature_slug
 FROM parsed p
 LEFT JOIN ref_feature_gameplay rfg ON p.feature_name = rfg.feature
 WHERE p.feature_name != '';

@@ -261,6 +261,20 @@ SELECT * FROM (VALUES
 ) AS t(theme);
 
 ------------------------------------------------------------
+-- Rejected IPDB gameplay features
+------------------------------------------------------------
+
+-- Gameplay feature terms extracted from IPDB NotableFeatures that are
+-- machine-specific mode names rather than general gameplay features.
+CREATE OR REPLACE VIEW ref_gameplay_features_dropped AS
+SELECT * FROM (VALUES
+  ('tiger saw multiball',             'Machine-specific mode on Theatre of Magic (1995); a 2-ball multiball'),
+  ('multiball modes',                 'Generic plural reference, not a distinct feature'),
+  ('trunk multiball',                 'Machine-specific mode on Cirqus Voltaire (1997)'),
+  ('trunk multiball w/vanish lock',   'Machine-specific mode variant on Cirqus Voltaire (1997)')
+) AS t(feature, reason);
+
+------------------------------------------------------------
 -- Quality/tag cross-reference mappings
 ------------------------------------------------------------
 

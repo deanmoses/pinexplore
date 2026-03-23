@@ -245,6 +245,7 @@ SELECT
   count(DISTINCT IpdbId) AS machine_count
 FROM ipdb_gameplay_features
 WHERE gameplay_feature_slug IS NULL
+  AND ipdb_feature NOT IN (SELECT feature FROM ref_gameplay_features_dropped)
 GROUP BY ipdb_feature
 ORDER BY machine_count DESC;
 
