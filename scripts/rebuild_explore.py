@@ -96,7 +96,7 @@ def main():
             con.execute(sql)
             # After executing, print any rows from _warnings for
             # the warnings layer, and check for errors.
-            if layer == "10_print_warnings.sql":
+            if layer.endswith("_print_warnings.sql"):
                 for row in con.execute(
                     "SELECT 'WARNING: ' || check_name || ' (' || cnt || ' rows)'"
                     " FROM _warnings WHERE cnt > 0"

@@ -70,15 +70,19 @@ explore.duckdb    Build artifact (gitignored)
 
 Files in `sql/` load in numeric order during `make explore`:
 
-| File               | Purpose                                              |
-| ------------------ | ---------------------------------------------------- |
-| `01_reference.sql` | Hand-maintained reference tables, macros, exceptions |
-| `02_raw.sql`       | Turn pinbase & external JSON into tables             |
-| `03_staging.sql`   | Per-source normalization (no cross-source joins)     |
-| `04_checks.sql`    | Integrity checks. Hard violations abort the build    |
-| `05_compare.sql`   | Cross-source comparison: do sources agree?           |
-| `06_gaps.sql`      | Gap analysis: what's missing from pinbase?           |
-| `07_quality.sql`   | Slug quality, media audit, backfill proposals        |
+| File                      | Purpose                                              |
+| ------------------------- | ---------------------------------------------------- |
+| `01_reference.sql`        | Hand-maintained reference tables, macros, exceptions |
+| `02_raw.sql`              | Turn pinbase & external JSON data sources into tables|
+| `03_staging.sql`          | Per-source normalization (no cross-source joins)     |
+| `04_error_checks.sql`     | Integrity checks. Hard violations abort the build    |
+| `05_warning_checks.sql`   | Soft checks that warn but don't abort                |
+| `06_compare.sql`          | Cross-source comparison: do sources agree?           |
+| `07_gaps.sql`             | Gap analysis: what's missing from pinbase?           |
+| `08_quality.sql`          | Slug quality, media audit, backfill proposals        |
+| `09_popularity.sql`       | Title popularity composite scoring                   |
+| `10_history.sql`          | Industry history: decade-level trends                |
+| `90_print_warnings.sql`   | Print accumulated warnings (always runs last)        |
 
 The build **fails** if integrity checks don't pass — query `SELECT * FROM _violations` for details.
 
