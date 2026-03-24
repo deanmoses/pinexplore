@@ -558,12 +558,6 @@ WHERE om.is_machine = true AND om.physical_machine = 1
 INSERT INTO _violations
 SELECT 'mojibake', 'corporate_entity_name', slug FROM corporate_entities WHERE is_mojibake(name)
 UNION ALL
-SELECT 'mojibake', 'corporate_entity_city', slug FROM corporate_entities WHERE is_mojibake(headquarters_city)
-UNION ALL
-SELECT 'mojibake', 'corporate_entity_state', slug FROM corporate_entities WHERE is_mojibake(headquarters_state)
-UNION ALL
-SELECT 'mojibake', 'corporate_entity_country', slug FROM corporate_entities WHERE is_mojibake(headquarters_country)
-UNION ALL
 SELECT 'mojibake', 'franchise_name', slug FROM franchises WHERE is_mojibake(name)
 UNION ALL
 SELECT 'mojibake', 'gameplay_feature_name', slug FROM gameplay_features WHERE is_mojibake(name)
@@ -586,64 +580,18 @@ SELECT 'mojibake', 'title_name', slug FROM titles WHERE is_mojibake(name);
 -- Location integrity checks
 ------------------------------------------------------------
 
--- 1. Unresolved country: headquarters_country not found in pindata locations
+-- Unresolved headquarters_location: slug path not found in pindata locations
 INSERT INTO _violations
-SELECT 'locations', 'ce_unresolved_country',
-  slug || ': ' || headquarters_country
+SELECT 'locations', 'ce_unresolved_location',
+  slug || ': ' || headquarters_location
 FROM corporate_entities
-WHERE headquarters_country IS NOT NULL
+WHERE headquarters_location IS NOT NULL
   AND NOT EXISTS (
-    SELECT 1 FROM ref_location_country_aliases
-    WHERE alias = headquarters_country
+    SELECT 1 FROM locations
+    WHERE location_path = headquarters_location
   );
 
--- 2. Unresolved city: headquarters_city not found in pindata locations
-INSERT INTO _violations
-SELECT 'locations', 'ce_unresolved_city',
-  slug || ': ' || headquarters_city
-FROM corporate_entities
-WHERE headquarters_city IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM ref_location_city_aliases
-    WHERE alias = headquarters_city
-  );
-
--- 3. City/country mismatch: no city file under the stated country matches the city name.
---    The EXISTS guard restricts this to entities whose country resolves — unresolved
---    countries are already caught by check 1, and without the guard those entities
---    would produce a spurious mismatch violation here too.
-INSERT INTO _violations
-SELECT 'locations', 'ce_city_country_mismatch',
-  ce.slug || ': city=' || ce.headquarters_city || ' not found under country=' || ce.headquarters_country
-FROM corporate_entities ce
-WHERE ce.headquarters_city IS NOT NULL
-  AND ce.headquarters_country IS NOT NULL
-  AND EXISTS (SELECT 1 FROM ref_location_country_aliases WHERE alias = ce.headquarters_country)
-  AND NOT EXISTS (
-    SELECT 1 FROM ref_location_city_aliases ca
-    JOIN ref_location_country_aliases cna ON cna.alias = ce.headquarters_country
-    WHERE ca.alias = ce.headquarters_city
-      AND ca.location_path LIKE cna.country_slug || '/%'
-  );
-
--- 4. City/state mismatch: no city file under the stated state matches the city name.
---    Effectively USA-only because ref_location_state_aliases only contains US states/districts —
---    the EXISTS guard ensures non-US entities with a headquarters_state don't fire false positives.
-INSERT INTO _violations
-SELECT 'locations', 'ce_city_state_mismatch',
-  ce.slug || ': city=' || ce.headquarters_city || ' not found under state=' || ce.headquarters_state
-FROM corporate_entities ce
-WHERE ce.headquarters_city IS NOT NULL
-  AND ce.headquarters_state IS NOT NULL
-  AND EXISTS (SELECT 1 FROM ref_location_state_aliases WHERE alias = ce.headquarters_state)
-  AND NOT EXISTS (
-    SELECT 1 FROM ref_location_city_aliases ca
-    JOIN ref_location_state_aliases sa ON sa.alias = ce.headquarters_state
-    WHERE ca.alias = ce.headquarters_city
-      AND ca.location_path LIKE 'usa/' || sa.state_slug || '/%'
-  );
-
--- 5. Ambiguous country alias
+-- Ambiguous country alias
 INSERT INTO _violations
 SELECT 'locations', 'ambiguous_country_alias',
   alias || ' resolves to: ' || string_agg(country_slug, ', ' ORDER BY country_slug)
