@@ -199,11 +199,11 @@ segments AS (
 parsed AS (
     SELECT
         IpdbId,
-        lower(trim(
+        trim(lower(trim(
             regexp_extract(segment,
                 '^(.+?)\s*\((\d+).*\)',  -- name (count...)
                 1)                        -- capture group 1 = name
-        )) AS feature_name,
+        )), '"') AS feature_name,
         TRY_CAST(
             regexp_extract(segment,
                 '\((\d+)',  -- first number inside parens
