@@ -154,7 +154,6 @@ SELECT * FROM (VALUES
   ('Happiness'),
   ('Industry Inside Jokes'),
   ('Juvenilia'),
-  ('Land'),
   ('Licensed'),
   ('Licensed Theme'),
   ('Payout'),

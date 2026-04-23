@@ -290,6 +290,26 @@ WHERE gf.is_type_of IS NOT NULL;
 -- and deduplicates so downstream comparison can work term-by-term.
 CREATE OR REPLACE VIEW ipdb_themes AS
 WITH
+  -- 0. Short-circuit: if the raw Theme string matches a known pindata theme
+  --    name or alias verbatim (case/whitespace-insensitive), emit that theme
+  --    directly and skip splitting. Protects themes whose canonical names
+  --    contain commas or " - " (e.g. "Land, Air, and Space Exploration").
+  known_theme_keys AS (
+    SELECT lower(regexp_replace(t.name, '\s+', ' ', 'g')) AS key,
+           t.name AS canonical
+    FROM themes t
+    UNION
+    SELECT lower(regexp_replace(a.raw_theme, '\s+', ' ', 'g')) AS key,
+           a.canonical_theme AS canonical
+    FROM theme_aliases a
+  ),
+  whole_match AS (
+    SELECT im.IpdbId, k.canonical AS theme
+    FROM ipdb_machines im
+    JOIN known_theme_keys k
+      ON lower(regexp_replace(trim(im.Theme), '\s+', ' ', 'g')) = k.key
+    WHERE im.Theme IS NOT NULL AND im.Theme <> ''
+  ),
   -- 1. Fix encoding damage and normalise delimiters to " - "
   cleaned AS (
     SELECT
@@ -301,6 +321,7 @@ WITH
       ) AS theme_clean
     FROM ipdb_machines im
     WHERE im.Theme IS NOT NULL AND im.Theme <> ''
+      AND im.IpdbId NOT IN (SELECT IpdbId FROM whole_match)
   ),
   -- 2. Split on " - " into individual tokens
   dash_split AS (
@@ -343,12 +364,17 @@ WITH
       ) AS theme
     FROM prefix_cleaned
   )
--- 7. Apply alias table to merge duplicates into canonical forms
-SELECT DISTINCT
-  tc.IpdbId,
-  COALESCE(a.canonical_theme, tc.theme) AS theme
-FROM title_cased tc
-LEFT JOIN theme_aliases a ON a.raw_theme = tc.theme;
+-- 7. Apply alias table to merge duplicates into canonical forms,
+--    then union in whole-string matches that bypassed splitting.
+SELECT DISTINCT IpdbId, theme FROM (
+  SELECT
+    tc.IpdbId,
+    COALESCE(a.canonical_theme, tc.theme) AS theme
+  FROM title_cased tc
+  LEFT JOIN theme_aliases a ON a.raw_theme = tc.theme
+  UNION ALL
+  SELECT IpdbId, theme FROM whole_match
+);
 
 -- Distinct corporate entities parsed from IPDB manufacturer strings.
 -- Splits the structured string into company name, trade name, years, location,
