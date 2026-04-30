@@ -2,7 +2,7 @@
 """Push ingest source files to Cloudflare R2.
 
 Uploads raw ingest source files (IPDB, OPDB, Fandom, etc.) and builds a
-root-level manifest.json covering only these files.  The pinbase/
+root-level manifest.json covering only these files.  The pindata/
 prefix is owned by pindata's push script and excluded here.
 
 Usage:
@@ -53,11 +53,11 @@ def _sha256(path: Path) -> str:
 def _collect_files(src: Path) -> list[dict]:
     """Walk src and return manifest entries, excluding dotfiles and stale files.
 
-    Skips the pinbase/ subtree — that prefix is owned by pindata.
+    Skips the pindata/ subtree — that prefix is owned by pindata.
     """
     entries = []
     for root, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "pinbase"]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "pindata"]
         for f in files:
             if f.startswith(".") or f in EXCLUDE:
                 continue

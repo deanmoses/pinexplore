@@ -3,7 +3,7 @@
 
 Uses only stdlib (urllib.request, hashlib, json).
 Fetches both the root manifest (ingest sources like IPDB, OPDB, Fandom)
-and the pinbase/ manifest (catalog exports from pindata), then downloads
+and the pindata/ manifest (catalog exports from pindata), then downloads
 files whose size or SHA-256 don't match.
 
 Usage:
@@ -19,7 +19,7 @@ import os
 import sys
 import urllib.request
 
-DEFAULT_URL = "https://pub-8f33ea1ac628450298edd0d3243ecf5a.r2.dev"
+DEFAULT_URL = "https://pub-8a5220445534421c879b6ff9ede350f1.r2.dev"
 
 _OPENER = urllib.request.build_opener()
 _OPENER.addheaders = [("User-Agent", "pinexplore/1.0")]
@@ -48,7 +48,7 @@ def _pull_manifest(base_url: str, manifest_path: str, dest: str) -> tuple[int, i
         manifest = json.loads(resp.read())
 
     # Determine the URL prefix and local prefix from the manifest path.
-    # e.g. "pinbase/manifest.json" -> url prefix "pinbase/", local prefix "pinbase/"
+    # e.g. "pindata/manifest.json" -> url prefix "pindata/", local prefix "pindata/"
     prefix = manifest_path.rsplit("manifest.json", 1)[0]
 
     downloaded = 0
@@ -111,8 +111,8 @@ def main():
     total_downloaded += d
     total_skipped += s
 
-    # Pull pinbase manifest (catalog exports from pindata)
-    d, s = _pull_manifest(base_url, "pinbase/manifest.json", args.dest)
+    # Pull pindata manifest (catalog exports from pindata)
+    d, s = _pull_manifest(base_url, "pindata/manifest.json", args.dest)
     total_downloaded += d
     total_skipped += s
 

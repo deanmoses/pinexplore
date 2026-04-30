@@ -5,76 +5,76 @@
 -- Requires: SET VARIABLE ingest_base = '<path-or-url>';
 -- Local default is set by rebuild_explore.sh.
 -- For remote access (e.g. MotherDuck), set to R2 URL before loading:
---   SET VARIABLE ingest_base = 'https://pub-8f33ea1ac628450298edd0d3243ecf5a.r2.dev';
+--   SET VARIABLE ingest_base = 'https://pub-8a5220445534421c879b6ff9ede350f1.r2.dev';
 
 ------------------------------------------------------------
 -- Pinbase catalog data (via pindata export)
 ------------------------------------------------------------
 
 CREATE OR REPLACE TABLE cabinets AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/cabinet.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/cabinet.json');
 
 CREATE OR REPLACE TABLE corporate_entities AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/corporate_entity.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/corporate_entity.json');
 
 CREATE OR REPLACE TABLE credit_roles AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/credit_role.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/credit_role.json');
 
 CREATE OR REPLACE TABLE display_subtypes AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/display_subtype.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/display_subtype.json');
 
 CREATE OR REPLACE TABLE display_types AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/display_type.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/display_type.json');
 
 CREATE OR REPLACE TABLE franchises AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/franchise.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/franchise.json');
 
 CREATE OR REPLACE TABLE game_formats AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/game_format.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/game_format.json');
 
 CREATE OR REPLACE TABLE gameplay_features AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/gameplay_feature.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/gameplay_feature.json');
 
 CREATE OR REPLACE TABLE locations AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/location.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/location.json');
 
 CREATE OR REPLACE TABLE reward_types AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/reward_type.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/reward_type.json');
 
 CREATE OR REPLACE TABLE manufacturers AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/manufacturer.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/manufacturer.json');
 
 CREATE OR REPLACE TABLE models AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/model.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/model.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 CREATE OR REPLACE TABLE people AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/person.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/person.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 CREATE OR REPLACE TABLE series AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/series.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/series.json');
 
 CREATE OR REPLACE TABLE systems AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/system.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/system.json');
 
 CREATE OR REPLACE TABLE tags AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/tag.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/tag.json');
 
 CREATE OR REPLACE TABLE technology_generations AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_generation.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/technology_generation.json');
 
 CREATE OR REPLACE TABLE technology_subgenerations AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/technology_subgeneration.json');
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/technology_subgeneration.json');
 
 -- Explicit columns: DuckDB infers aliases as JSON[] instead of VARCHAR[]
 -- because of an apostrophe in one alias value ("Ufo's").
 CREATE OR REPLACE TABLE themes AS
 SELECT * FROM read_json_auto(
-  getvariable('ingest_base') || '/pinbase/theme.json',
+  getvariable('ingest_base') || '/pindata/theme.json',
   columns = {slug: 'VARCHAR', name: 'VARCHAR', aliases: 'VARCHAR[]', parents: 'VARCHAR[]'}
 );
 
 CREATE OR REPLACE TABLE titles AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pinbase/title.json', (union_by_name = CAST('t' AS BOOLEAN)));
+SELECT * FROM read_json_auto(getvariable('ingest_base') || '/pindata/title.json', (union_by_name = CAST('t' AS BOOLEAN)));
 
 ------------------------------------------------------------
 -- External source dumps
