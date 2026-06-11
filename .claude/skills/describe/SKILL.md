@@ -76,7 +76,7 @@ con.sql("""
 # Credits/people through models
 con.sql("""
   SELECT DISTINCT p.slug, p.name
-  FROM pinbase_credits c
+  FROM pindata_credits c
   JOIN people p ON c.person_slug = p.slug
   WHERE c.model_slug IN (
     SELECT slug FROM models
@@ -90,7 +90,7 @@ con.sql("""
 **For models:**
 ```python
 con.sql("FROM models WHERE slug='{{slug}}'").show()
-con.sql("FROM pinbase_credits WHERE model_slug='{{slug}}'").show()
+con.sql("FROM pindata_credits WHERE model_slug='{{slug}}'").show()
 # If ipdb_id exists on the model:
 con.sql("FROM ipdb_machines WHERE IpdbId={{ipdb_id}}").show()
 ```
@@ -100,7 +100,7 @@ con.sql("FROM ipdb_machines WHERE IpdbId={{ipdb_id}}").show()
 con.sql("FROM people WHERE slug='{{slug}}'").show()
 con.sql("""
   SELECT c.role, m.name, m.year
-  FROM pinbase_credits c JOIN models m ON c.model_slug = m.slug
+  FROM pindata_credits c JOIN models m ON c.model_slug = m.slug
   WHERE c.person_slug = '{{slug}}'
   ORDER BY m.year
 """).show()
@@ -162,7 +162,7 @@ cat /Users/moses/dev/pindata/catalog/manufacturers/williams.md
 
 ### Wikilink Discovery
 
-Before writing, identify all Pinbase entities you should wikilink to. Query DuckDB to verify slugs exist:
+Before writing, identify all Pindata entities you should wikilink to. Query DuckDB to verify slugs exist:
 
 ```python
 # Verify any slugs you plan to wikilink
@@ -173,7 +173,7 @@ con.sql("FROM people WHERE slug='steve-ritchie'").show()
 
 **Only wikilink to entities that actually exist in the catalog.** Do not invent slugs.
 
-**Wikilink aggressively.** Every mention of a game title, manufacturer, person, technology generation, or other Pinbase entity should be wikilinked — even if the entity belongs to a different manufacturer or era. If a manufacturer's history references a game they designed for another company, wikilink both the game and the company. When multiple titles share a name (e.g., several games called "Contact"), query DuckDB to find the correct slug by matching year, manufacturer, or other context.
+**Wikilink aggressively.** Every mention of a game title, manufacturer, person, technology generation, or other Pindata entity should be wikilinked — even if the entity belongs to a different manufacturer or era. If a manufacturer's history references a game they designed for another company, wikilink both the game and the company. When multiple titles share a name (e.g., several games called "Contact"), query DuckDB to find the correct slug by matching year, manufacturer, or other context.
 
 ### Wikilink Format
 

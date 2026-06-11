@@ -1,5 +1,20 @@
 {
   "editor.formatOnSave": true,
   "[markdown]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
-  "editor.codeActionsOnSave": { "source.fixAll.markdownlint": "explicit" }
+  "editor.codeActionsOnSave": { "source.fixAll.markdownlint": "explicit" },
+
+  // mypy is the project's single source of type-truth (CLI + pre-commit + IDE).
+  // Turn Pylance/Pyright type checking OFF so it doesn't double-report with a
+  // different, mypy-unaware config (this is what the sister flipcommons repo does).
+  // extraPaths is kept so Pylance still resolves the flat web_cache/web_fetch
+  // imports for autocomplete + go-to-definition, even with checking off.
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.extraPaths": ["${workspaceFolder}/scripts/web_scrape"],
+
+  // Surface mypy's diagnostics in the IDE via the project's own mypy (requires
+  // the ms-python.mypy-type-checker extension). Workspace scope runs it over the
+  // whole project so pyproject's mypy_path / overrides / excludes all apply.
+  "mypy-type-checker.importStrategy": "fromEnvironment",
+  "mypy-type-checker.cwd": "${workspaceFolder}",
+  "mypy-type-checker.reportingScope": "workspace"
 }

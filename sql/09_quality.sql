@@ -189,7 +189,7 @@ WHERE NOT EXISTS (SELECT 1 FROM ref_feature_tag AS rft WHERE rft.feature = lower
 GROUP BY f
 ORDER BY machine_count DESC;
 
--- Theme terms from external sources compared against pinbase vocabulary.
+-- Theme terms from external sources compared against pindata vocabulary.
 -- Merges normalized IPDB themes and OPDB keywords into a unified view.
 CREATE OR REPLACE VIEW compare_themes AS
 WITH
@@ -215,8 +215,8 @@ SELECT
   m.name AS theme,
   m.in_ipdb,
   m.in_opdb,
-  COALESCE(th1.slug, th2.slug, th3.slug) AS pinbase_slug,
-  (COALESCE(th1.slug, th2.slug, th3.slug) IS NOT NULL) AS in_pinbase,
+  COALESCE(th1.slug, th2.slug, th3.slug) AS pindata_slug,
+  (COALESCE(th1.slug, th2.slug, th3.slug) IS NOT NULL) AS in_pindata,
   (m.name IN (SELECT theme FROM ref_themes_dropped)
    OR lower(m.name) IN (SELECT lower(theme) FROM ref_themes_dropped)) AS is_dropped
 FROM merged m
@@ -224,14 +224,14 @@ LEFT JOIN themes th1 ON m.name = th1.name
 LEFT JOIN themes th2 ON m.name = th2.slug
 LEFT JOIN theme_alias_slugs th3 ON m.name = th3.alias_slug;
 
--- Themes from external sources not in pinbase and not dropped.
+-- Themes from external sources not in pindata and not dropped.
 CREATE OR REPLACE VIEW missing_themes AS
 SELECT theme, in_ipdb, in_opdb
 FROM compare_themes
-WHERE NOT in_pinbase AND NOT is_dropped
+WHERE NOT in_pindata AND NOT is_dropped
 ORDER BY theme;
 
--- Theme coverage: each pinbase theme with direct and rollup machine counts.
+-- Theme coverage: each pindata theme with direct and rollup machine counts.
 CREATE OR REPLACE VIEW theme_coverage AS
 WITH
   direct_counts AS (
@@ -337,7 +337,7 @@ LEFT JOIN opdb_name_ce ON t.slug = opdb_name_ce.model_slug;
 -- Missing: model theme assignments
 ------------------------------------------------------------
 
--- Models with IPDB themes that resolve to pinbase vocabulary but have no
+-- Models with IPDB themes that resolve to pindata vocabulary but have no
 -- theme_slugs assigned yet.
 CREATE OR REPLACE VIEW missing_themes_on_models AS
 SELECT

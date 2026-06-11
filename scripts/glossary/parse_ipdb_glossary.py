@@ -5,7 +5,7 @@ Reads the saved HTML from ingest_sources/glossary_ipdb/ and extracts each
 glossary term with its definition, cross-references, and linked games.
 
 Usage:
-    python scripts/parse_ipdb_glossary.py [--src FILE] [--dest FILE]
+    python scripts/glossary/parse_ipdb_glossary.py [--src FILE] [--dest FILE]
 """
 
 from __future__ import annotations
@@ -16,9 +16,10 @@ import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import override
 
 # Import slugify from the pindata sister project
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "pindata" / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pindata" / "lib"))
 from slugify import slugify
 
 DEFAULT_SRC = "ingest_sources/glossary_ipdb/Pinball Glossary.html"
@@ -30,7 +31,7 @@ class _GlossaryParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__()
-        self.entries: list[dict] = []
+        self.entries: list[dict[str, object]] = []
 
         # State tracking
         self._in_dt = False
@@ -38,8 +39,8 @@ class _GlossaryParser(HTMLParser):
         self._current_anchor: str | None = None
         self._current_term: str | None = None
         self._dd_parts: list[str] = []
-        self._dd_links: list[dict] = []  # pagelink cross-refs
-        self._dd_games: list[dict] = []  # agamelink game refs
+        self._dd_links: list[dict[str, str]] = []  # pagelink cross-refs
+        self._dd_games: list[dict[str, object]] = []  # agamelink game refs
 
         # Link accumulation
         self._in_pagelink = False
@@ -60,14 +61,14 @@ class _GlossaryParser(HTMLParser):
             if lnk["slug"] not in seen_links:
                 seen_links.add(lnk["slug"])
                 xrefs.append(lnk["slug"])
-        seen_games: set[int] = set()
-        games = []
+        seen_games: set[object] = set()
+        games: list[dict[str, object]] = []
         for g in self._dd_games:
             if g["ipdb_id"] not in seen_games:
                 seen_games.add(g["ipdb_id"])
                 games.append(g)
 
-        entry: dict = {
+        entry: dict[str, object] = {
             "slug": slugify((self._current_anchor or "").replace("_", " ")),
             "name": self._current_term,
             "definition": definition,
@@ -87,6 +88,7 @@ class _GlossaryParser(HTMLParser):
 
     # -- HTMLParser callbacks --
 
+    @override
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr = dict(attrs)
         if tag == "dt":
@@ -101,8 +103,8 @@ class _GlossaryParser(HTMLParser):
         elif tag == "a" and self._in_dt and "name" in attr:
             self._current_anchor = attr["name"]
         elif tag == "a" and self._in_dd:
-            cls = attr.get("class", "")
-            href = attr.get("href", "")
+            cls = attr.get("class") or ""
+            href = attr.get("href") or ""
             if "pagelink" in cls:
                 self._in_pagelink = True
                 self._link_href = href.lstrip("#")
@@ -112,6 +114,7 @@ class _GlossaryParser(HTMLParser):
                 self._link_href = href
                 self._link_text_parts = []
 
+    @override
     def handle_endtag(self, tag: str) -> None:
         if tag == "dt":
             self._in_dt = False
@@ -122,7 +125,9 @@ class _GlossaryParser(HTMLParser):
             if self._in_pagelink:
                 text = _clean_text("".join(self._link_text_parts))
                 if self._link_href and text:
-                    self._dd_links.append({"slug": slugify(self._link_href.replace("_", " "))})
+                    self._dd_links.append(
+                        {"slug": slugify(self._link_href.replace("_", " "))}
+                    )
                 self._in_pagelink = False
             elif self._in_gamelink:
                 text = _clean_text("".join(self._link_text_parts))
@@ -133,6 +138,7 @@ class _GlossaryParser(HTMLParser):
                         self._dd_games.append(game)
                 self._in_gamelink = False
 
+    @override
     def handle_data(self, data: str) -> None:
         if self._in_dt and self._current_anchor:
             # Capture term name from the anchor text inside <dt>
@@ -144,6 +150,7 @@ class _GlossaryParser(HTMLParser):
             if self._in_pagelink or self._in_gamelink:
                 self._link_text_parts.append(data)
 
+    @override
     def handle_entityref(self, name: str) -> None:
         char = {"amp": "&", "lt": "<", "gt": ">", "nbsp": " ", "quot": '"'}.get(
             name, f"&{name};"
@@ -153,6 +160,7 @@ class _GlossaryParser(HTMLParser):
             if self._in_pagelink or self._in_gamelink:
                 self._link_text_parts.append(char)
 
+    @override
     def handle_charref(self, name: str) -> None:
         try:
             char = chr(int(name, 16) if name.startswith("x") else int(name))
@@ -166,7 +174,12 @@ class _GlossaryParser(HTMLParser):
 
 def _normalize_quotes(s: str) -> str:
     """Replace curly quotes with straight quotes."""
-    return s.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    return (
+        s.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
 
 
 # Patterns for game reference strings, tried in order.
@@ -181,21 +194,26 @@ _GAME_PATTERNS = [
 ]
 
 
-def _parse_game_ref(ipdb_id: int, raw_name: str) -> dict:
+def _parse_game_ref(ipdb_id: int, raw_name: str) -> dict[str, object]:
     """Parse a game reference string into structured fields.
 
     Returns a dict with ipdb_id and whichever of manufacturer, year,
     title can be extracted.
     """
     name = _normalize_quotes(raw_name)
-    result: dict | None = None
+    result: dict[str, object] | None = None
     for i, pat in enumerate(_GAME_PATTERNS):
         m = pat.match(name)
         if not m:
             continue
         if i == 0:  # Mfr's Year 'Title'
             mfr, year_s, title = m.group(1), m.group(2), m.group(3)
-            result = {"ipdb_id": ipdb_id, "manufacturer": mfr, "year": int(year_s), "title": title}
+            result = {
+                "ipdb_id": ipdb_id,
+                "manufacturer": mfr,
+                "year": int(year_s),
+                "title": title,
+            }
         elif i == 1:  # Mfr's 'Title'
             mfr, title = m.group(1), m.group(2)
             result = {"ipdb_id": ipdb_id, "manufacturer": mfr, "title": title}
@@ -211,8 +229,9 @@ def _parse_game_ref(ipdb_id: int, raw_name: str) -> dict:
 
     # Clean any residual quote artifacts from all string fields
     for key in ("title", "manufacturer"):
-        if key in result:
-            result[key] = result[key].strip("'\"").strip()
+        value = result.get(key)
+        if isinstance(value, str):
+            result[key] = value.strip("'\"").strip()
 
     _validate_game_ref(result, raw_name)
     return result
@@ -220,28 +239,57 @@ def _parse_game_ref(ipdb_id: int, raw_name: str) -> dict:
 
 # Known manufacturers from the IPDB glossary game references.
 _KNOWN_MANUFACTURERS = {
-    "Ad-Lee Company", "Atari", "Automaticos", "Bally", "Bally Midway",
-    "Bensa", "C. F. Eckhart & Company", "Capcom", "Chicago Coin",
-    "Como Manufacturing Corp.", "Exhibit", "Genco", "Gottlieb",
-    "H. P. Schafer", "Homepin Ltd", "Interflip", "Keeney", "Midway",
-    "Pacent", "Playmatic", "Premier", "Rally", "Recel", "Rock-ola",
-    "SLEIC", "Sega", "Sega Enterprises", "Smith Manufacturing Company",
-    "Soc. Elettrogiochi", "Stern", "Stoner", "United",
-    "Unknown Manufacturer", "Williams", "Zaccaria",
+    "Ad-Lee Company",
+    "Atari",
+    "Automaticos",
+    "Bally",
+    "Bally Midway",
+    "Bensa",
+    "C. F. Eckhart & Company",
+    "Capcom",
+    "Chicago Coin",
+    "Como Manufacturing Corp.",
+    "Exhibit",
+    "Genco",
+    "Gottlieb",
+    "H. P. Schafer",
+    "Homepin Ltd",
+    "Interflip",
+    "Keeney",
+    "Midway",
+    "Pacent",
+    "Playmatic",
+    "Premier",
+    "Rally",
+    "Recel",
+    "Rock-ola",
+    "SLEIC",
+    "Sega",
+    "Sega Enterprises",
+    "Smith Manufacturing Company",
+    "Soc. Elettrogiochi",
+    "Stern",
+    "Stoner",
+    "United",
+    "Unknown Manufacturer",
+    "Williams",
+    "Zaccaria",
 }
 
 
-def _validate_game_ref(ref: dict, raw_name: str) -> None:
+def _validate_game_ref(ref: dict[str, object], raw_name: str) -> None:
     """Validate a parsed game reference. Raises ValueError on problems."""
     # Title must be non-empty
     title = ref.get("title", "")
-    if not title or not title.strip():
-        raise ValueError(f"Game ref has empty title: ipdb_id={ref['ipdb_id']} raw={raw_name!r}")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(
+            f"Game ref has empty title: ipdb_id={ref['ipdb_id']} raw={raw_name!r}"
+        )
 
     # Year must be a plausible pinball year
     if "year" in ref:
         year = ref["year"]
-        if not (1900 <= year <= 2030):
+        if not isinstance(year, int) or not (1900 <= year <= 2030):
             raise ValueError(
                 f"Game ref has implausible year {year}: ipdb_id={ref['ipdb_id']} raw={raw_name!r}"
             )
@@ -268,7 +316,7 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def _backfill_see_also(entries: list[dict]) -> None:
+def _backfill_see_also(entries: list[dict[str, object]]) -> None:
     """Ensure 'See X' definitions have the target in see_also.
 
     Some "See X" entries lack a pagelink in the HTML, so see_also is
@@ -277,43 +325,54 @@ def _backfill_see_also(entries: list[dict]) -> None:
     by_slug = {e["slug"] for e in entries}
     for e in entries:
         d = e.get("definition", "")
-        if not d.startswith("See "):
+        if not isinstance(d, str) or not d.startswith("See "):
             continue
-        existing = set(e.get("see_also", []))
+        current = e.get("see_also", [])
+        existing = set(current) if isinstance(current, list) else set()
         # Extract all "See Term" references from the definition
-        for m in re.finditer(r"See\s+(?:longer explanation under\s+)?['\"]?([^.'\"\u201c\u201d]+)", d):
+        for m in re.finditer(
+            r"See\s+(?:longer explanation under\s+)?['\"]?([^.'\"\u201c\u201d]+)", d
+        ):
             ref = m.group(1).strip()
             candidate = slugify(ref.replace("_", " "))
             if candidate in by_slug and candidate not in existing:
-                e.setdefault("see_also", []).append(candidate)
+                target = e.setdefault("see_also", [])
+                if isinstance(target, list):
+                    target.append(candidate)
                 existing.add(candidate)
 
 
-def _extract_also_called(entries: list[dict]) -> None:
+def _extract_also_called(entries: list[dict[str, object]]) -> None:
     """Extract 'Also called X' aliases from definitions."""
     for e in entries:
+        definition = e.get("definition", "")
+        if not isinstance(definition, str):
+            continue
         for m in re.finditer(
             r"[Aa]lso called (?:a |the |an )?"
             r'["\u201c]?([A-Z][^."\u201d]+?)["\u201d.]',
-            e.get("definition", ""),
+            definition,
         ):
             alias = m.group(1).strip().rstrip(",")
             if "," in alias or len(alias) > 40:
                 continue
-            e.setdefault("aliases", []).append(alias)
+            aliases = e.setdefault("aliases", [])
+            if isinstance(aliases, list):
+                aliases.append(alias)
 
     # Deduplicate (case-insensitive) and sort aliases
     for e in entries:
-        if "aliases" in e:
+        aliases = e.get("aliases")
+        if isinstance(aliases, list):
             seen: dict[str, str] = {}
-            for a in e["aliases"]:
+            for a in aliases:
                 key = a.lower()
                 if key not in seen:
                     seen[key] = a
             e["aliases"] = sorted(seen.values())
 
 
-def parse_glossary(src: Path) -> list[dict]:
+def parse_glossary(src: Path) -> list[dict[str, object]]:
     """Parse the glossary HTML and return a list of term dicts."""
     html = src.read_text(encoding="utf-8", errors="replace")
     parser = _GlossaryParser()

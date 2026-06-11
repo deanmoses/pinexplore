@@ -10,13 +10,13 @@ CREATE TEMP TABLE _warnings (check_name VARCHAR, cnt BIGINT);
 ------------------------------------------------------------
 
 INSERT INTO _warnings
-SELECT 'pinbase_opdb_id_not_in_dump', count(*)
+SELECT 'pindata_opdb_id_not_in_dump', count(*)
 FROM models AS m
 WHERE m.opdb_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM opdb_machines AS o WHERE o.opdb_id = m.opdb_id);
 
 INSERT INTO _warnings
-SELECT 'pinbase_ipdb_id_not_in_dump', count(*)
+SELECT 'pindata_ipdb_id_not_in_dump', count(*)
 FROM models AS m
 WHERE m.ipdb_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM ipdb_machines AS i WHERE i.IpdbId = m.ipdb_id);
@@ -77,7 +77,7 @@ SELECT 'theme_max_parent_depth', md FROM (
   )
 ) WHERE md > 5;
 
--- IPDB-parsed city not found in pinbase location files
+-- IPDB-parsed city not found in pindata location files
 -- Details: SELECT * FROM ipdb_corporate_entities WHERE headquarters_city IS NOT NULL
 --   AND NOT EXISTS (SELECT 1 FROM ref_location_city_aliases WHERE alias = headquarters_city)
 INSERT INTO _warnings
@@ -88,7 +88,7 @@ WHERE headquarters_city IS NOT NULL
     SELECT 1 FROM ref_location_city_aliases WHERE alias = headquarters_city
   );
 
--- IPDB-parsed country not found in pinbase location files
+-- IPDB-parsed country not found in pindata location files
 -- Details: SELECT * FROM ipdb_corporate_entities WHERE headquarters_country IS NOT NULL
 --   AND NOT EXISTS (SELECT 1 FROM ref_location_country_aliases WHERE alias = headquarters_country)
 INSERT INTO _warnings

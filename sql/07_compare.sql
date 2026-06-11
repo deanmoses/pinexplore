@@ -7,22 +7,22 @@
 CREATE OR REPLACE VIEW compare_models_opdb AS
 SELECT
   m.slug,
-  m.name AS pinbase_name,
+  m.name AS pindata_name,
   o.name AS opdb_name,
   m.name IS DISTINCT FROM o.name AS name_differs,
-  m.corporate_entity_slug AS pinbase_corporate_entity,
-  ce.manufacturer_slug AS pinbase_manufacturer,
+  m.corporate_entity_slug AS pindata_corporate_entity,
+  ce.manufacturer_slug AS pindata_manufacturer,
   o.manufacturer_name AS opdb_manufacturer,
-  m.year AS pinbase_year,
+  m.year AS pindata_year,
   year(o.manufacture_date) AS opdb_year,
   m.year IS DISTINCT FROM year(o.manufacture_date) AS year_differs,
-  m.technology_generation_slug AS pinbase_tech_gen,
+  m.technology_generation_slug AS pindata_tech_gen,
   o.technology_generation_slug AS opdb_tech_gen,
   m.technology_generation_slug IS DISTINCT FROM o.technology_generation_slug AS tech_gen_differs,
-  m.display_type_slug AS pinbase_display,
+  m.display_type_slug AS pindata_display,
   o.display_type_slug AS opdb_display,
   m.display_type_slug IS DISTINCT FROM o.display_type_slug AS display_differs,
-  m.player_count AS pinbase_players,
+  m.player_count AS pindata_players,
   o.player_count AS opdb_players,
   m.opdb_id
 FROM models AS m
@@ -36,18 +36,18 @@ LEFT JOIN corporate_entities AS ce ON ce.slug = m.corporate_entity_slug;
 CREATE OR REPLACE VIEW compare_models_ipdb AS
 SELECT
   m.slug,
-  m.name AS pinbase_name,
+  m.name AS pindata_name,
   i.Title AS ipdb_name,
   m.name IS DISTINCT FROM i.Title AS name_differs,
-  m.corporate_entity_slug AS pinbase_corporate_entity,
-  ce.manufacturer_slug AS pinbase_manufacturer,
+  m.corporate_entity_slug AS pindata_corporate_entity,
+  ce.manufacturer_slug AS pindata_manufacturer,
   i.ManufacturerShortName AS ipdb_manufacturer,
-  m.year AS pinbase_year,
+  m.year AS pindata_year,
   EXTRACT(YEAR FROM TRY_CAST(i.DateOfManufacture AS DATE))::INTEGER AS ipdb_year,
   m.year IS DISTINCT FROM EXTRACT(YEAR FROM TRY_CAST(i.DateOfManufacture AS DATE))::INTEGER AS year_differs,
-  m.technology_generation_slug AS pinbase_tech_gen,
+  m.technology_generation_slug AS pindata_tech_gen,
   i.technology_generation_slug AS ipdb_tech_gen,
-  m.player_count AS pinbase_players,
+  m.player_count AS pindata_players,
   i.Players AS ipdb_players,
   i.AverageFunRating AS ipdb_rating,
   i.ProductionNumber AS ipdb_production,
@@ -63,7 +63,7 @@ LEFT JOIN corporate_entities AS ce ON ce.slug = m.corporate_entity_slug;
 CREATE OR REPLACE VIEW compare_titles_opdb AS
 SELECT
   t.slug,
-  t.name AS pinbase_name,
+  t.name AS pindata_name,
   g.name AS opdb_name,
   t.name <> g.name AS name_differs,
   t.opdb_group_id
@@ -71,7 +71,7 @@ FROM titles AS t
 INNER JOIN opdb_groups AS g ON t.opdb_group_id = g.opdb_id;
 
 ------------------------------------------------------------
--- IPDB credits missing from Pinbase
+-- IPDB credits missing from Pindata
 ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW compare_credits_ipdb AS
@@ -85,20 +85,20 @@ FROM _ipdb_credits ic
 JOIN models m ON m.ipdb_id = ic.IpdbId
 WHERE ic.person_slug IS NOT NULL
   AND NOT EXISTS (
-    SELECT 1 FROM pinbase_credits pc
+    SELECT 1 FROM pindata_credits pc
     WHERE pc.model_slug = m.slug
       AND pc.person_slug = ic.person_slug
       AND pc.role = ic.role
   );
 
 ------------------------------------------------------------
--- IPDB themes resolved against pinbase vocabulary
+-- IPDB themes resolved against pindata vocabulary
 ------------------------------------------------------------
 
--- Direct IPDB themes plus all implied parents from the pinbase hierarchy.
+-- Direct IPDB themes plus all implied parents from the pindata hierarchy.
 CREATE OR REPLACE VIEW ipdb_themes_resolved AS
 WITH RECURSIVE
-  -- Start with direct themes that exist in pinbase vocabulary
+  -- Start with direct themes that exist in pindata vocabulary
   direct AS (
     SELECT DISTINCT it.IpdbId, it.theme
     FROM ipdb_themes it
@@ -118,15 +118,15 @@ SELECT DISTINCT IpdbId, theme
 FROM rollup;
 
 ------------------------------------------------------------
--- Model theme assignments: pinbase vs IPDB
+-- Model theme assignments: pindata vs IPDB
 ------------------------------------------------------------
 
 -- Per-model comparison of direct theme assignments. Shows themes that are
--- in pinbase only, IPDB only, or both. Compares direct assignments only,
+-- in pindata only, IPDB only, or both. Compares direct assignments only,
 -- not rolled-up parents (ipdb_themes_resolved handles rollup separately).
 CREATE OR REPLACE VIEW compare_model_themes_ipdb AS
 WITH
-  pinbase_themes AS (
+  pindata_themes AS (
     SELECT DISTINCT m.slug AS model_slug, unnest(m.theme_slugs) AS theme_slug
     FROM models m
     WHERE m.theme_slugs IS NOT NULL AND len(m.theme_slugs) > 0
@@ -141,23 +141,23 @@ WITH
 SELECT
   COALESCE(p.model_slug, i.model_slug) AS model_slug,
   COALESCE(p.theme_slug, i.theme_slug) AS theme_slug,
-  (p.theme_slug IS NOT NULL) AS in_pinbase,
+  (p.theme_slug IS NOT NULL) AS in_pindata,
   (i.theme_slug IS NOT NULL) AS in_ipdb
-FROM pinbase_themes p
+FROM pindata_themes p
 FULL OUTER JOIN ipdb_model_themes i
   ON p.model_slug = i.model_slug AND p.theme_slug = i.theme_slug;
 
 ------------------------------------------------------------
--- Cabinet type: pinbase vs OPDB
+-- Cabinet type: pindata vs OPDB
 ------------------------------------------------------------
 
 -- Models where OPDB assigns a cabinet type via its features array but
--- pinbase disagrees, or vice versa. Uses aliases from the cabinets
--- entity to match OPDB feature strings to pinbase cabinet slugs.
+-- pindata disagrees, or vice versa. Uses aliases from the cabinets
+-- entity to match OPDB feature strings to pindata cabinet slugs.
 CREATE OR REPLACE VIEW compare_cabinets_opdb AS
 SELECT
   m.slug AS model_slug,
-  m.cabinet_slug AS pinbase_cabinet,
+  m.cabinet_slug AS pindata_cabinet,
   m.opdb_id,
   rfc.cabinet_slug AS opdb_cabinet
 FROM models AS m
@@ -170,16 +170,16 @@ INNER JOIN (
 WHERE COALESCE(m.cabinet_slug, '') != rfc.cabinet_slug;
 
 ------------------------------------------------------------
--- Conversion status: pinbase vs OPDB
+-- Conversion status: pindata vs OPDB
 ------------------------------------------------------------
 
 -- Models where OPDB marks as 'Conversion kit' or 'Converted game' but
--- pinbase does not have is_conversion=true, or vice versa.
+-- pindata does not have is_conversion=true, or vice versa.
 CREATE OR REPLACE VIEW compare_conversions_opdb AS
 SELECT
   m.slug AS model_slug,
-  m.is_conversion AS pinbase_is_conversion,
-  m.converted_from AS pinbase_converted_from,
+  m.is_conversion AS pindata_is_conversion,
+  m.converted_from AS pindata_converted_from,
   m.opdb_id,
   list_contains(o.features, 'Conversion kit') AS opdb_conversion_kit,
   list_contains(o.features, 'Converted game') AS opdb_converted_game,
@@ -192,13 +192,13 @@ WHERE COALESCE(m.is_conversion, false)
                       OR list_contains(o.features, 'Converted game'));
 
 ------------------------------------------------------------
--- Gameplay features: OPDB vs pinbase
+-- Gameplay features: OPDB vs pindata
 ------------------------------------------------------------
 
--- Models where OPDB assigns a gameplay feature but pinbase does not,
+-- Models where OPDB assigns a gameplay feature but pindata does not,
 -- or vice versa. Currently one-directional because models do not yet
 -- have a gameplay_feature_slugs field; rows here represent OPDB claims
--- that pinbase should eventually match.
+-- that pindata should eventually match.
 CREATE OR REPLACE VIEW compare_gameplay_features_opdb AS
 SELECT
   m.slug AS model_slug,
@@ -212,13 +212,13 @@ INNER JOIN models AS m ON o.opdb_id = m.opdb_id
 LEFT JOIN gameplay_features AS gf ON rfg.gameplay_feature_slug = gf.slug;
 
 ------------------------------------------------------------
--- Reward types: OPDB vs pinbase
+-- Reward types: OPDB vs pindata
 ------------------------------------------------------------
 
--- Models where OPDB assigns a reward type but pinbase does not, or
+-- Models where OPDB assigns a reward type but pindata does not, or
 -- vice versa. Currently one-directional because models do not yet have
 -- a reward_type_slugs field; rows here represent OPDB claims that
--- pinbase should eventually match.
+-- pindata should eventually match.
 CREATE OR REPLACE VIEW compare_reward_types_opdb AS
 SELECT
   m.slug AS model_slug,
@@ -232,12 +232,12 @@ INNER JOIN models AS m ON o.opdb_id = m.opdb_id
 LEFT JOIN reward_types AS rt ON rfrt.reward_type_slug = rt.slug;
 
 ------------------------------------------------------------
--- Gameplay features: IPDB vs pinbase
+-- Gameplay features: IPDB vs pindata
 ------------------------------------------------------------
 
--- Distinct IPDB gameplay feature names that do not map to any pinbase
+-- Distinct IPDB gameplay feature names that do not map to any pindata
 -- gameplay_feature (via name or alias). Each row is a feature term
--- extracted from NotableFeatures that pinbase has no vocabulary entry
+-- extracted from NotableFeatures that pindata has no vocabulary entry
 -- for.
 CREATE OR REPLACE VIEW compare_gameplay_features_ipdb AS
 SELECT
@@ -250,10 +250,10 @@ GROUP BY ipdb_feature
 ORDER BY machine_count DESC;
 
 ------------------------------------------------------------
--- Reward types: IPDB vs pinbase
+-- Reward types: IPDB vs pindata
 ------------------------------------------------------------
 
--- Distinct IPDB reward type terms that do not map to any pinbase
+-- Distinct IPDB reward type terms that do not map to any pindata
 -- reward_type (via name or alias). Currently expected to be empty
 -- since all six reward types are defined.
 CREATE OR REPLACE VIEW compare_reward_types_ipdb AS

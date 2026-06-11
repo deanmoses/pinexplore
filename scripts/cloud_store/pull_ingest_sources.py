@@ -7,7 +7,7 @@ and the pindata/ manifest (catalog exports from pindata), then downloads
 files whose size or SHA-256 don't match.
 
 Usage:
-    python scripts/pull_ingest_sources.py [--url URL] [--dest DIR]
+    python scripts/cloud_store/pull_ingest_sources.py [--url URL] [--dest DIR]
 """
 
 from __future__ import annotations
@@ -18,6 +18,11 @@ import json
 import os
 import sys
 import urllib.request
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from http.client import HTTPResponse
 
 DEFAULT_URL = "https://pub-8a5220445534421c879b6ff9ede350f1.r2.dev"
 
@@ -25,13 +30,14 @@ _OPENER = urllib.request.build_opener()
 _OPENER.addheaders = [("User-Agent", "pinexplore/1.0")]
 
 
-def _urlopen(url: str):
-    return _OPENER.open(url)
+def _urlopen(url: str) -> HTTPResponse:
+    resp: HTTPResponse = _OPENER.open(url)
+    return resp
 
 
-def _sha256(path: str) -> str:
+def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -58,20 +64,20 @@ def _pull_manifest(base_url: str, manifest_path: str, dest: str) -> tuple[int, i
         rel_path = entry["path"]
         expected_size = entry["size"]
         expected_sha = entry["sha256"]
-        local_path = os.path.join(dest, prefix + rel_path)
+        local_path = Path(dest) / (prefix + rel_path)
 
         if (
-            os.path.exists(local_path)
-            and os.path.getsize(local_path) == expected_size
+            local_path.exists()
+            and local_path.stat().st_size == expected_size
+            and _sha256(local_path) == expected_sha
         ):
-            if _sha256(local_path) == expected_sha:
-                skipped += 1
-                continue
+            skipped += 1
+            continue
 
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
         file_url = f"{base_url}/{prefix}{rel_path}"
         print(f"  {prefix}{rel_path}")
-        with _urlopen(file_url) as resp, open(local_path, "wb") as f:
+        with _urlopen(file_url) as resp, local_path.open("wb") as f:
             f.write(resp.read())
 
         actual_sha = _sha256(local_path)
@@ -87,7 +93,7 @@ def _pull_manifest(base_url: str, manifest_path: str, dest: str) -> tuple[int, i
     return downloaded, skipped
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Download ingest sources from R2.")
     parser.add_argument(
         "--url",

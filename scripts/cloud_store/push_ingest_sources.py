@@ -6,7 +6,7 @@ root-level manifest.json covering only these files.  The pindata/
 prefix is owned by pindata's push script and excluded here.
 
 Usage:
-    python scripts/push_ingest_sources.py
+    python scripts/cloud_store/push_ingest_sources.py
 
 Requires R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
 in environment or .env.
@@ -19,8 +19,16 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TypedDict
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+
+class _Entry(TypedDict):
+    path: str
+    size: int
+    sha256: str
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SOURCE_DIR = REPO_ROOT / "ingest_sources"
 EXCLUDE = {
     "manifest.json",
@@ -28,7 +36,7 @@ EXCLUDE = {
 }
 
 
-def _load_dotenv():
+def _load_dotenv() -> None:
     """Load .env file into os.environ (key=value lines only)."""
     env_path = REPO_ROOT / ".env"
     if not env_path.exists():
@@ -44,22 +52,30 @@ def _load_dotenv():
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
-def _collect_files(src: Path) -> list[dict]:
+def _collect_files(src: Path) -> list[_Entry]:
     """Walk src and return manifest entries, excluding dotfiles and stale files.
 
     Skips the pindata/ subtree — that prefix is owned by pindata.
     """
-    entries = []
+    entries: list[_Entry] = []
     for root, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != "pindata"]
         for f in files:
-            if f.startswith(".") or f in EXCLUDE:
+            # Skip dotfiles, the manifest, and transient SQLite sidecars
+            # (-wal/-shm/-journal): machine-local state that must never be
+            # transported. The web cache uses DELETE journal mode so these
+            # normally don't exist, but never upload them if they do.
+            if (
+                f.startswith(".")
+                or f in EXCLUDE
+                or f.endswith(("-wal", "-shm", "-journal"))
+            ):
                 continue
             full = Path(root) / f
             rel = full.relative_to(src).as_posix()
@@ -102,6 +118,7 @@ def main() -> int:
     if missing:
         print(f"ERROR: Missing env vars: {', '.join(missing)}", file=sys.stderr)
         return 1
+    assert bucket is not None  # guaranteed by the missing-vars guard above
 
     if not SOURCE_DIR.exists():
         print(f"ERROR: {SOURCE_DIR} not found.", file=sys.stderr)
@@ -136,7 +153,10 @@ def main() -> int:
             head = s3.head_object(Bucket=bucket, Key=key)
             remote_size = head["ContentLength"]
             remote_etag = head["ETag"].strip('"')
-            local_md5 = hashlib.md5(local_path.read_bytes()).hexdigest()
+            # R2 ETags are MD5 digests; this is a content comparison, not security.
+            local_md5 = hashlib.md5(
+                local_path.read_bytes(), usedforsecurity=False
+            ).hexdigest()
             if remote_size == entry["size"] and remote_etag == local_md5:
                 skipped += 1
                 continue

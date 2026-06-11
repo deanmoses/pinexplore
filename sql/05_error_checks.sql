@@ -1,4 +1,4 @@
--- Hard integrity checks on pinbase data.
+-- Hard integrity checks on pindata data.
 -- Aborts on violations.
 
 DROP TABLE IF EXISTS _violations;
@@ -87,7 +87,7 @@ FROM (
 -- Ambiguous alias: one alias string maps to multiple canonical themes.
 -- These are compound terms (e.g. "safari-adventure" → Adventure, Safari)
 -- that intentionally resolve to multiple themes. Tracked as a warning
--- in 05_warning_checks.sql rather than a hard violation.
+-- in 06_warning_checks.sql rather than a hard violation.
 
 -- Orphan model theme_slugs: model references a theme that doesn't exist
 INSERT INTO _violations
@@ -222,10 +222,10 @@ SELECT 'external_ids', 'duplicate_ce_ipdb_manufacturer_id', CAST(ipdb_manufactur
 FROM corporate_entities WHERE ipdb_manufacturer_id IS NOT NULL
 GROUP BY ipdb_manufacturer_id HAVING count(*) > 1;
 
--- OPDB/Pinbase ipdb_id agreement
+-- OPDB/Pindata ipdb_id agreement
 INSERT INTO _violations
 SELECT 'external_ids', 'ipdb_id_disagreement',
-  m.slug || ' pinbase=' || m.ipdb_id || ' opdb=' || om.ipdb_id
+  m.slug || ' pindata=' || m.ipdb_id || ' opdb=' || om.ipdb_id
 FROM models AS m
 JOIN opdb_machines AS om ON m.opdb_id = om.opdb_id
 WHERE m.ipdb_id IS NOT NULL
@@ -235,7 +235,7 @@ WHERE m.ipdb_id IS NOT NULL
 -- CE ↔ IPDB manufacturer agreement
 INSERT INTO _violations
 SELECT 'external_ids', 'ce_ipdb_disagreement',
-  m.slug || ' pinbase_ce=' || m.corporate_entity_slug
+  m.slug || ' pindata_ce=' || m.corporate_entity_slug
   || ' ipdb_mfr_id=' || im.ManufacturerId
   || ' ce_ipdb_id=' || COALESCE(CAST(ce.ipdb_manufacturer_id AS VARCHAR), 'NULL')
 FROM models AS m
@@ -250,7 +250,7 @@ WHERE m.corporate_entity_slug IS NOT NULL
 INSERT INTO _violations
 SELECT 'external_ids', 'ce_opdb_manufacturer_disagreement',
   m.slug || ' opdb_mfr_id=' || (om.manufacturer ->> 'manufacturer_id')
-  || ' pinbase_mfr=' || mfr.slug
+  || ' pindata_mfr=' || mfr.slug
   || ' mfr_opdb_id=' || COALESCE(CAST(mfr.opdb_manufacturer_id AS VARCHAR), 'NULL')
 FROM models AS m
 JOIN opdb_machines AS om ON m.opdb_id = om.opdb_id
@@ -338,12 +338,12 @@ WHERE m.remake_of IS NOT NULL
 
 INSERT INTO _violations
 SELECT 'orphan_refs', 'orphan_credit_person', c.model_slug || ' -> ' || c.person_slug
-FROM pinbase_credits AS c
+FROM pindata_credits AS c
 WHERE NOT EXISTS (SELECT 1 FROM people AS p WHERE p.slug = c.person_slug);
 
 INSERT INTO _violations
 SELECT 'orphan_refs', 'orphan_credit_role', c.model_slug || ' -> ' || c.role
-FROM pinbase_credits AS c
+FROM pindata_credits AS c
 WHERE NOT EXISTS (SELECT 1 FROM credit_roles AS cr WHERE cr.name = c.role);
 
 INSERT INTO _violations
@@ -368,7 +368,7 @@ FROM models AS a
 JOIN models AS b ON a.variant_of = b.slug
 WHERE b.variant_of IS NOT NULL;
 
--- Pinbase model references a non-physical OPDB record (physical_machine=0)
+-- Pindata model references a non-physical OPDB record (physical_machine=0)
 INSERT INTO _violations
 SELECT 'entities', 'non_physical_opdb_ref', m.slug || ' (' || m.opdb_id || ')'
 FROM models AS m
@@ -452,16 +452,16 @@ WHERE m.corporate_entity_slug IS NULL
 -- Credits and people
 ------------------------------------------------------------
 
--- Pinbase credit count must match IPDB credit count
+-- Pindata credit count must match IPDB credit count
 INSERT INTO _violations
 SELECT 'credits', 'credit_count_mismatch_ipdb',
-  m.slug || ' pinbase=' || COALESCE(pb.cnt, 0) || ' ipdb=' || ipdb.cnt
+  m.slug || ' pindata=' || COALESCE(pb.cnt, 0) || ' ipdb=' || ipdb.cnt
 FROM models AS m
 JOIN (
   SELECT IpdbId, count(*) AS cnt FROM _ipdb_credits GROUP BY IpdbId
 ) AS ipdb ON m.ipdb_id = ipdb.IpdbId
 LEFT JOIN (
-  SELECT model_slug, count(*) AS cnt FROM pinbase_credits GROUP BY model_slug
+  SELECT model_slug, count(*) AS cnt FROM pindata_credits GROUP BY model_slug
 ) AS pb ON pb.model_slug = m.slug
 WHERE COALESCE(pb.cnt, 0) <> ipdb.cnt;
 
@@ -469,12 +469,12 @@ WHERE COALESCE(pb.cnt, 0) <> ipdb.cnt;
 INSERT INTO _violations
 SELECT 'credits', 'person_without_credits', p.slug
 FROM people AS p
-WHERE NOT EXISTS (SELECT 1 FROM pinbase_credits AS c WHERE c.person_slug = p.slug);
+WHERE NOT EXISTS (SELECT 1 FROM pindata_credits AS c WHERE c.person_slug = p.slug);
 
 -- Duplicate credit on a model (same person+role twice)
 INSERT INTO _violations
 SELECT 'credits', 'duplicate_credit', model_slug || ' ' || person_slug || ' ' || role
-FROM pinbase_credits
+FROM pindata_credits
 GROUP BY model_slug, person_slug, role HAVING count(*) > 1;
 
 -- Person alias duplicated on same person
@@ -516,7 +516,7 @@ SELECT 'credits', 'person_alias_matches_own_name', p.slug || ' alias "' || alias
 FROM people AS p, UNNEST(p.aliases) AS t(alias)
 WHERE LOWER(alias) = LOWER(p.name);
 
--- IPDB person name does not resolve to any Pinbase person
+-- IPDB person name does not resolve to any Pindata person
 INSERT INTO _violations
 SELECT 'credits', 'ipdb_person_unresolved', person_name || ' (' || count(*) || ' credits)'
 FROM _ipdb_credits
@@ -535,13 +535,13 @@ INSERT INTO _violations
 SELECT 'source_dumps', 'ipdb_record_missing_id', Title
 FROM ipdb_machines WHERE IpdbId IS NULL;
 
--- Every IPDB machine has a pinbase model
+-- Every IPDB machine has a pindata model
 INSERT INTO _violations
 SELECT 'source_dumps', 'ipdb_machine_missing_model', CAST(i.IpdbId AS VARCHAR) || ' ' || i.Title
 FROM ipdb_machines AS i
 WHERE NOT EXISTS (SELECT 1 FROM models AS m WHERE m.ipdb_id = i.IpdbId);
 
--- Every OPDB physical machine has a pinbase model
+-- Every OPDB physical machine has a pindata model
 INSERT INTO _violations
 SELECT 'source_dumps', 'opdb_machine_missing_model', om.opdb_id || ' ' || om.name
 FROM opdb_machines AS om

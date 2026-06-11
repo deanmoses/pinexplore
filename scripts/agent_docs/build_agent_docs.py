@@ -7,7 +7,7 @@ This script parses the source file and generates two output files:
 - AGENTS.md: includes START_AGENTS...END_AGENTS blocks, excludes START_CLAUDE...END_CLAUDE
 
 Usage:
-    python3 scripts/build_agent_docs.py
+    python3 scripts/agent_docs/build_agent_docs.py
 
 The source file uses markers on their own lines:
     START_CLAUDE / END_CLAUDE - content appears only in CLAUDE.md
@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 
 # Paths relative to repo root
-REPO_ROOT = Path(__file__).parent.parent
+REPO_ROOT = Path(__file__).parent.parent.parent
 SOURCE_FILE = REPO_ROOT / "docs" / "AGENTS.src.md"
 CLAUDE_OUTPUT = REPO_ROOT / "CLAUDE.md"
 AGENTS_OUTPUT = REPO_ROOT / "AGENTS.md"
@@ -55,7 +55,7 @@ def generate_output(source_lines: list[str], target: str) -> str:
         if stripped == "START_IGNORE":
             skip_until_end = "END_IGNORE"
             continue
-        elif stripped == "END_IGNORE":
+        if stripped == "END_IGNORE":
             skip_until_end = None
             continue
 
@@ -63,7 +63,7 @@ def generate_output(source_lines: list[str], target: str) -> str:
         if stripped == f"START_{target}":
             # Start including content for our target (skip the marker itself)
             continue
-        elif stripped == f"START_{other_target}":
+        if stripped == f"START_{other_target}":
             # Start skipping content for other target
             skip_until_end = f"END_{other_target}"
             continue
@@ -71,7 +71,7 @@ def generate_output(source_lines: list[str], target: str) -> str:
         # Check for end markers
         if stripped == f"END_{target}":
             continue
-        elif stripped == f"END_{other_target}":
+        if stripped == f"END_{other_target}":
             skip_until_end = None
             continue
 

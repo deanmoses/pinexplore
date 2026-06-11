@@ -9,12 +9,19 @@ Usage: scripts/rebuild_explore.py [--remote] [--timeout SECONDS]
 Local mode expects ingest_sources/ to be populated (pull from R2 first).
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import pathlib
 import signal
 import sys
 import time
+from typing import TYPE_CHECKING, NoReturn
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from types import FrameType
 
 try:
     import duckdb
@@ -24,8 +31,36 @@ except ImportError:
 DB = "explore.duckdb"
 SQL_DIR = pathlib.Path("sql")
 
+# Empty-schema stand-ins for the web cache tables, created when 03_raw_web.sql is
+# skipped (--remote, or no local cache) so any later layer that LEFT JOINs them
+# stays green in every build mode. Columns mirror scripts/web_scrape/web_cache.py
+# (SQLite TEXT→VARCHAR, INTEGER→BIGINT); the populated path uses SELECT * instead.
+WEB_STUB_SQL = """
+CREATE OR REPLACE TABLE web_pages (
+  url VARCHAR, raw_url VARCHAR, content_sha VARCHAR, first_fetched_at VARCHAR,
+  last_fetched_at VARCHAR, last_updated VARCHAR, title VARCHAR,
+  http_status BIGINT, content_type VARCHAR, html_file VARCHAR, text VARCHAR,
+  archive_url VARCHAR, archived_at VARCHAR
+);
+CREATE OR REPLACE TABLE web_fetches (
+  id BIGINT, url VARCHAR, fetched_at VARCHAR, search_query VARCHAR,
+  http_status BIGINT, content_sha VARCHAR, changed BIGINT
+);
+"""
 
-def load_dotenv():
+
+def _make_timeout_handler(
+    layer: str, timeout: int
+) -> Callable[[int, FrameType | None], NoReturn]:
+    """Build a SIGALRM handler bound to this layer (avoids a loop-variable closure)."""
+
+    def handler(signum: int, frame: FrameType | None) -> NoReturn:
+        raise TimeoutError(f"{layer} exceeded {timeout}s timeout")
+
+    return handler
+
+
+def load_dotenv() -> None:
     """Load .env file into os.environ (key=value lines only)."""
     env_path = pathlib.Path(".env")
     if not env_path.exists():
@@ -39,18 +74,22 @@ def load_dotenv():
             os.environ.setdefault(key.strip(), value.strip())
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Rebuild explore.duckdb")
-    parser.add_argument("--remote", action="store_true",
-                        help="Read ingest sources from R2")
-    parser.add_argument("--timeout", type=int, default=20,
-                        help="Per-layer timeout in seconds (default: 20)")
+    parser.add_argument(
+        "--remote", action="store_true", help="Read ingest sources from R2"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="Per-layer timeout in seconds (default: 20)",
+    )
     args = parser.parse_args()
 
     # Clean up any existing database
     for f in [DB, f"{DB}.wal"]:
-        if os.path.exists(f):
-            os.remove(f)
+        pathlib.Path(f).unlink(missing_ok=True)
 
     # Build the preamble for the raw layer
     if args.remote:
@@ -59,8 +98,7 @@ def main():
         if not r2_url:
             sys.exit("Error: Set R2_PUBLIC_URL in .env for --remote mode")
         raw_preamble = (
-            f"INSTALL httpfs; LOAD httpfs; "
-            f"SET VARIABLE ingest_base = '{r2_url}';"
+            f"INSTALL httpfs; LOAD httpfs; SET VARIABLE ingest_base = '{r2_url}';"
         )
         print(f"Remote mode: reading ingest sources from {r2_url}")
     else:
@@ -81,15 +119,29 @@ def main():
         layer = sql_path.name
         layer_start = time.time()
 
+        # 03_raw_web.sql ATTACHes the local web-cache SQLite, which we can't do
+        # over R2 (--remote) or when the cache doesn't exist yet (fresh checkout).
+        # In those modes, create empty web_pages/web_fetches stubs instead of
+        # skipping outright, so any later layer that joins them stays green.
+        if layer == "03_raw_web.sql":
+            skip_reason = None
+            if args.remote:
+                skip_reason = "--remote: can't ATTACH sqlite over R2"
+            elif not pathlib.Path("ingest_sources/web/cache.sqlite").exists():
+                skip_reason = "no web cache at ingest_sources/web/cache.sqlite"
+            if skip_reason:
+                con.execute(WEB_STUB_SQL)
+                print(f"  {layer} → empty web_pages/web_fetches ({skip_reason})")
+                continue
+
         sql = sql_path.read_text()
         if layer == "02_raw.sql":
             sql = raw_preamble + "\n" + sql
 
         # Set a per-layer timeout via alarm
-        def timeout_handler(signum, frame):
-            raise TimeoutError(f"{layer} exceeded {args.timeout}s timeout")
-
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        old_handler = signal.signal(
+            signal.SIGALRM, _make_timeout_handler(layer, args.timeout)
+        )
         signal.alarm(args.timeout)
 
         try:
@@ -102,7 +154,7 @@ def main():
                     " FROM _warnings WHERE cnt > 0"
                 ).fetchall():
                     print(f"    {row[0]}")
-            elif layer == "04_error_checks.sql":
+            elif layer == "05_error_checks.sql":
                 for row in con.execute(
                     "SELECT category || ': ' || count(*) FROM _violations"
                     " GROUP BY category ORDER BY category"

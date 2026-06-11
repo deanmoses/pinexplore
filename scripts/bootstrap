@@ -6,7 +6,7 @@ echo "==> Installing Python dependencies..."
 uv sync
 
 echo "==> Generating agent docs..."
-python3 scripts/build_agent_docs.py
+python3 scripts/agent_docs/build_agent_docs.py
 
 echo "==> Installing pre-commit hooks..."
 uvx pre-commit install

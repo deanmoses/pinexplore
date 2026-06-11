@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Parse the Kineticist pinball glossary HTML into structured JSON.
+"""Parse the Pinball Primer glossary HTML into structured JSON.
 
-Reads the saved HTML from ingest_sources/glossary_kineticist/ and extracts
-each glossary term with its definition.
+Reads the saved HTML from ingest_sources/glossary_pinball_primer/ and
+extracts each glossary term with its definition.
 
 Usage:
-    python scripts/parse_kineticist_glossary.py [--src FILE] [--dest FILE]
+    python scripts/glossary/parse_pinball_primer_glossary.py [--src FILE] [--dest FILE]
 """
 
 from __future__ import annotations
@@ -16,98 +16,116 @@ import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import override
 
 # Import slugify from the pindata sister project
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "pindata" / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pindata" / "lib"))
 from slugify import slugify
 
-DEFAULT_SRC = "ingest_sources/glossary_kineticist/glossary_kineticist"
-DEFAULT_DEST = "ingest_sources/glossary_kineticist/kineticist_glossary.json"
+DEFAULT_SRC = "ingest_sources/glossary_pinball_primer/glossary_pinball_primer.html"
+DEFAULT_DEST = "ingest_sources/glossary_pinball_primer/pinball_primer_glossary.json"
 
 
 class _GlossaryParser(HTMLParser):
-    """State-machine parser that walks <h2>/<p> pairs in the glossary."""
+    """State-machine parser that walks <h3>/<p> pairs in the glossary."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.entries: list[dict] = []
+        self.entries: list[dict[str, str]] = []
 
         # State tracking
-        self._in_h2 = False
+        self._in_h3 = False
         self._in_p = False
-        self._current_slug: str | None = None
         self._current_name_parts: list[str] = []
         self._p_parts: list[str] = []
-        self._p_depth = 0  # track nested tags inside <p>
+        self._have_term = False  # True after we've seen a glossary <h3>
 
     # -- helpers --
 
     def _flush_entry(self) -> None:
-        if self._current_slug is None:
+        if not self._have_term:
             return
         raw_name = _clean_text("".join(self._current_name_parts))
         definition = _clean_text("".join(self._p_parts))
         if not raw_name or not definition:
+            self._have_term = False
             return
-        slug_name, alias = _extract_alias(raw_name)
-        entry: dict = {
+        name, entity_type = _extract_entity_type(raw_name)
+        slug_name, alias = _extract_alias(name)
+        entry: dict[str, str] = {
             "slug": slugify(slug_name),
-            "name": raw_name,
+            "name": name,
             "definition": definition,
         }
         if alias:
             entry["alias"] = alias
+        if entity_type:
+            entry["entity_type"] = entity_type
         self.entries.append(entry)
-        self._current_slug = None
+        self._have_term = False
         self._current_name_parts = []
         self._p_parts = []
 
     # -- HTMLParser callbacks --
 
+    @override
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr = dict(attrs)
-        if tag == "h2" and "id" in attr:
+        if tag == "h3":
             # New term — flush any previous entry
             self._flush_entry()
-            self._current_slug = attr["id"]
-            self._in_h2 = True
+            self._in_h3 = True
+            self._have_term = True
             self._current_name_parts = []
-        elif tag == "p" and self._current_slug is not None:
-            if not self._in_p:
-                self._in_p = True
-                self._p_depth = 0
-            else:
-                self._p_depth += 1
+            self._p_parts = []
+        elif tag == "p" and self._have_term:
+            self._in_p = True
 
+    @override
     def handle_endtag(self, tag: str) -> None:
-        if tag == "h2":
-            self._in_h2 = False
+        if tag == "h3":
+            self._in_h3 = False
         elif tag == "p" and self._in_p:
-            if self._p_depth > 0:
-                self._p_depth -= 1
-            else:
-                self._in_p = False
+            self._in_p = False
 
+    @override
     def handle_data(self, data: str) -> None:
-        if self._in_h2:
+        if self._in_h3:
             self._current_name_parts.append(data)
-        elif self._in_p and self._current_slug is not None:
+        elif self._in_p and self._have_term:
             self._p_parts.append(data)
 
+    @override
     def handle_entityref(self, name: str) -> None:
         char = {"amp": "&", "lt": "<", "gt": ">", "nbsp": " ", "quot": '"'}.get(
             name, f"&{name};"
         )
-        if self._in_p and self._current_slug is not None:
+        if self._in_p and self._have_term:
             self._p_parts.append(char)
 
+    @override
     def handle_charref(self, name: str) -> None:
         try:
             char = chr(int(name, 16) if name.startswith("x") else int(name))
         except ValueError:
             char = f"&#{name};"
-        if self._in_p and self._current_slug is not None:
+        if self._in_p and self._have_term:
             self._p_parts.append(char)
+
+
+# Entity types that can appear as trailing parentheticals in term names.
+_ENTITY_TYPES = {"award", "game type", "noun", "verb"}
+
+
+def _extract_entity_type(name: str) -> tuple[str, str | None]:
+    """Split 'Add-a-ball (award)' into ('Add-a-ball', 'award').
+
+    Only extracts known entity types; abbreviation expansions like
+    '(DMD)' or '(pronounced "whoppers")' are left in the name.
+    """
+    m = re.match(r"^(.+?)\s*\(([^)]+)\)\s*$", name)
+    if m and m.group(2).lower() in _ENTITY_TYPES:
+        return m.group(1).strip(), m.group(2).lower()
+    return name, None
 
 
 def _extract_alias(name: str) -> tuple[str, str | None]:
@@ -115,18 +133,21 @@ def _extract_alias(name: str) -> tuple[str, str | None]:
 
     Returns (slug_name, alias) where slug_name has the parenthetical
     stripped (for slugification) and alias is the parenthetical content.
+    The name field itself is left unchanged by the caller.
 
     Examples:
-        'Solid State (SS)' -> ('Solid State', 'SS')
-        'Ruleset (or rule set)' -> ('Ruleset', 'rule set')
+        'Dot-matrix display (DMD)' -> ('Dot-matrix display', 'DMD')
+        'Electromechanical (EM) game' -> ('Electromechanical game', 'EM')
+        'TD (Tournament director)' -> ('TD', 'Tournament director')
     """
     m = re.search(r"\(([^)]+)\)", name)
     if not m:
         return name, None
     alias = m.group(1)
-    # Strip leading "or " prefix
-    alias = re.sub(r"^or\s+", "", alias)
+    # Strip "pronounced" prefix if present
+    alias = re.sub(r'^pronounced\s+["\']?', "", alias).rstrip("\"'")
     slug_name = (name[: m.start()] + name[m.end() :]).strip()
+    # Collapse any double spaces left behind
     slug_name = re.sub(r"\s+", " ", slug_name)
     return slug_name, alias
 
@@ -138,7 +159,7 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def parse_glossary(src: Path) -> list[dict]:
+def parse_glossary(src: Path) -> list[dict[str, str]]:
     """Parse the glossary HTML and return a list of term dicts."""
     html = src.read_text(encoding="utf-8", errors="replace")
     parser = _GlossaryParser()
@@ -149,7 +170,7 @@ def parse_glossary(src: Path) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Parse Kineticist glossary HTML to JSON"
+        description="Parse Pinball Primer glossary HTML to JSON"
     )
     ap.add_argument("--src", default=DEFAULT_SRC, help="Source HTML file")
     ap.add_argument("--dest", default=DEFAULT_DEST, help="Output JSON file")

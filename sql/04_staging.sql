@@ -49,7 +49,7 @@ FROM opdb_machines AS om
 WHERE om.manufacturer IS NOT NULL
 ORDER BY "name";
 
--- OPDB manufacturers mapped to pinbase manufacturer slugs.
+-- OPDB manufacturers mapped to pindata manufacturer slugs.
 -- Uses exact name match, normalized match, or alias table.
 CREATE OR REPLACE VIEW opdb_manufacturers_mapped AS
 SELECT
@@ -76,7 +76,7 @@ LEFT JOIN ref_opdb_manufacturer_aliases alias
   ON alias.opdb_manufacturer_id = om.opdb_manufacturer_id
   AND m_exact.slug IS NULL AND m_norm.slug IS NULL;
 
--- OPDB feature string → pinbase slug mappings.
+-- OPDB feature string → pindata slug mappings.
 -- Matches on name (case-insensitive) or explicit aliases.
 
 CREATE OR REPLACE VIEW ref_feature_tag AS
@@ -139,7 +139,7 @@ WHERE im.ManufacturerId NOT IN (0, 328);
 ------------------------------------------------------------
 
 -- Extract "Feature (N)" patterns from IPDB NotableFeatures free text
--- and resolve them against the pinbase gameplay_features vocabulary.
+-- and resolve them against the pindata gameplay_features vocabulary.
 --
 -- Strategy: split on delimiters first, then look for "(N)" in each
 -- segment. This avoids mid-word false positives (e.g. "LED" → "Ed")
@@ -213,7 +213,7 @@ parsed AS (
     WHERE regexp_matches(segment, '\(\d+\)')  -- has a parenthesized number
 )
 
--- Step 4: Resolve feature names against pinbase vocabulary.
+-- Step 4: Resolve feature names against pindata vocabulary.
 -- For multiball, the "(N)" means N balls in play, not N mechanisms.
 -- Remap to child features like "2-ball-multiball" with no quantity.
 SELECT
@@ -254,7 +254,7 @@ INNER JOIN ref_feature_reward_type rt
     AND regexp_matches(i.NotableFeatures, '\b' || rt.feature || '\b', 'i');
 
 ------------------------------------------------------------
--- Theme views (derived from pinbase themes table)
+-- Theme views (derived from pindata themes table)
 ------------------------------------------------------------
 
 -- Alias → canonical name mapping (one row per alias→theme).
@@ -270,7 +270,7 @@ FROM themes t
 WHERE t.parents IS NOT NULL;
 
 ------------------------------------------------------------
--- Gameplay feature views (derived from pinbase gameplay_features table)
+-- Gameplay feature views (derived from pindata gameplay_features table)
 ------------------------------------------------------------
 
 -- Parent relationships (one row per child→parent edge).
@@ -290,21 +290,29 @@ WHERE gf.is_type_of IS NOT NULL;
 -- and deduplicates so downstream comparison can work term-by-term.
 CREATE OR REPLACE VIEW ipdb_themes AS
 WITH
-  -- 1. Fix encoding damage and normalise delimiters to " - "
+  -- 1. Fix encoding damage and normalise delimiters to " - ".
+  --    A Theme that is *already* an exact canonical theme is passed through
+  --    whole (is_canonical): the one canonical theme with internal commas,
+  --    "Land, Air, and Space Exploration", must not be comma-split into the
+  --    fragments Land / Air / and Space Exploration.
   cleaned AS (
     SELECT
       im.IpdbId,
-      -- Replace mojibake (U+FFFD) separator with dash, then comma with dash
-      replace(
-        replace(im.Theme, ' ' || chr(65533) || ' ', ' - '),
-        ', ', ' - '
-      ) AS theme_clean
+      (im.Theme IN (SELECT name FROM themes)) AS is_canonical,
+      CASE
+        WHEN im.Theme IN (SELECT name FROM themes) THEN im.Theme
+        -- Replace mojibake (U+FFFD) separator with dash, then comma with dash
+        ELSE replace(
+          replace(im.Theme, ' ' || chr(65533) || ' ', ' - '),
+          ', ', ' - '
+        )
+      END AS theme_clean
     FROM ipdb_machines im
     WHERE im.Theme IS NOT NULL AND im.Theme <> ''
   ),
   -- 2. Split on " - " into individual tokens
   dash_split AS (
-    SELECT c.IpdbId, trim(t.token) AS token
+    SELECT c.IpdbId, c.is_canonical, trim(t.token) AS token
     FROM cleaned c,
     LATERAL unnest(string_split(c.theme_clean, ' - ')) AS t(token)
     WHERE trim(t.token) <> ''
@@ -313,34 +321,38 @@ WITH
   --    E.g. "Cards/Gambling" → "Cards", "Gambling"
   --    Also handles "Circus / Carnival" (with spaces around slash).
   slash_split AS (
-    SELECT d.IpdbId, trim(s.part) AS token
+    SELECT d.IpdbId, d.is_canonical, trim(s.part) AS token
     FROM dash_split d,
     LATERAL unnest(string_split(d.token, '/')) AS s(part)
     WHERE trim(s.part) <> ''
   ),
   -- 4. Strip surrounding quotes (e.g. '"21 or Bust"' → '21 or Bust')
   unquoted AS (
-    SELECT IpdbId, trim(token, '"') AS token
+    SELECT IpdbId, is_canonical, trim(token, '"') AS token
     FROM slash_split
     WHERE trim(token, '"') <> ''
   ),
   -- 5. Strip "Theme: " prefix (IPDB split artifact)
   prefix_cleaned AS (
-    SELECT IpdbId,
+    SELECT IpdbId, is_canonical,
       CASE WHEN token LIKE 'Theme: %' THEN trim(token[8:]) ELSE token END AS token
     FROM unquoted
   ),
-  -- 6. Title-case each token
+  -- 6. Title-case each token — except one passed through whole as an exact
+  --    canonical theme, whose casing (e.g. the lowercase "and") is already right.
   title_cased AS (
     SELECT DISTINCT
       IpdbId,
-      list_aggregate(
-        list_transform(
-          string_split(lower(token), ' '),
-          w -> upper(w[1]) || w[2:]
-        ),
-        'string_agg', ' '
-      ) AS theme
+      CASE
+        WHEN is_canonical THEN token
+        ELSE list_aggregate(
+          list_transform(
+            string_split(lower(token), ' '),
+            w -> upper(w[1]) || w[2:]
+          ),
+          'string_agg', ' '
+        )
+      END AS theme
     FROM prefix_cleaned
   )
 -- 7. Apply alias table to merge duplicates into canonical forms
@@ -442,7 +454,7 @@ SELECT
   h._raw_state AS headquarters_state,
   COALESCE(cn.canonical_name, h._raw_country) AS headquarters_country,
 
-  -- Manufacturer resolution — derived purely from IPDB data + pinbase manufacturers.
+  -- Manufacturer resolution — derived purely from IPDB data + pindata manufacturers.
   -- No dependency on existing corporate_entities or models tables.
   -- 1. Exact match: manufacturer_name → manufacturer.name
   -- 2. Normalized match (unambiguous): strip business suffixes, match if unique
@@ -511,11 +523,11 @@ SELECT
 FROM fandom_persons;
 
 ------------------------------------------------------------
--- Pinbase staged
+-- Pindata staged
 ------------------------------------------------------------
 
 -- Flat credits: one row per model + person + role
-CREATE OR REPLACE VIEW pinbase_credits AS
+CREATE OR REPLACE VIEW pindata_credits AS
 SELECT
   m.slug AS model_slug,
   m.title_slug,

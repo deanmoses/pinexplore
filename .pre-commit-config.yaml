@@ -14,6 +14,8 @@ repos:
         exclude: '\.md$'
       - id: check-yaml
       - id: check-json
+        # VS Code settings are JSONC (comments allowed); skip strict JSON parse.
+        exclude: ^\.vscode/
       - id: check-toml
       - id: mixed-line-ending
         args: ['--fix=lf']
@@ -28,6 +30,48 @@ repos:
   # Local hooks
   - repo: local
     hooks:
+      # Python — lint + format (ruff) and strict type-check (mypy), via the
+      # project's own uv-managed tools so pre-commit and CI agree on versions.
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      # mypy follows imports, so run it once over the whole project (config-driven
+      # excludes apply) rather than per-file.
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy .
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+      # Tests — run the full suite on any Python change. The suite is offline
+      # and fast (~0.5s), so gating commits on it is cheap insurance.
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+      # SQL — parse-check the DuckDB layers with DuckDB's own parser. Offline and
+      # instant (no execution / ingest sources); catches syntax errors only.
+      - id: sql-parse
+        name: duckdb sql parse-check
+        entry: uv run python scripts/check_sql.py
+        language: system
+        files: ^sql/.*\.sql$
+        require_serial: true
+
       # Markdown — formatting + linting
       - id: prettier-markdown
         name: prettier (markdown)
@@ -45,15 +89,15 @@ repos:
       # Auto-regenerate agent docs when source or build script changes
       - id: agent-docs-regen
         name: regenerate agent docs
-        entry: bash -c 'python3 scripts/build_agent_docs.py && git add CLAUDE.md AGENTS.md'
+        entry: bash -c 'python3 scripts/agent_docs/build_agent_docs.py && git add CLAUDE.md AGENTS.md'
         language: system
-        files: ^(docs/AGENTS\.src\.md|scripts/build_agent_docs\.py)$
+        files: ^(docs/AGENTS\.src\.md|scripts/agent_docs/build_agent_docs\.py)$
         pass_filenames: false
 
       # Block direct edits to generated agent docs
       - id: agent-docs-no-direct-edit
         name: check agent docs not edited directly
-        entry: scripts/check_agent_docs_edit.sh
+        entry: scripts/agent_docs/check_agent_docs_edit.sh
         language: script
         files: ^(CLAUDE|AGENTS)\.md$
         pass_filenames: false

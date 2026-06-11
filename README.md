@@ -1,6 +1,6 @@
 # Pinexplore
 
-This project is a tool for exploring and validating pinball catalog data. 
+This project is a tool for exploring and validating pinball catalog data.
 
 It builds a read-only DuckDB database from [Pindata](https://github.com/deanmoses/pindata) catalog records and external source dumps like OPDB and IPDB, then runs integrity checks, cross-source comparisons, and gap analysis.
 

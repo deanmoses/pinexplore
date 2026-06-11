@@ -65,8 +65,8 @@ SELECT * FROM (VALUES
 -- OPDB manufacturer resolution
 ------------------------------------------------------------
 
--- OPDB manufacturer ID → pinbase manufacturer slug mapping.
--- For OPDB manufacturers whose name doesn't match a pinbase manufacturer
+-- OPDB manufacturer ID → pindata manufacturer slug mapping.
+-- For OPDB manufacturers whose name doesn't match a pindata manufacturer
 -- (renames, merges, different brand names).
 CREATE OR REPLACE VIEW ref_opdb_manufacturer_aliases AS
 SELECT * FROM (VALUES
@@ -92,17 +92,17 @@ SELECT * FROM (VALUES
   (94,  'viza-mfg-inc')           -- Viza Manufacturing → Viza Mfg., Inc.
 ) AS t(opdb_manufacturer_id, manufacturer_slug);
 
--- Approved OPDB↔pinbase manufacturer disagreements.
--- Cases where OPDB attributes a model to one manufacturer but pinbase
+-- Approved OPDB↔pindata manufacturer disagreements.
+-- Cases where OPDB attributes a model to one manufacturer but pindata
 -- correctly uses a different one (verified by research).
--- (opdb_manufacturer_id, pinbase_manufacturer_slug, reason)
+-- (opdb_manufacturer_id, pindata_manufacturer_slug, reason)
 CREATE OR REPLACE VIEW ref_opdb_manufacturer_exceptions AS
 SELECT * FROM (VALUES
   -- Segasa (15) vs Sonic: OPDB uses "Segasa" for post-rebrand games that
   -- were actually branded "Sonic" (Segasa d.b.a. Sonic). IPDB is correct.
   (15, 'sonic', 'OPDB uses parent name Segasa for Sonic-branded games'),
   -- Geiger (50) vs Komplett Flipper: Geiger-Automatenbau GmbH = A.H. Geiger Co.
-  -- = Komplett Flipper brand. OPDB uses company name, pinbase uses brand.
+  -- = Komplett Flipper brand. OPDB uses company name, pindata uses brand.
   (50, 'komplett-flipper', 'OPDB uses Geiger for Komplett Flipper brand'),
   -- Geiger (50) vs Professional Pinball: OPDB misattributes Challenger to Geiger
   (50, 'professional-pinball', 'OPDB misattributes to Geiger; IPDB says Professional Pinball'),
@@ -154,7 +154,6 @@ SELECT * FROM (VALUES
   ('Happiness'),
   ('Industry Inside Jokes'),
   ('Juvenilia'),
-  ('Land'),
   ('Licensed'),
   ('Licensed Theme'),
   ('Payout'),

@@ -1,7 +1,7 @@
 --  What's missing from our own data sources? Gap analysis and cross-reference.
 
 ------------------------------------------------------------
--- Missing: IPDB machines not yet in Pinbase
+-- Missing: IPDB machines not yet in Pindata
 ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW missing_models_ipdb AS
@@ -24,7 +24,7 @@ WHERE m.ipdb_id IS NULL
 ORDER BY i.IpdbId;
 
 ------------------------------------------------------------
--- Missing: IPDB corporate entities not yet in Pinbase
+-- Missing: IPDB corporate entities not yet in Pindata
 ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW missing_corporate_entities_ipdb AS
@@ -43,7 +43,7 @@ WHERE ce.slug IS NULL
 ORDER BY machine_count DESC, i.ManufacturerId;
 
 ------------------------------------------------------------
--- Missing: IPDB manufacturers (brands) not yet in Pinbase
+-- Missing: IPDB manufacturers (brands) not yet in Pindata
 ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW missing_manufacturers_ipdb AS
@@ -58,7 +58,7 @@ WHERE mfr.slug IS NULL
 ORDER BY ce.manufacturer_slug;
 
 ------------------------------------------------------------
--- Missing: IPDB credited people not yet in Pinbase
+-- Missing: IPDB credited people not yet in Pindata
 ------------------------------------------------------------
 
 CREATE OR REPLACE VIEW missing_people_ipdb AS
@@ -89,7 +89,7 @@ WITH
       fp.title AS fandom_name,
       fp.wikitext AS fandom_wikitext,
       COALESCE(p.slug, am.slug) AS person_slug,
-      COALESCE(p.name, am.canonical_name) AS pinbase_name,
+      COALESCE(p.name, am.canonical_name) AS pindata_name,
       CASE
         WHEN p.slug IS NOT NULL THEN 'name'
         WHEN am.slug IS NOT NULL THEN 'alias'
@@ -118,7 +118,7 @@ SELECT
   fm.title AS fandom_name,
   fm.wikitext AS fandom_wikitext,
   COALESCE(m_exact.slug, m_norm.slug, ce.manufacturer_slug) AS manufacturer_slug,
-  COALESCE(m_exact.name, m_norm.name, m_ce.name) AS pinbase_name,
+  COALESCE(m_exact.name, m_norm.name, m_ce.name) AS pindata_name,
   CASE
     WHEN m_exact.slug IS NOT NULL THEN 'name'
     WHEN m_norm.slug IS NOT NULL THEN 'normalized'
@@ -169,7 +169,7 @@ WITH
       fg.production AS fandom_production,
       fg.wikitext AS fandom_wikitext,
       t.slug AS title_slug,
-      t.name AS pinbase_name
+      t.name AS pindata_name
     FROM fandom_games_staged AS fg
     LEFT JOIN titles AS t ON lower(fg.fandom_name) = lower(t.name)
   ),
@@ -192,7 +192,7 @@ WITH
   scored AS (
     SELECT
       nm.*,
-      tm.manufacturer_name AS pinbase_manufacturer,
+      tm.manufacturer_name AS pindata_manufacturer,
       (lower(nm.fandom_manufacturer) = lower(tm.manufacturer_name)
         OR normalize_mfr_name(nm.fandom_manufacturer) = normalize_mfr_name(tm.manufacturer_name)
       ) AS manufacturer_matches,
@@ -208,8 +208,8 @@ SELECT
   fandom_production,
   fandom_wikitext,
   title_slug,
-  pinbase_name,
-  pinbase_manufacturer,
+  pindata_name,
+  pindata_manufacturer,
   CASE
     WHEN title_slug IS NULL THEN NULL
     WHEN candidate_count = 1 THEN 'name'

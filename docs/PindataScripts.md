@@ -1,5 +1,13 @@
 # Writing Scripts to Edit Pindata from Pinexplore
 
+> **Mostly mothballed.** This is how the pindata _seed_ catalog was generated and
+> bulk-edited before launch. The catalog is now **live**, so we no longer run full
+> ingests — the everyday correction path is **data patches**:
+> [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
+> and [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md)
+> in the flipcommons repo (see [Related Repos](AGENTS.src.md#related-repos)). This
+> guide is kept for reference and the occasional seed-data task.
+
 This guide explains how to write a high-quality, safe script that edits Pindata catalog
 records using insights discovered in Pinexplore.
 

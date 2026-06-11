@@ -19,11 +19,45 @@ This file provides guidance to AI programming agents when working with code in t
 
 ## Project Overview
 
-Pinexplore is a DuckDB-based exploration and validation tool for pinball catalog data. It builds a read-only DuckDB database from pinball catalog records and external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks, cross-source comparisons, and gap analysis.
+Pinexplore is an exploration and validation tool for pinball catalog data.
 
-The catalog data itself lives in the sister project [Pindata](https://github.com/deanmoses/pindata). That projects exports its data as JSON files for exploration in Pinexplore.  Pinexplore consumes that data but does not modify it.
+It builds a read-only DuckDB database from the catalog plus external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks, cross-source comparisons, and gap analysis.
 
-DuckDB is purely an audit and exploration tool; the Pindata project is the source of truth.
+It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](WebCache.md).
+
+## Related Repos
+
+Pinexplore is the analytics/audit layer of a three-repo pinball catalog system:
+
+- **[pindata](https://github.com/deanmoses/pindata)** — the canonical catalog
+  records (Markdown + JSON schemas) and the numbered **data patches** layered on
+  top. Publishes the catalog as JSON to Cloudflare R2; pinexplore pulls it via
+  `make pull`. Source of truth for catalog _content_.
+- **[flipcommons](https://github.com/deanmoses/flipcommons)** — the live website
+  and production database (Django + SvelteKit). Seeded once from pindata's export,
+  then kept current by replaying data patches. Source of truth for the _live_
+  catalog (seed + patches).
+
+Pinexplore consumes pindata's JSON export (plus external dumps); it never modifies
+the catalog. Its job is to surface corrections.
+
+### How a finding becomes a fix
+
+Now that the catalog is live, full re-ingests no longer happen — corrections
+discovered in pinexplore are applied as **data patches**: numbered, attributed,
+cited YAML files in pindata's `patches/`, replayed onto flipcommons with
+`make ingest-patches`. Web-sourced evidence (a verbatim `note:` quote plus a
+`cite:` URL / archive permalink) comes from pinexplore's
+[web evidence cache](WebCache.md). The canonical patch guides live in the
+flipcommons repo:
+
+- [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
+  — the patch file format and how patches are applied.
+- [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md)
+  — the authoring workflow: the `patchkit` helper, worksheets, and `expect:` guards.
+
+Editing pindata's seed Markdown directly (the pre-launch bulk path) is mostly
+mothballed; see [PindataScripts.md](PindataScripts.md).
 
 ## Requirements
 
@@ -54,7 +88,16 @@ make push         # Upload ingest sources to Cloudflare R2
 make explore      # Rebuild explore.duckdb from SQL layers
 make clean        # Remove DuckDB build artifacts
 make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
+make test         # Run the test suite (pytest)
 ```
+
+## Tests
+
+`make test` runs `pytest` over `tests/`. Coverage is currently the web evidence
+cache (`scripts/web_scrape/`) — URL normalization, the versioned store, fetch
+behavior, and date extraction — and runs fully offline (a tmp SQLite and a
+stubbed `_http_get`; no network or archive.org). The SQL layers are exercised by
+the build's own integrity checks (`make explore`), not pytest.
 
 ## Project Structure
 
@@ -70,21 +113,32 @@ explore.duckdb    Build artifact (gitignored)
 
 Files in `sql/` load in numeric order during `make explore`:
 
-| File                      | Purpose                                              |
-| ------------------------- | ---------------------------------------------------- |
-| `01_reference.sql`        | Hand-maintained reference tables, macros, exceptions |
-| `02_raw.sql`              | Turn pinbase & external JSON data sources into tables|
-| `03_staging.sql`          | Per-source normalization (no cross-source joins)     |
-| `04_error_checks.sql`     | Integrity checks. Hard violations abort the build    |
-| `05_warning_checks.sql`   | Soft checks that warn but don't abort                |
-| `06_compare.sql`          | Cross-source comparison: do sources agree?           |
-| `07_gaps.sql`             | Gap analysis: what's missing from pinbase?           |
-| `08_quality.sql`          | Slug quality, media audit, backfill proposals        |
-| `09_popularity.sql`       | Title popularity composite scoring                   |
-| `10_history.sql`          | Industry history: decade-level trends                |
-| `90_print_warnings.sql`   | Print accumulated warnings (always runs last)        |
+| File                    | Purpose                                               |
+| ----------------------- | ----------------------------------------------------- |
+| `01_reference.sql`      | Hand-maintained reference tables, macros, exceptions  |
+| `02_raw.sql`            | Turn pindata & external JSON data sources into tables |
+| `03_raw_web.sql`        | Web evidence cache → raw source tables (local-only)   |
+| `04_staging.sql`        | Per-source normalization (no cross-source joins)      |
+| `05_error_checks.sql`   | Integrity checks. Hard violations abort the build     |
+| `06_warning_checks.sql` | Soft checks that warn but don't abort                 |
+| `07_compare.sql`        | Cross-source comparison: do sources agree?            |
+| `08_gaps.sql`           | Gap analysis: what's missing from pindata?            |
+| `09_quality.sql`        | Slug quality, media audit, backfill proposals         |
+| `10_popularity.sql`     | Title popularity composite scoring                    |
+| `11_history.sql`        | Industry history: decade-level trends                 |
+| `90_print_warnings.sql` | Print accumulated warnings (always runs last)         |
 
 The build **fails** if integrity checks don't pass — query `SELECT * FROM _violations` for details.
+
+## Web Evidence Cache
+
+`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages
+(manufacturer sites, forums, Wikipedia, foreign-language press) used as
+attributed evidence for catalog corrections. The system-of-record is a SQLite
+database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored);
+`make explore` materializes it into the `web_pages` / `web_fetches` tables via
+the local-only `03_raw_web.sql` layer. Query it with the `scripts/web_scrape/web_cache.py` helpers
+(`search`, `quote`, `get`). See [WebCache.md](WebCache.md) for the full guide.
 
 ## Remote Data (Cloudflare R2)
 

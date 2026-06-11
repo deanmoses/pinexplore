@@ -8,7 +8,7 @@
 --   SET VARIABLE ingest_base = 'https://pub-8a5220445534421c879b6ff9ede350f1.r2.dev';
 
 ------------------------------------------------------------
--- Pinbase catalog data (via pindata export)
+-- Pindata catalog data (via pindata export)
 ------------------------------------------------------------
 
 CREATE OR REPLACE TABLE cabinets AS

@@ -25,12 +25,21 @@ APPLY_SCRIPT = PINDATA_ROOT / "scripts" / "apply_description.py"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--overwrite", action="store_true", help="Allow overwriting existing descriptions")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without writing")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting existing descriptions",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be done without writing"
+    )
     args = parser.parse_args()
 
     if not DESCRIPTIONS_DIR.is_dir():
-        print(f"Error: descriptions directory not found: {DESCRIPTIONS_DIR}", file=sys.stderr)
+        print(
+            f"Error: descriptions directory not found: {DESCRIPTIONS_DIR}",
+            file=sys.stderr,
+        )
         return 1
 
     if not APPLY_SCRIPT.is_file():
@@ -69,7 +78,9 @@ def main() -> int:
         if args.overwrite:
             cmd.insert(2, "--overwrite")
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(  # noqa: S603 — cmd is built from sys.executable + repo paths
+            cmd, capture_output=True, text=True, check=False
+        )
 
         if result.returncode == 0:
             print(f"  OK {slug}")
