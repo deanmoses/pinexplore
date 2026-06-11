@@ -36,7 +36,7 @@ Now that the catalog is live, full re-ingests no longer happen — corrections
 discovered in pinexplore are applied as **data patches**: numbered, attributed,
 cited YAML files in pindata's `patches/`, replayed onto flipcommons with
 `make ingest-patches`. Web-sourced evidence (a verbatim `note:` quote plus a
-`cite:` URL / archive permalink) comes from pinexplore's
+`cite:` URL) comes from pinexplore's
 [web evidence cache](WebCache.md). The canonical patch guides live in the
 flipcommons repo:
 
@@ -85,7 +85,7 @@ make test         # Run the test suite (pytest)
 `make test` runs `pytest` over `tests/`. Coverage is currently the web evidence
 cache (`scripts/web_scrape/`) — URL normalization, the versioned store, fetch
 behavior, and date extraction — and runs fully offline (a tmp SQLite and a
-stubbed `_http_get`; no network or archive.org). The SQL layers are exercised by
+stubbed `_http_get`; no network). The SQL layers are exercised by
 the build's own integrity checks (`make explore`), not pytest.
 
 ## Project Structure

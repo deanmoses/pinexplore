@@ -129,33 +129,17 @@ def test_get_by_raw_url_finds_redirect_origin(cache):
 
 
 # --------------------------------------------------------------------------- #
-# archive helpers
+# upsert conflict behavior
 # --------------------------------------------------------------------------- #
 
 
-def test_archive_set_clear_and_missing(cache):
-    url = wc.normalize_url("https://a.com/")
-    _seed(cache, url=url)
-    assert url in wc.pages_missing_archive(cache)
-    wc.set_archive(
-        cache,
-        url=url,
-        archive_url="https://web.archive.org/snap",
-        archived_at=wc.now_iso(),
-    )
-    assert url not in wc.pages_missing_archive(cache)
-    assert _page(cache, url)["archive_url"] == "https://web.archive.org/snap"
-    wc.clear_archive(cache, url=url)
-    assert _page(cache, url)["archive_url"] is None
-    assert url in wc.pages_missing_archive(cache)
-
-
-def test_upsert_preserves_first_fetched_and_archive_on_conflict(cache):
+def test_upsert_preserves_first_fetched_on_conflict(cache):
     url = wc.normalize_url("https://a.com/")
     _seed(cache, url=url, content="v1")
     first = _page(cache, url)["first_fetched_at"]
-    wc.set_archive(cache, url=url, archive_url="https://w/a", archived_at=wc.now_iso())
-    _seed(cache, url=url, content="v2")  # refetch: null archive args must not clobber
+    sha2 = _seed(
+        cache, url=url, content="v2"
+    )  # refetch points the row at the new version
     row = _page(cache, url)
     assert row["first_fetched_at"] == first
-    assert row["archive_url"] == "https://w/a"
+    assert row["content_sha"] == sha2

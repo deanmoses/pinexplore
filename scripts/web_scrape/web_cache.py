@@ -57,8 +57,6 @@ class PageRow(TypedDict):
     content_type: str | None
     html_file: str
     text: str | None
-    archive_url: str | None
-    archived_at: str | None
 
 
 class SearchHit(TypedDict):
@@ -67,7 +65,6 @@ class SearchHit(TypedDict):
     url: NormalizedUrl
     title: str | None
     last_updated: str | None
-    archive_url: str | None
     snippet: str
 
 
@@ -198,9 +195,7 @@ CREATE TABLE IF NOT EXISTS pages (
   http_status      INTEGER,
   content_type     TEXT,
   html_file        TEXT NOT NULL,      -- 'html/<content_sha>.html' (current version)
-  text             TEXT,               -- extracted readable text (current version)
-  archive_url      TEXT,               -- Wayback permalink (best-effort, nullable)
-  archived_at      TEXT                -- when we captured/confirmed the snapshot
+  text             TEXT                -- extracted readable text (current version)
 );
 
 CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
@@ -269,28 +264,21 @@ def upsert_page(
     http_status: int | None = None,
     content_type: str | None = None,
     text: str | None = None,
-    archive_url: str | None = None,
-    archived_at: str | None = None,
 ) -> None:
     """Insert or refresh a page row, keyed on the normalized URL.
 
     On conflict, points the row at the freshly-fetched version
     (``content_sha``/``html_file``/``text``/...) and bumps ``last_fetched_at``
-    while preserving ``first_fetched_at``. A null ``archive_url``/``archived_at``
-    does not clobber an existing value — so a refetch keeps the prior archive
-    (the caller decides whether the new content invalidates it; see
-    ``clear_archive``), and ``--archive-missing`` can fill a gap.
+    while preserving ``first_fetched_at``.
     """
     con.execute(
         """
         INSERT INTO pages (
           url, raw_url, content_sha, first_fetched_at, last_fetched_at,
-          last_updated, title, http_status, content_type, html_file, text,
-          archive_url, archived_at
+          last_updated, title, http_status, content_type, html_file, text
         ) VALUES (
           :url, :raw_url, :content_sha, :fetched_at, :fetched_at,
-          :last_updated, :title, :http_status, :content_type, :html_file,
-          :text, :archive_url, :archived_at
+          :last_updated, :title, :http_status, :content_type, :html_file, :text
         )
         ON CONFLICT(url) DO UPDATE SET
           raw_url       = excluded.raw_url,
@@ -301,9 +289,7 @@ def upsert_page(
           http_status   = excluded.http_status,
           content_type  = excluded.content_type,
           html_file     = excluded.html_file,
-          text          = excluded.text,
-          archive_url   = COALESCE(excluded.archive_url, pages.archive_url),
-          archived_at   = COALESCE(excluded.archived_at, pages.archived_at)
+          text          = excluded.text
         """,
         {
             "url": url,
@@ -316,8 +302,6 @@ def upsert_page(
             "content_type": content_type,
             "html_file": html_file,
             "text": text,
-            "archive_url": archive_url,
-            "archived_at": archived_at,
         },
     )
     con.commit()
@@ -345,28 +329,6 @@ def append_fetch(
             content_sha,
             None if changed is None else int(changed),
         ),
-    )
-    con.commit()
-
-
-def set_archive(
-    con: sqlite3.Connection, *, url: NormalizedUrl, archive_url: str, archived_at: str
-) -> None:
-    """Record a Wayback permalink on an existing page (backfill path)."""
-    con.execute(
-        "UPDATE pages SET archive_url = ?, archived_at = ? WHERE url = ?",
-        (archive_url, archived_at, url),
-    )
-    con.commit()
-
-
-def clear_archive(con: sqlite3.Connection, *, url: NormalizedUrl) -> None:
-    """Drop a page's Wayback permalink (e.g. when refetched content changed, so
-    the old snapshot no longer matches the stored text). Leaves it null for a
-    later re-archive / ``--archive-missing`` pass."""
-    con.execute(
-        "UPDATE pages SET archive_url = NULL, archived_at = NULL WHERE url = ?",
-        (url,),
     )
     con.commit()
 
@@ -428,15 +390,14 @@ def search(
 ) -> list[SearchHit]:
     """FTS5 BM25-ranked pages matching ``term`` (AND across whitespace tokens).
 
-    Returns dicts of url, title, last_updated, archive_url and a text snippet,
-    best match first.
+    Returns dicts of url, title, last_updated and a text snippet, best match first.
     """
     own = con is None
     con = con or connect(read_only=True)
     try:
         rows = con.execute(
             """
-            SELECT p.url, p.title, p.last_updated, p.archive_url,
+            SELECT p.url, p.title, p.last_updated,
                    snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet
             FROM pages_fts
             JOIN pages p ON p.rowid = pages_fts.rowid
@@ -454,8 +415,8 @@ def search(
 
 # A pragmatic sentence splitter: break after ., !, or ? followed by whitespace,
 # or on a line break (paragraph/heading boundary). Good enough to isolate a
-# quotable sentence; the patch author verifies verbatim against the html blob /
-# archive permalink anyway.
+# quotable sentence; the patch author verifies verbatim against the html blob
+# anyway.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
@@ -468,19 +429,10 @@ def quote(url: str, needle: str, con: sqlite3.Connection | None = None) -> list[
     """Sentences in a page's extracted text containing ``needle`` (case-insensitive).
 
     The starting point for a verbatim ``note:`` quote in a data patch. The
-    author still confirms wording against the stored html blob or the archive
-    permalink before shipping.
+    author still confirms wording against the stored html blob before shipping.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
     low = needle.lower()
     return [s for s in sentences(rec["text"]) if low in s.lower()]
-
-
-def pages_missing_archive(con: sqlite3.Connection) -> list[NormalizedUrl]:
-    """Normalized URLs of stored pages that have no Wayback permalink yet."""
-    rows = con.execute(
-        "SELECT url FROM pages WHERE archive_url IS NULL ORDER BY last_fetched_at"
-    ).fetchall()
-    return [r["url"] for r in rows]

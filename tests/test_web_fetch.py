@@ -1,7 +1,7 @@
 """Tests for web_fetch.fetch_one behaviors — all offline (``_http_get`` stubbed).
 
-Covers the guards, content gates, redirect handling, change detection, failure
-logging, and archive policy, plus _extract's conservative date extraction.
+Covers the guards, content gates, redirect handling, change detection, and
+failure logging, plus _extract's conservative date extraction.
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ def _run(
     query: str | None = "q",
     force: bool = False,
     max_age_days: int = 30,
-    do_archive: bool = False,
 ) -> None:
     web_fetch.fetch_one(
         con,
@@ -63,7 +62,6 @@ def _run(
         query=query,
         force=force,
         max_age_days=max_age_days,
-        do_archive=do_archive,
     )
 
 
@@ -222,58 +220,6 @@ def test_invalid_url_error_is_logged_not_raised(cache, monkeypatch):
     _run(cache, "https://x.com/p")  # must not raise
     assert wc.get("https://x.com/p", con=cache) is None
     assert _fetches(cache) == [("https://x.com/p", None, None, None)]  # null status
-
-
-# --------------------------------------------------------------------------- #
-# archive policy
-# --------------------------------------------------------------------------- #
-
-
-def test_archive_fresh_on_change_else_availability(cache, monkeypatch):
-    calls = []
-
-    def fake_archive(con, url, max_age_days, *, prefer_fresh=False):
-        calls.append(prefer_fresh)
-        wc.set_archive(
-            con, url=url, archive_url="https://w/snap", archived_at=wc.now_iso()
-        )
-        return True
-
-    monkeypatch.setattr(web_fetch, "_archive", fake_archive)
-
-    _stub_get(monkeypatch, body=b"<html>v1</html>")
-    _run(
-        cache, "https://s.com/p", force=True, do_archive=True
-    )  # new → availability-first
-
-    _stub_get(monkeypatch, body=b"<html>v2 changed</html>")
-    _run(cache, "https://s.com/p", force=True, do_archive=True)  # changed → fresh
-
-    assert calls == [False, True]
-
-
-def test_stale_archive_cleared_when_changed_and_refetch_fails(cache, monkeypatch):
-    archive_ok = {"value": True}
-
-    def fake_archive(con, url, max_age_days, *, prefer_fresh=False):
-        if archive_ok["value"]:
-            wc.set_archive(
-                con, url=url, archive_url="https://w/snap", archived_at=wc.now_iso()
-            )
-            return True
-        return False
-
-    monkeypatch.setattr(web_fetch, "_archive", fake_archive)
-
-    _stub_get(monkeypatch, body=b"<html>v1</html>")
-    _run(cache, "https://s.com/p", force=True, do_archive=True)
-    assert _page(cache, "https://s.com/p")["archive_url"] == "https://w/snap"
-
-    archive_ok["value"] = False  # re-archive will fail
-    _stub_get(monkeypatch, body=b"<html>v2 changed</html>")
-    _run(cache, "https://s.com/p", force=True, do_archive=True)
-    # content changed + fresh capture failed → stale permalink dropped, not kept
-    assert _page(cache, "https://s.com/p")["archive_url"] is None
 
 
 # --------------------------------------------------------------------------- #

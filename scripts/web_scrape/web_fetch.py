@@ -3,9 +3,8 @@
 
 Fetches a page once, extracts readable text (trafilatura) and the page's own
 date (htmldate, conservatively), stores the raw HTML blob and an upserted
-``pages`` row in the SQLite cache, logs the fetch event (and the search intent
-that drove it), then best-effort captures a Wayback Machine permalink so the
-evidence survives linkrot.
+``pages`` row in the SQLite cache, then logs the fetch event (and the search
+intent that drove it).
 
 Politeness: a descriptive User-Agent, a per-domain rate limit, and an
 idempotent skip when the URL was fetched within the max-age window.
@@ -16,20 +15,12 @@ idempotent skip when the URL was fetched within the max-age window.
     uv run python scripts/web_scrape/web_fetch.py --from-file urls.tsv
     # refetch even if fresh; tune the freshness window
     uv run python scripts/web_scrape/web_fetch.py <url> --query "..." --force --max-age 7
-    # skip archiving / backfill missing archive permalinks
-    uv run python scripts/web_scrape/web_fetch.py <url> --query "..." --no-archive
-    uv run python scripts/web_scrape/web_fetch.py --archive-missing
-
-Archive auth (optional but recommended): set ARCHIVE_ORG_ACCESS_KEY /
-ARCHIVE_ORG_SECRET_KEY in .env for authenticated Save Page Now (SPN2).
 """
 
 from __future__ import annotations
 
 import argparse
 import http.client
-import json
-import os
 import sys
 import time
 import urllib.error
@@ -52,7 +43,6 @@ USER_AGENT = (
 )
 DEFAULT_MAX_AGE_DAYS = 30
 RATE_LIMIT_SECONDS = 2.0
-AVAILABILITY_API = "https://archive.org/wayback/available"
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
 HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 
@@ -79,20 +69,6 @@ type MonotonicSeconds = float
 
 # Per-domain timestamp of the last request, for the rate limiter.
 _last_request: dict[Domain, MonotonicSeconds] = {}
-
-
-def _load_dotenv() -> None:
-    """Load .env into os.environ (key=value lines only)."""
-    env_path = web_cache.REPO_ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip())
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -192,118 +168,6 @@ def _extract(html: str, url: str) -> ExtractedMeta:
 
 
 # --------------------------------------------------------------------------- #
-# Wayback archiving
-# --------------------------------------------------------------------------- #
-
-
-class ArchiveSnapshot(NamedTuple):
-    """A Wayback permalink and when it was captured (ISO-8601, ``...Z``)."""
-
-    archive_url: str
-    archived_at: str
-
-
-def _recent_snapshot(url: str, max_age_days: int) -> ArchiveSnapshot | None:
-    """Closest Wayback snapshot within the window, via the availability API.
-
-    Returns (archive_url, snapshot_iso) or None. Reusing a fresh snapshot
-    sidesteps the per-URL daily capture cap in the common case.
-    """
-    q = f"{AVAILABILITY_API}?{urllib.parse.urlencode({'url': url})}"
-    req = urllib.request.Request(q, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.load(resp)
-    except urllib.error.URLError, json.JSONDecodeError, TimeoutError:
-        return None
-    snap = (data.get("archived_snapshots") or {}).get("closest") or {}
-    if not snap.get("available") or not snap.get("url") or not snap.get("timestamp"):
-        return None
-    try:
-        snap_dt = datetime.strptime(snap["timestamp"], "%Y%m%d%H%M%S").replace(
-            tzinfo=UTC
-        )
-    except ValueError:
-        return None
-    if (datetime.now(UTC) - snap_dt).days > max_age_days:
-        return None
-    # Normalize the snapshot URL to https.
-    return ArchiveSnapshot(
-        snap["url"].replace("http://", "https://", 1),
-        snap_dt.isoformat().replace("+00:00", "Z"),
-    )
-
-
-def _save_page_now(url: str) -> ArchiveSnapshot | None:
-    """Capture a fresh Wayback permalink via Save Page Now. None on any failure.
-
-    Authenticated (SPN2) when ARCHIVE_ORG_ACCESS_KEY/_SECRET_KEY are set;
-    archive.org's own daily-capture cap and throttling are swallowed as a
-    best-effort miss (left for a later --archive-missing backfill).
-    """
-    import savepagenow
-
-    access = os.environ.get("ARCHIVE_ORG_ACCESS_KEY")
-    secret = os.environ.get("ARCHIVE_ORG_SECRET_KEY")
-    authenticate = bool(access and secret)
-    # savepagenow reads creds only from these env vars. Set them around the call
-    # and restore prior values after, so we don't leak credentials into the
-    # process env (matters if web_fetch is ever imported and reused, not just CLI).
-    spn_keys = ("SAVEPAGENOW_ACCESS_KEY", "SAVEPAGENOW_SECRET_KEY")
-    prior = {k: os.environ.get(k) for k in spn_keys}
-    try:
-        if access and secret:
-            os.environ["SAVEPAGENOW_ACCESS_KEY"] = access
-            os.environ["SAVEPAGENOW_SECRET_KEY"] = secret
-        archive_url = savepagenow.capture(
-            url,
-            user_agent=USER_AGENT,
-            accept_cache=True,
-            authenticate=authenticate,
-        )
-    except Exception as exc:
-        # Archiving is strictly best-effort: a daily-capture cap, throttling, a
-        # transient network error from savepagenow's requests stack — none of it
-        # may abort the fetch. Swallow as a miss; --archive-missing backfills.
-        print(f"    archive: skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
-        return None
-    finally:
-        for k, v in prior.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-    return ArchiveSnapshot(archive_url, web_cache.now_iso())
-
-
-def _archive(
-    con: sqlite3.Connection,
-    url: str,
-    max_age_days: int,
-    *,
-    prefer_fresh: bool = False,
-) -> bool:
-    """Ensure a Wayback permalink for url.
-
-    Availability-first by default: reuse a recent snapshot if one exists (cheaper,
-    sidesteps the per-URL daily cap). With ``prefer_fresh`` (used when we know the
-    content just changed) skip reuse and capture a fresh snapshot so the permalink
-    matches the bytes we stored.
-    """
-    _rate_limit("web.archive.org")
-    found = None if prefer_fresh else _recent_snapshot(url, max_age_days)
-    if found is None:
-        found = _save_page_now(url)
-    if found is None:
-        return False
-    web_cache.set_archive(
-        con, url=url, archive_url=found.archive_url, archived_at=found.archived_at
-    )
-    print(f"    archive: {found.archive_url}")
-    return True
-
-
-# --------------------------------------------------------------------------- #
 # Fetch one page
 # --------------------------------------------------------------------------- #
 
@@ -315,7 +179,6 @@ def fetch_one(
     query: str | None,
     force: bool,
     max_age_days: int,
-    do_archive: bool,
 ) -> None:
     try:
         url = web_cache.normalize_url(raw_url)
@@ -345,8 +208,6 @@ def fetch_one(
         if age_days <= max_age_days:
             canonical = fresh_row["url"]
             print(f"skip (fresh, {age_days}d): {canonical}")
-            if do_archive and not fresh_row.get("archive_url"):
-                _archive(con, canonical, max_age_days)
             return
 
     _rate_limit(domain)
@@ -444,25 +305,6 @@ def fetch_one(
     title = meta.title or "(no title)"
     print(f"fetched [{resp.status}] ({state}): {url}\n    {title}")
 
-    if do_archive:
-        if existing is not None and changed:
-            # The stored content changed, so any existing permalink points at the
-            # old version — capture a fresh snapshot that matches what we just
-            # stored; if that fails, drop the stale link rather than keep it.
-            if not _archive(con, url, max_age_days, prefer_fresh=True) and existing.get(
-                "archive_url"
-            ):
-                web_cache.clear_archive(con, url=url)
-                print(
-                    "    archive: cleared stale permalink (content changed; "
-                    "re-archive failed — backfill later)",
-                    file=sys.stderr,
-                )
-        elif not (existing and existing.get("archive_url")):
-            # First fetch, or an unchanged refetch that still lacks an archive.
-            _archive(con, url, max_age_days)
-        # else: unchanged refetch whose existing permalink still matches — keep it.
-
 
 # --------------------------------------------------------------------------- #
 # Batch input + CLI
@@ -513,40 +355,18 @@ def main() -> int:
         default=DEFAULT_MAX_AGE_DAYS,
         help=f"Freshness window in days (default: {DEFAULT_MAX_AGE_DAYS}).",
     )
-    parser.add_argument(
-        "--no-archive",
-        action="store_true",
-        help="Skip the Wayback Machine archive step.",
-    )
-    parser.add_argument(
-        "--archive-missing",
-        action="store_true",
-        help="Backfill Wayback permalinks for stored pages that lack one, then exit.",
-    )
     args = parser.parse_args()
 
-    _load_dotenv()
     con = web_cache.connect()
     web_cache.init_schema(con)
-    do_archive = not args.no_archive
 
     try:
-        if args.archive_missing:
-            urls = web_cache.pages_missing_archive(con)
-            print(f"{len(urls)} page(s) missing an archive permalink.")
-            done = 0
-            for url in urls:
-                if _archive(con, url, args.max_age):
-                    done += 1
-            print(f"Done. {done}/{len(urls)} archived.")
-            return 0
-
         if args.from_file:
             requests = _read_tsv(args.from_file)
         elif args.url:
             requests = [FetchRequest(args.url, args.query)]
         else:
-            parser.error("provide a URL, --from-file, or --archive-missing")
+            parser.error("provide a URL or --from-file")
 
         for raw_url, query in requests:
             fetch_one(
@@ -555,7 +375,6 @@ def main() -> int:
                 query=query,
                 force=args.force,
                 max_age_days=args.max_age,
-                do_archive=do_archive,
             )
     finally:
         con.close()

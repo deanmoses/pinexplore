@@ -36,15 +36,14 @@ sql/
                              (raw-ingestion band, alongside 02_raw.sql)
 ```
 
-The raw HTML blob stays the copy we **re-verify quotes against**; it is kept on disk (not in SQLite) to keep the DB lean and the FTS index fast. The [Wayback](#wayback) permalink is the public, durable link a reader follows.
+The raw HTML blob stays the copy we **re-verify quotes against**; it is kept on disk (not in SQLite) to keep the DB lean and the FTS index fast.
 
 ### SQLite schema
 
 Defined in [`web_cache.py`](../scripts/web_scrape/web_cache.py); two tables plus an FTS index:
 
 - **`pages`** — current state per normalized URL: the current version's
-  `content_sha` + `html_file`, the extracted `title`/`text`/`last_updated`, and
-  the Wayback `archive_url`/`archived_at`.
+  `content_sha` + `html_file`, and the extracted `title`/`text`/`last_updated`.
 - **`fetches`** — append-only audit + version history: one row per fetch, with the
   `search_query` that drove it, the `content_sha` it saw, and a `changed` flag.
 
@@ -53,7 +52,7 @@ row. An `fts5` virtual table (`pages_fts`) indexes url+title+text, trigger-synce
 to `pages`.
 
 **HTML blobs are content-addressed and versioned.** A blob lives at
-`html/<sha256(raw bytes)>.html`, so every distinct version of a page is preserved: an unchanged refetch resolves to the same file (no rewrite), a changed one writes a new blob alongside the old. `pages` points at the current version; prior versions stay on disk and in the `fetches` log. This is what makes "reproducible quotes after a page changes" true locally — independent of Wayback.
+`html/<sha256(raw bytes)>.html`, so every distinct version of a page is preserved: an unchanged refetch resolves to the same file (no rewrite), a changed one writes a new blob alongside the old. `pages` points at the current version; prior versions stay on disk and in the `fetches` log. This is what makes "reproducible quotes after a page changes" true.
 
 ## Lifecycle
 
@@ -74,33 +73,13 @@ The cache is **never committed to git** (`ingest_sources/` is gitignored); R2 is
 uv run python scripts/web_scrape/web_fetch.py <url> --query "haggis closed 2024"
 ```
 
-`--query` records the search intent that led there. Batch with `--from-file` (a `url<TAB>query` TSV); see `--help` for `--force`, `--max-age`, `--no-archive`, and `--archive-missing`.
+`--query` records the search intent that led there. Batch with `--from-file` (a `url<TAB>query` TSV); see `--help` for `--force` and `--max-age`.
 
 Scrape behavior:
 
 - **Polite** — descriptive User-Agent, per-domain rate limit, and an idempotent skip when the URL was fetched within the freshness window.
 - **Normalized** — URLs are canonicalized (host lowercased, tracking params and fragment stripped, trailing slash dropped) so the same page dedups to one row; UTF-8 preserved, including non-ASCII in foreign-language quotes.
 - **Extracted** with [`trafilatura`](https://trafilatura.readthedocs.io/): readable text and title, plus a `last_updated` date extracted conservatively (htmldate, `extensive_search=False`) — a real date the page states, else null. We deliberately don't pad a weak year-only signal up to a fabricated `Jan 1`: for evidence, no date beats a wrong one.
-
-### Wayback
-
-Each fetch (unless `--no-archive`) captures a [Wayback](https://archive.org/) permalink so evidence survives linkrot. The decisions worth knowing:
-
-- **Availability-first** — reuse a recent existing snapshot if there is one, else
-  Save Page Now (SPN2). Reuse sidesteps archive.org's per-URL daily-capture cap.
-- **Permalink tracks content** — when a refetch finds the content _changed_, reuse
-  is skipped and a fresh snapshot captured so `archive_url` matches the stored
-  bytes; if that fails, the stale permalink is cleared rather than cite a snapshot
-  of old content. An unchanged refetch keeps its permalink.
-- **Best-effort** — archiving never blocks a fetch; on failure `archive_url` is
-  null and `--archive-missing` backfills later.
-- **Caveat** — on a first fetch a reused snapshot can predate our fetch
-  (`archived_at` < `last_fetched_at`) and differ slightly, so the authoritative
-  re-verification copy is always the local versioned blob; `archive_url` is the
-  public link.
-
-Authenticated SPN2 is used when `ARCHIVE_ORG_ACCESS_KEY` / `ARCHIVE_ORG_SECRET_KEY`
-are set in `.env`; otherwise capture is anonymous.
 
 ## Querying
 
@@ -126,9 +105,7 @@ patch](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md):
 
 - **`note:`** — a verbatim quote from `web_cache.quote()`, formatted with pindata's
   `patchkit.source_note()`.
-- **`cite:`** — the page URL; the stored `archive_url` is its durable Wayback form.
+- **`cite:`** — the page URL.
 
 See DataPatches.md for the cite rules (a URL cite needs its website root seeded
-first; a known-scheme URL like `ipdb.org` cites as `scheme:id`). How one citation
-carries both the original URL and its Wayback permalink is an open flipcommons
-citation-model question for the first web-sourced patch.
+first; a known-scheme URL like `ipdb.org` cites as `scheme:id`).
