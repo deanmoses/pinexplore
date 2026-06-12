@@ -5,6 +5,7 @@ description = "DuckDB-based exploration and validation tool for pinball catalog 
 requires-python = ">=3.14"
 dependencies = [
     "boto3>=1.42.72",
+    "charset-normalizer>=3.4.0",
     "duckdb>=1.5.0",
     "htmldate>=1.10.0",
     "matplotlib>=3.10.8",
