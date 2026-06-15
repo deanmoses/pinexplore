@@ -16,12 +16,14 @@ It also builds and maintains a **web evidence cache** — a durable, searchable 
 
 ## Related Repos
 
-Pinexplore is the analytics/audit layer of a three-repo pinball catalog system:
+Pinexplore is the analytics/audit layer of a four-repo pinball catalog system:
 
-- **[pindata](https://github.com/deanmoses/pindata)** — the canonical catalog
-  records (Markdown + JSON schemas) and the numbered **data patches** layered on
-  top. Publishes the catalog as JSON to Cloudflare R2; pinexplore pulls it via
-  `make pull`. Source of truth for catalog _content_.
+- **[pindata](https://github.com/deanmoses/pindata)** — the canonical seed catalog
+  records (Markdown + JSON schemas). Publishes the catalog as JSON to Cloudflare R2;
+  pinexplore pulls it via `make pull`. Source of truth for catalog _content_.
+- **[flippatch](https://github.com/deanmoses/flippatch)** — the numbered **data
+  patches** layered on top of the seed (split out of pindata). Authored and validated
+  there, published to Cloudflare R2, applied onto flipcommons.
 - **[flipcommons](https://github.com/deanmoses/flipcommons)** — the live website
   and production database (Django + SvelteKit). Seeded once from pindata's export,
   then kept current by replaying data patches. Source of truth for the _live_
@@ -34,7 +36,7 @@ the catalog. Its job is to surface corrections.
 
 Now that the catalog is live, full re-ingests no longer happen — corrections
 discovered in pinexplore are applied as **data patches**: numbered, attributed,
-cited YAML files in pindata's `patches/`, replayed onto flipcommons with
+cited YAML files in flippatch's `patches/`, replayed onto flipcommons with
 `make ingest-patches`. Web-sourced evidence (a verbatim `note:` quote plus a
 `cite:` URL) comes from pinexplore's
 [web evidence cache](WebCache.md). The canonical patch guides live in the

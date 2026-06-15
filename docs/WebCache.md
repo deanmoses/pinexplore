@@ -100,10 +100,11 @@ against the catalog.
 
 ## Data patches
 
-The cache feeds the two evidence fields of a [pindata data
-patch](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md):
+The cache feeds the two evidence fields of a [data
+patch](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
+(authored in the [flippatch](https://github.com/deanmoses/flippatch) repo):
 
-- **`note:`** — a verbatim quote from `web_cache.quote()`, formatted with pindata's
+- **`note:`** — a verbatim quote from `web_cache.quote()`, formatted with flippatch's
   `patchkit.source_note()`.
 - **`cite:`** — the page URL.
 
