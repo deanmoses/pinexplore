@@ -8,6 +8,7 @@ dependencies = [
     "charset-normalizer>=3.4.0",
     "duckdb>=1.5.0",
     "htmldate>=1.10.0",
+    "playwright>=1.49.0",
     "matplotlib>=3.10.8",
     "seaborn>=0.13.2",
     "trafilatura>=2.1.0",
@@ -76,9 +77,9 @@ ignore = [
 "tests/*.py" = ["S101", "S106", "S603", "S607", "ANN"]  # asserts, test creds, subprocess, untyped tests
 "tests/conftest.py" = ["S101", "ANN"]
 "scripts/**/*.py" = ["T201"]  # CLI scripts legitimately print
-# The web fetcher's entire purpose is opening arbitrary user-supplied web URLs;
-# the http/https scheme is enforced in fetch_one() before any fetch.
-"scripts/web_scrape/web_fetch.py" = ["S310"]
+# The web transport's entire purpose is opening arbitrary user-supplied web URLs;
+# the http/https scheme is enforced in fetch_one() before _http_get is ever called.
+"scripts/web_scrape/web_http.py" = ["S310"]
 
 [tool.ruff.lint.isort]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
@@ -130,5 +131,5 @@ disallow_untyped_calls = false
 check_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["trafilatura", "trafilatura.*", "htmldate", "slugify"]
+module = ["trafilatura", "trafilatura.*", "htmldate", "slugify", "playwright.*"]
 ignore_missing_imports = true

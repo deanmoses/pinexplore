@@ -1,7 +1,10 @@
-"""Tests for web_fetch.fetch_one behaviors — all offline (``_http_get`` stubbed).
+"""Tests for web_fetch.fetch_one orchestration — all offline (no network).
 
-Covers the guards, content gates, redirect handling, change detection, and
-failure logging, plus _extract's conservative date extraction.
+Covers the guards, content gates, redirect handling, change detection, failure
+logging, and the headless-render escalation/fallback (``http_get`` and
+``render`` stubbed). The pieces fetch_one composes are tested in their own
+modules: transport/charset in test_web_http, extraction in test_web_extract,
+the render primitives in test_web_render.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ from typing import TYPE_CHECKING
 import pytest
 import web_cache as wc
 import web_fetch
+import web_http
+import web_render
 
 if TYPE_CHECKING:
     import sqlite3
@@ -34,18 +39,18 @@ def _stub_get(
     final_url: str | None = None,
     status: int = 200,
     content_type: str = "text/html",
-    skip: web_fetch.SkipReason | None = None,
+    skip: web_http.SkipReason | None = None,
 ) -> None:
-    """Install a fake _http_get returning a crafted _Resp (final_url defaults to
+    """Install a fake http_get returning a crafted Resp (final_url defaults to
     the requested url; pass it to simulate a redirect)."""
 
-    def _get(url: str) -> web_fetch._Resp:
+    def _get(url: str) -> web_http.Resp:
         fu = url if final_url is None else final_url
         if skip:
-            return web_fetch._Resp(status, content_type, fu, None, None, skip)
-        return web_fetch._Resp(status, content_type, fu, body, body.decode(), None)
+            return web_http.Resp(status, content_type, fu, None, None, skip)
+        return web_http.Resp(status, content_type, fu, body, body.decode(), None)
 
-    monkeypatch.setattr(web_fetch, "_http_get", _get)
+    monkeypatch.setattr(web_fetch, "http_get", _get)
 
 
 def _run(
@@ -55,6 +60,9 @@ def _run(
     query: str | None = "q",
     force: bool = False,
     max_age_days: int = 30,
+    browser: object | None = None,
+    force_render: bool = False,
+    thin_chars: int = web_render.THIN_TEXT_CHARS,
 ) -> None:
     web_fetch.fetch_one(
         con,
@@ -62,7 +70,38 @@ def _run(
         query=query,
         force=force,
         max_age_days=max_age_days,
+        browser=browser,  # type: ignore[arg-type]  # tests pass a sentinel; render is stubbed
+        force_render=force_render,
+        thin_chars=thin_chars,
     )
+
+
+# Rich HTML that extracts to well over THIN_TEXT_CHARS (so it is not thin).
+RICH_HTML = (
+    "<html><body><article><p>"
+    + "Rich readable article text. " * 20
+    + "</p></article></body></html>"
+).encode()
+# A client-rendered skeleton: extracts to near-nothing, so it reads as thin.
+THIN_HTML = b"<html><body><div id='root'></div><p>hi</p></body></html>"
+
+
+def _stub_render(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    body: bytes,
+    final_url: str | None = None,
+) -> None:
+    """Stub web_fetch.render to return a crafted rendered Resp (no real browser).
+
+    Bypasses LazyBrowser/Playwright entirely, so tests pass a sentinel ``browser``.
+    """
+
+    def _r(url: str, _browser: object) -> web_http.Resp:
+        fu = url if final_url is None else final_url
+        return web_http.Resp(200, "text/html", fu, body, body.decode(), None)
+
+    monkeypatch.setattr(web_fetch, "render", _r)
 
 
 def _fetches(con: sqlite3.Connection) -> list[FetchRow]:
@@ -72,6 +111,10 @@ def _fetches(con: sqlite3.Connection) -> list[FetchRow]:
             "SELECT url, http_status, content_sha, changed FROM fetches ORDER BY id"
         ).fetchall()
     ]
+
+
+def _rendered(con: sqlite3.Connection) -> list[int | None]:
+    return [r[0] for r in con.execute("SELECT rendered FROM fetches ORDER BY id")]
 
 
 def _page(con: sqlite3.Connection, url: str) -> wc.PageRow:
@@ -92,7 +135,7 @@ def _page(con: sqlite3.Connection, url: str) -> wc.PageRow:
 
 def test_unsupported_scheme_rejected_without_fetching(cache, monkeypatch):
     called = []
-    monkeypatch.setattr(web_fetch, "_http_get", lambda u: called.append(u))
+    monkeypatch.setattr(web_fetch, "http_get", lambda u: called.append(u))
     _run(cache, "file:///etc/passwd")
     assert called == []
     assert _fetches(cache) == []  # not even logged — it's rejected input, not a fetch
@@ -100,7 +143,7 @@ def test_unsupported_scheme_rejected_without_fetching(cache, monkeypatch):
 
 def test_hostless_url_rejected(cache, monkeypatch):
     called = []
-    monkeypatch.setattr(web_fetch, "_http_get", lambda u: called.append(u))
+    monkeypatch.setattr(web_fetch, "http_get", lambda u: called.append(u))
     _run(cache, "https://")
     assert called == []
 
@@ -109,7 +152,7 @@ def test_malformed_url_skipped_not_raised(cache, monkeypatch):
     # normalize_url raises ValueError on a bad port / invalid IPv6; a garbage
     # --from-file row must skip (before any fetch), not abort the whole batch.
     called = []
-    monkeypatch.setattr(web_fetch, "_http_get", lambda u: called.append(u))
+    monkeypatch.setattr(web_fetch, "http_get", lambda u: called.append(u))
     _run(cache, "http://example.com:abc/foo")  # bad port — must not raise
     _run(cache, "http://[::1bad/foo")  # invalid IPv6 — must not raise
     assert called == []
@@ -157,7 +200,7 @@ def test_redirecting_url_is_fresh_skipped_on_second_run(cache, monkeypatch):
 
     def _get(url):
         calls.append(url)
-        return web_fetch._Resp(
+        return web_http.Resp(
             200,
             "text/html",
             "https://site.com/canonical",
@@ -166,7 +209,7 @@ def test_redirecting_url_is_fresh_skipped_on_second_run(cache, monkeypatch):
             None,
         )
 
-    monkeypatch.setattr(web_fetch, "_http_get", _get)
+    monkeypatch.setattr(web_fetch, "http_get", _get)
     _run(cache, "http://site.com/req")
     _run(cache, "http://site.com/req")  # row lives under canonical; raw_url matches
     assert len(calls) == 1  # second run skipped, not re-followed
@@ -216,172 +259,110 @@ def test_invalid_url_error_is_logged_not_raised(cache, monkeypatch):
     def boom(url):
         raise http.client.InvalidURL("URL can't contain control characters")
 
-    monkeypatch.setattr(web_fetch, "_http_get", boom)
+    monkeypatch.setattr(web_fetch, "http_get", boom)
     _run(cache, "https://x.com/p")  # must not raise
     assert wc.get("https://x.com/p", con=cache) is None
     assert _fetches(cache) == [("https://x.com/p", None, None, None)]  # null status
 
 
 # --------------------------------------------------------------------------- #
-# _decode_body: charset fallback (a bogus label must not crash the batch)
+# headless render fallback (web_fetch.render stubbed — no real browser)
 # --------------------------------------------------------------------------- #
 
 
-def test_decode_body_honors_valid_charset():
-    assert web_fetch._decode_body("café".encode("latin-1"), "latin-1") == "café"
+def test_thin_plain_fetch_escalates_to_render(cache, monkeypatch):
+    url = "https://spa.com/x"
+    _stub_get(monkeypatch, body=THIN_HTML)  # plain GET extracts thin
+    _stub_render(monkeypatch, body=RICH_HTML)  # render returns real content
+    _run(cache, url, browser=object())
+    row = _page(cache, url)
+    assert row["rendered"] == 1
+    assert "Rich readable article text" in (row["text"] or "")
+    assert _rendered(cache) == [1]  # the fetch row is flagged a render too
 
 
-def test_decode_body_falls_back_to_utf8_on_unknown_charset():
-    # A page advertising a junk charset label would make bytes.decode raise
-    # LookupError — which escapes the fetch_one except tuple and kills the batch.
-    # Fall back to utf-8 instead of losing the page.
-    assert web_fetch._decode_body(b"hi", "utf-8x-bogus") == "hi"
+def test_render_disabled_keeps_thin_plain_result(cache, monkeypatch):
+    url = "https://spa.com/x"
+    _stub_get(monkeypatch, body=THIN_HTML)
+    called: list[str] = []
+    monkeypatch.setattr(web_fetch, "render", lambda u, _b: called.append(u))
+    _run(cache, url, browser=None)  # --no-render: browser is None
+    assert called == []  # never attempted
+    row = _page(cache, url)
+    assert not row["rendered"]  # None/0, not a render
+    assert _rendered(cache) == [0]
 
 
-def test_decode_body_never_raises_on_bad_bytes():
-    # utf-8 fallback still uses errors="replace", so undecodable bytes don't raise.
-    out = web_fetch._decode_body(b"\xff\xfe bad", "totally-not-a-charset")
-    assert isinstance(out, str)
+def test_rich_plain_fetch_does_not_render(cache, monkeypatch):
+    url = "https://ok.com/x"
+    _stub_get(monkeypatch, body=RICH_HTML)  # not thin
+    called: list[str] = []
+
+    def _no_call(u: str, _b: object) -> None:
+        called.append(u)
+
+    monkeypatch.setattr(web_fetch, "render", _no_call)
+    _run(cache, url, browser=object())  # render enabled, but page isn't thin
+    assert called == []
+    assert not _page(cache, url)["rendered"]
 
 
-# --------------------------------------------------------------------------- #
-# _decode_body: charset sniffing for headerless Shift-JIS pages
-# --------------------------------------------------------------------------- #
-#
-# Real-world failure: old Japanese pages (ampress.co.jp, showayuen) are served as
-# Shift-JIS/cp932 with no Content-Type charset header, so a blind utf-8 decode
-# yields mojibake. Resolve the charset from the page's own <meta> / detection.
-
-JP = "会社概要"  # "Company Overview" — the showayuen kaisha_gaiyou page's title
+def test_force_render_renders_even_when_not_thin(cache, monkeypatch):
+    url = "https://ok.com/x"
+    _stub_get(monkeypatch, body=RICH_HTML)  # not thin
+    _stub_render(monkeypatch, body=RICH_HTML)
+    _run(cache, url, browser=object(), force_render=True)
+    assert _page(cache, url)["rendered"] == 1
 
 
-def test_decode_body_sniffs_meta_http_equiv_charset_when_header_absent():
-    # Legacy <meta http-equiv="Content-Type" ... charset=Shift_JIS>, no HTTP header.
-    html = (
-        '<html><head><meta http-equiv="Content-Type" '
-        f'content="text/html; charset=Shift_JIS"><title>{JP}</title>'
-        "</head><body>x</body></html>"
-    ).encode("cp932")
-    assert JP in web_fetch._decode_body(html, None)
+def test_render_failure_falls_back_to_plain_result(cache, monkeypatch):
+    url = "https://spa.com/x"
+    _stub_get(monkeypatch, body=THIN_HTML)
+    monkeypatch.setattr(web_fetch, "render", lambda u, _b: None)  # render failed
+    _run(cache, url, browser=object())
+    row = _page(cache, url)
+    assert not row["rendered"]  # kept the plain (thin) result
+    assert (row["text"] or "").strip() == "hi"
+    # The failed render is still audited (None status, rendered=1), then the plain
+    # fetch (200, rendered=0) — fetches logs every fetch.
+    assert _rendered(cache) == [1, 0]
+    assert [r[1] for r in _fetches(cache)] == [None, 200]
 
 
-def test_decode_body_sniffs_html5_meta_charset_when_header_absent():
-    html = (
-        f'<html><head><meta charset="shift_jis"><title>{JP}</title>'
-        "</head><body>x</body></html>"
-    ).encode("cp932")
-    assert JP in web_fetch._decode_body(html, None)
-
-
-def test_decode_body_detects_charset_when_no_header_and_no_meta():
-    # No header, no meta declaration: fall back to charset-normalizer detection.
-    body = (
-        f"<html><body><h1>{JP}</h1>" + "日本語の本文。" * 40 + "</body></html>"
-    ).encode("cp932")
-    assert JP in web_fetch._decode_body(body, None)
-
-
-def test_decode_body_header_charset_wins_over_meta():
-    # The HTTP header is authoritative; a contradicting meta must not override it.
-    html = (
-        f'<html><head><meta charset="shift_jis"><title>{JP}</title>'
-        "</head><body>x</body></html>"
-    ).encode()
-    assert JP in web_fetch._decode_body(html, "utf-8")
-
-
-def test_decode_body_shift_jis_meta_decoded_as_cp932_superset():
-    # Pages declaring Shift_JIS routinely use cp932 extension chars (①, etc.) that
-    # the strict shift_jis codec can't decode. Treat the whole family as cp932.
-    html = (
-        f'<html><head><meta charset="Shift_JIS"></head><body>①{JP}</body></html>'
-    ).encode("cp932")
-    out = web_fetch._decode_body(html, None)
-    assert "①" in out
-    assert JP in out
+def test_render_redirect_rekeys_to_final_url(cache, monkeypatch):
+    _stub_get(monkeypatch, body=THIN_HTML)
+    _stub_render(monkeypatch, body=RICH_HTML, final_url="https://spa.com/real")
+    _run(cache, "https://spa.com/x", browser=object())
+    assert wc.get("https://spa.com/x", con=cache) is None  # not under requested
+    row = wc.get("https://spa.com/real", con=cache)
+    assert row is not None
+    assert row["rendered"] == 1
+    assert row["raw_url"] == "https://spa.com/x"
 
 
 # --------------------------------------------------------------------------- #
-# _sniff_meta_charset — read the charset an HTML page declares about itself
+# thin-content warnings (loud failure)
 # --------------------------------------------------------------------------- #
 
 
-def test_sniff_meta_charset_html5_form():
-    assert web_fetch._sniff_meta_charset(b'<meta charset="utf-8">') == "utf-8"
+def test_thin_warning_suggests_render_when_not_attempted(cache, monkeypatch, capsys):
+    _stub_get(monkeypatch, body=THIN_HTML)
+    _run(cache, "https://spa.com/x", browser=None)  # --no-render: never attempted
+    assert "--render" in capsys.readouterr().err  # actionable: try rendering
 
 
-def test_sniff_meta_charset_http_equiv_form():
-    raw = b'<meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS">'
-    assert web_fetch._sniff_meta_charset(raw) == "Shift_JIS"
+def test_thin_warning_not_misleading_when_render_attempted_and_failed(
+    cache, monkeypatch, capsys
+):
+    # A failed render must NOT suggest "retry with --render" — it was already on.
+    _stub_get(monkeypatch, body=THIN_HTML)
+    monkeypatch.setattr(web_fetch, "render", lambda u, _b: None)  # attempted, failed
+    _run(cache, "https://spa.com/x", browser=object())
+    assert "--render" not in capsys.readouterr().err
 
 
-def test_sniff_meta_charset_none_when_absent():
-    assert web_fetch._sniff_meta_charset(b"<html><body>no meta</body></html>") is None
-
-
-def test_sniff_meta_charset_only_scans_head():
-    # The HTML spec puts the declaration in the first 1024 bytes; ignore late strays.
-    raw = b"x" * 1100 + b'<meta charset="shift_jis">'
-    assert web_fetch._sniff_meta_charset(raw) is None
-
-
-# --------------------------------------------------------------------------- #
-# _extract: conservative date extraction (no network)
-# --------------------------------------------------------------------------- #
-
-
-def test_extract_date_null_when_only_weak_year_signal():
-    html = (
-        '<html><head><meta name="date" content="2024"></head>'
-        "<body><article><p>Defunct maker.</p>"
-        "<footer>© 2024 Acme</footer></article></body></html>"
-    )
-    assert web_fetch._extract(html, "http://x").last_updated is None
-
-
-def test_extract_date_is_most_recent_real_date():
-    html = (
-        "<html><head>"
-        '<meta property="article:published_time" content="2023-06-15">'
-        '<meta property="article:modified_time" content="2024-08-01">'
-        "</head><body><article><p>y</p></article></body></html>"
-    )
-    assert web_fetch._extract(html, "http://x").last_updated == "2024-08-01"
-
-
-# --------------------------------------------------------------------------- #
-# _request_url — wire-safe encoding of a readable normalized URL
-# --------------------------------------------------------------------------- #
-
-
-def test_request_url_percent_encodes_non_ascii_path():
-    # The bug this fixes: a non-ASCII path raised UnicodeEncodeError in urllib.
-    got = web_fetch._request_url("https://www.weblio.jp/content/サンワイズ")
-    assert got == (
-        "https://www.weblio.jp/content/"
-        "%E3%82%B5%E3%83%B3%E3%83%AF%E3%82%A4%E3%82%BA"
-    )
-    assert got.isascii()
-
-
-def test_request_url_idempotent_on_ascii_and_encoded():
-    plain = "https://example.com/foo/bar?a=1&b=2"
-    assert web_fetch._request_url(plain) == plain
-    # already-percent-encoded path is not double-encoded (%E3 stays %E3)
-    enc = "https://www.weblio.jp/content/%E3%82%B5%E3%83%B3"
-    assert web_fetch._request_url(enc) == enc
-
-
-def test_request_url_preserves_ipv6_brackets():
-    # parts.hostname drops the brackets an IPv6 literal needs; without them the
-    # rebuilt netloc (::1:8080) is ambiguous/malformed. Host stays ASCII, so this
-    # also guards the non-IDNA path.
-    assert web_fetch._request_url("http://[::1]:8080/x") == "http://[::1]:8080/x"
-    assert web_fetch._request_url("http://[2001:db8::1]/p") == "http://[2001:db8::1]/p"
-
-
-def test_request_url_idna_encodes_non_ascii_host():
-    got = web_fetch._request_url("https://日本.example/x")
-    assert got.startswith("https://xn--")
-    assert got.endswith("/x")
-    assert got.isascii()
+def test_rendered_then_still_thin_warns_distinctly(cache, monkeypatch, capsys):
+    _stub_get(monkeypatch, body=THIN_HTML)
+    _stub_render(monkeypatch, body=THIN_HTML)  # render didn't help
+    _run(cache, "https://spa.com/x", browser=object())
+    assert "still thin after render" in capsys.readouterr().err

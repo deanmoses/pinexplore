@@ -57,6 +57,7 @@ class PageRow(TypedDict):
     content_type: str | None
     html_file: str
     text: str | None
+    rendered: int | None  # 1 if the blob is a headless-browser render, else 0/null
 
 
 class SearchHit(TypedDict):
@@ -143,14 +144,20 @@ def content_sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def html_path(sha: str) -> Path:
-    """Absolute path to a page's raw HTML blob."""
-    return HTML_DIR / f"{sha}.html"
+def html_path(sha: str, ext: str = "html") -> Path:
+    """Absolute path to a page's raw blob.
+
+    ``ext`` defaults to ``html``; it exists so a non-HTML blob (a fetched PDF,
+    once that lands) can be stored as ``<sha>.pdf`` and re-open in a viewer on
+    verify, rather than being mislabeled ``.html``.
+    """
+    return HTML_DIR / f"{sha}.{ext}"
 
 
-def html_rel(sha: str) -> str:
-    """The ``html_file`` value stored in the DB (relative, posix)."""
-    return f"html/{sha}.html"
+def html_rel(sha: str, ext: str = "html") -> str:
+    """The ``html_file`` value stored in the DB (relative, posix). See ``html_path``
+    for the ``ext`` parameter."""
+    return f"html/{sha}.{ext}"
 
 
 def now_iso() -> str:
@@ -195,7 +202,8 @@ CREATE TABLE IF NOT EXISTS pages (
   http_status      INTEGER,
   content_type     TEXT,
   html_file        TEXT NOT NULL,      -- 'html/<content_sha>.html' (current version)
-  text             TEXT                -- extracted readable text (current version)
+  text             TEXT,               -- extracted readable text (current version)
+  rendered         INTEGER             -- 1 if the blob is a headless-browser render
 );
 
 CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
@@ -205,7 +213,8 @@ CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
   search_query TEXT,                   -- the intent that drove this fetch
   http_status  INTEGER,
   content_sha  TEXT,                   -- the version this fetch saw (blob stem)
-  changed      INTEGER                 -- 1 if content differed from the prior fetch
+  changed      INTEGER,                -- 1 if content differed from the prior fetch
+  rendered     INTEGER                 -- 1 if this fetch was a headless render
 );
 
 CREATE INDEX IF NOT EXISTS fetches_url ON fetches(url);
@@ -235,14 +244,26 @@ END;
 def init_schema(con: sqlite3.Connection) -> None:
     """Create tables, the FTS5 index, and sync triggers if absent (idempotent).
 
-    There is no in-place migration: this only CREATEs missing objects, it never
-    ALTERs an existing table. While the cache is unshipped a schema change is
-    free — just delete ingest_sources/web/ and re-fetch. But this SQLite is the
-    system-of-record (not a blow-away-safe artifact like the DuckDB tables), so
-    once it holds shipped/accumulated evidence a schema change must be a real
-    ALTER-based migration here, not a rebuild.
+    Then run additive column migrations: ``_SCHEMA`` is CREATE-only (it never
+    touches an existing table), so a column added after a cache shipped — like
+    ``rendered`` — must be ALTERed in here for older ``cache.sqlite`` files. This
+    SQLite is the system-of-record (not a blow-away-safe artifact like the DuckDB
+    tables), so once it holds shipped/accumulated evidence a schema change must be
+    a real migration like the one below, guarded so it's a no-op on fresh DBs.
     """
     con.executescript(_SCHEMA)
+    # `rendered` was added with the headless-render fallback; ALTER it onto caches
+    # created before it (a fresh DB already has it from _SCHEMA — guard skips it).
+    pages_cols = {
+        r[0] for r in con.execute("SELECT name FROM pragma_table_info('pages')")
+    }
+    if "rendered" not in pages_cols:
+        con.execute("ALTER TABLE pages ADD COLUMN rendered INTEGER")
+    fetches_cols = {
+        r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
+    }
+    if "rendered" not in fetches_cols:
+        con.execute("ALTER TABLE fetches ADD COLUMN rendered INTEGER")
     con.commit()
 
 
@@ -264,21 +285,23 @@ def upsert_page(
     http_status: int | None = None,
     content_type: str | None = None,
     text: str | None = None,
+    rendered: bool | None = None,
 ) -> None:
     """Insert or refresh a page row, keyed on the normalized URL.
 
     On conflict, points the row at the freshly-fetched version
-    (``content_sha``/``html_file``/``text``/...) and bumps ``last_fetched_at``
-    while preserving ``first_fetched_at``.
+    (``content_sha``/``html_file``/``text``/``rendered``/...) and bumps
+    ``last_fetched_at`` while preserving ``first_fetched_at``.
     """
     con.execute(
         """
         INSERT INTO pages (
           url, raw_url, content_sha, first_fetched_at, last_fetched_at,
-          last_updated, title, http_status, content_type, html_file, text
+          last_updated, title, http_status, content_type, html_file, text, rendered
         ) VALUES (
           :url, :raw_url, :content_sha, :fetched_at, :fetched_at,
-          :last_updated, :title, :http_status, :content_type, :html_file, :text
+          :last_updated, :title, :http_status, :content_type, :html_file, :text,
+          :rendered
         )
         ON CONFLICT(url) DO UPDATE SET
           raw_url       = excluded.raw_url,
@@ -289,7 +312,8 @@ def upsert_page(
           http_status   = excluded.http_status,
           content_type  = excluded.content_type,
           html_file     = excluded.html_file,
-          text          = excluded.text
+          text          = excluded.text,
+          rendered      = excluded.rendered
         """,
         {
             "url": url,
@@ -302,6 +326,7 @@ def upsert_page(
             "content_type": content_type,
             "html_file": html_file,
             "text": text,
+            "rendered": None if rendered is None else int(rendered),
         },
     )
     con.commit()
@@ -316,11 +341,12 @@ def append_fetch(
     http_status: int | None,
     content_sha: str | None = None,
     changed: bool | None = None,
+    rendered: bool | None = None,
 ) -> None:
     """Append one row to the fetch audit log + version history."""
     con.execute(
         "INSERT INTO fetches (url, fetched_at, search_query, http_status, "
-        "content_sha, changed) VALUES (?, ?, ?, ?, ?, ?)",
+        "content_sha, changed, rendered) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             url,
             fetched_at,
@@ -328,6 +354,7 @@ def append_fetch(
             http_status,
             content_sha,
             None if changed is None else int(changed),
+            None if rendered is None else int(rendered),
         ),
     )
     con.commit()

@@ -27,9 +27,12 @@ ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
   html/<sha256(raw)>.html      raw page blobs, content-addressed + versioned
 
 scripts/web_scrape/
-  web_cache.py               library: schema, URL normalization, upsert,
+  web_cache.py               store: schema, URL normalization, upsert,
                              search() / quote() / get()
-  web_fetch.py               polite fetcher CLI (writes sqlite + html/)
+  web_http.py                transport: GET, charset decode, wire-safe URLs
+  web_extract.py             extraction: HTML → title/text/date (PDF later)
+  web_render.py              headless-render fallback for JS-only pages
+  web_fetch.py               CLI + per-URL orchestration (writes sqlite + html/)
 
 sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
@@ -43,9 +46,12 @@ The raw HTML blob stays the copy we **re-verify quotes against**; it is kept on 
 Defined in [`web_cache.py`](../scripts/web_scrape/web_cache.py); two tables plus an FTS index:
 
 - **`pages`** — current state per normalized URL: the current version's
-  `content_sha` + `html_file`, and the extracted `title`/`text`/`last_updated`.
+  `content_sha` + `html_file`, the extracted `title`/`text`/`last_updated`, and a
+  `rendered` flag (1 when the stored blob is a headless-browser render, not the
+  bytes the server sent — see [JS-rendered pages](#javascript-rendered-pages)).
 - **`fetches`** — append-only audit + version history: one row per fetch, with the
-  `search_query` that drove it, the `content_sha` it saw, and a `changed` flag.
+  `search_query` that drove it, the `content_sha` it saw, a `changed` flag, and a
+  `rendered` flag.
 
 A fetch upserts `pages` (preserving `first_fetched_at`) and appends one `fetches`
 row. An `fts5` virtual table (`pages_fts`) indexes url+title+text, trigger-synced
@@ -80,6 +86,18 @@ Scrape behavior:
 - **Polite** — descriptive User-Agent, per-domain rate limit, and an idempotent skip when the URL was fetched within the freshness window.
 - **Normalized** — URLs are canonicalized (host lowercased, tracking params and fragment stripped, trailing slash dropped) so the same page dedups to one row; UTF-8 preserved, including non-ASCII in foreign-language quotes.
 - **Extracted** with [`trafilatura`](https://trafilatura.readthedocs.io/): readable text and title, plus a `last_updated` date extracted conservatively (htmldate, `extensive_search=False`) — a real date the page states, else null. We deliberately don't pad a weak year-only signal up to a fabricated `Jan 1`: for evidence, no date beats a wrong one.
+
+### JavaScript-rendered pages
+
+A client-rendered (JavaScript-only) site returns a skeleton document to the plain `urllib` GET — trafilatura extracts little or no text, so there's nothing to quote. When the extracted text comes back **thin** (under `--thin-chars`, default 200), the fetcher escalates to a **headless-Chromium render** (Playwright), executes the page's JavaScript, and stores _that_ DOM as the blob, marked `rendered`. The fast stdlib path stays the default; the browser fires only on the thin fallback. See [JsFetch.md](JsFetch.md) for the full design.
+
+```bash
+uv run playwright install chromium    # one-time: download the browser binary (~150MB)
+```
+
+Flags: `--no-render` (pure stdlib, never render), `--render` (force a render even when the plain fetch isn't thin, for sites known to be JS-only — pair with `--force` to re-render a page that's already cached and fresh), `--thin-chars N` (tune the threshold). The browser is launched once per run, lazily — an all-stdlib batch never pays browser startup.
+
+Two honest caveats about rendered blobs: the stored bytes are the **rendered DOM, not what the server sent** (hence the `rendered` flag, so a citation's provenance is clear), and their `content_sha` is **non-deterministic** (hydration, timestamps), so the unchanged-refetch dedup degrades — a `--force` on a JS page typically writes a _new_ blob alongside the old each time.
 
 ## Querying
 

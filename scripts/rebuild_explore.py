@@ -39,11 +39,12 @@ WEB_STUB_SQL = """
 CREATE OR REPLACE TABLE web_pages (
   url VARCHAR, raw_url VARCHAR, content_sha VARCHAR, first_fetched_at VARCHAR,
   last_fetched_at VARCHAR, last_updated VARCHAR, title VARCHAR,
-  http_status BIGINT, content_type VARCHAR, html_file VARCHAR, text VARCHAR
+  http_status BIGINT, content_type VARCHAR, html_file VARCHAR, text VARCHAR,
+  rendered BIGINT
 );
 CREATE OR REPLACE TABLE web_fetches (
   id BIGINT, url VARCHAR, fetched_at VARCHAR, search_query VARCHAR,
-  http_status BIGINT, content_sha VARCHAR, changed BIGINT
+  http_status BIGINT, content_sha VARCHAR, changed BIGINT, rendered BIGINT
 );
 """
 

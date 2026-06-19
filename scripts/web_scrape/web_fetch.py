@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Polite web fetcher for the web evidence cache (see docs/WebCache.md).
 
-Fetches a page once, extracts readable text (trafilatura) and the page's own
-date (htmldate, conservatively), stores the raw HTML blob and an upserted
-``pages`` row in the SQLite cache, then logs the fetch event (and the search
-intent that drove it).
+The CLI entry point and per-URL orchestration. Fetches a page once
+(``web_http``), extracts readable text and the page's own date (``web_extract``),
+escalating to a headless render for JavaScript-only pages (``web_render``), then
+stores the raw blob and an upserted ``pages`` row in the SQLite cache
+(``web_cache``) and logs the fetch event (and the search intent that drove it).
 
 Politeness: a descriptive User-Agent, a per-domain rate limit, and an
 idempotent skip when the URL was fetched within the max-age window.
@@ -15,53 +16,44 @@ idempotent skip when the URL was fetched within the max-age window.
     uv run python scripts/web_scrape/web_fetch.py --from-file urls.tsv
     # refetch even if fresh; tune the freshness window
     uv run python scripts/web_scrape/web_fetch.py <url> --query "..." --force --max-age 7
+
+JavaScript-rendered pages: when the plain GET extracts to near-nothing (an SPA
+skeleton), the fetcher escalates to a headless-Chromium render and stores that
+DOM, marked ``rendered``. The fallback is on by default; ``--no-render`` disables
+it, ``--render`` forces it, ``--thin-chars`` tunes the threshold. See
+docs/JsFetch.md.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import http.client
-import re
 import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     import sqlite3
 
-# Allow `import web_cache` whether run as a script or imported.
+# Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
-
-USER_AGENT = (
-    "pinexplore-webevidence/1.0 "
-    "(+https://github.com/deanmoses/pindata; pinball catalog evidence cache)"
+from web_extract import extract
+from web_http import MAX_RESPONSE_BYTES, http_get
+from web_render import (
+    THIN_TEXT_CHARS,
+    BrowserUnavailableError,
+    LazyBrowser,
+    is_thin,
+    render,
 )
+
 DEFAULT_MAX_AGE_DAYS = 30
 RATE_LIMIT_SECONDS = 2.0
-MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
-HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
-
-
-SkipReason = Literal["content-type", "too-large"]
-
-
-class _Resp(NamedTuple):
-    """Result of an HTTP GET. ``raw``/``text`` are None when we declined the body
-    (``skip`` set to 'content-type' or 'too-large'); ``final_url`` is post-redirect."""
-
-    status: int
-    content_type: str
-    final_url: str
-    raw: bytes | None
-    text: str | None
-    skip: SkipReason | None
 
 
 type Domain = str
@@ -89,202 +81,6 @@ def _rate_limit(domain: Domain) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# HTTP fetch + extraction
-# --------------------------------------------------------------------------- #
-
-
-# A page can declare its charset in an HTML <meta> tag two ways: the HTML5
-# ``<meta charset="...">`` and the legacy
-# ``<meta http-equiv="Content-Type" content="text/html; charset=...">``. Both put
-# the value right after a ``charset=``, so one pattern catches them.
-_META_CHARSET_RE = re.compile(
-    rb"""<meta[^>]+?charset\s*=\s*["']?\s*([a-zA-Z0-9_.:-]+)""",
-    re.IGNORECASE,
-)
-
-# Windows-authored Japanese pages routinely declare ``Shift_JIS`` but actually use
-# cp932 (its superset, with NEC/IBM extension characters like ①, ㈱). Python's
-# strict ``shift_jis`` codec mangles those extension bytes, so decode the whole
-# family as cp932 — it round-trips genuine Shift_JIS unchanged.
-_CHARSET_ALIASES = {
-    "shift_jis": "cp932",
-    "shift-jis": "cp932",
-    "shiftjis": "cp932",
-    "sjis": "cp932",
-    "x-sjis": "cp932",
-}
-
-
-def _sniff_meta_charset(raw: bytes) -> str | None:
-    """Return the charset an HTML page declares in a ``<meta>`` tag, or None.
-
-    Per the HTML spec the declaration must appear in the first 1024 bytes, so we
-    only scan that prefix (and bound a stray match deeper in the body). Matches
-    both ``<meta charset="shift_jis">`` and the legacy
-    ``<meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS">``.
-    """
-    match = _META_CHARSET_RE.search(raw[:1024])
-    if match is None:
-        return None
-    return match.group(1).decode("ascii", errors="replace")
-
-
-def _detect_charset(raw: bytes) -> str | None:
-    """Statistically detect the charset of undeclared bytes, or None.
-
-    The last resort when neither the HTTP header nor the HTML declares a charset
-    (common for old Japanese pages served as Shift-JIS). charset-normalizer is
-    already an indirect dependency via trafilatura.
-    """
-    from charset_normalizer import from_bytes
-
-    best = from_bytes(raw).best()
-    return best.encoding if best is not None else None
-
-
-def _try_decode(raw: bytes, label: str | None) -> str | None:
-    """Decode ``raw`` using charset ``label``, or None if the label is empty or
-    unknown to Python's codecs (a junk ``charset=`` shouldn't raise and lose the
-    page). The Shift_JIS family is upgraded to its cp932 superset first."""
-    if not label:
-        return None
-    codec = _CHARSET_ALIASES.get(label.strip().lower(), label)
-    try:
-        return raw.decode(codec, errors="replace")
-    except LookupError:
-        return None
-
-
-def _decode_body(raw: bytes, header_charset: str | None) -> str:
-    """Decode response bytes to text, resolving the charset in priority order:
-
-    1. the HTTP ``Content-Type`` charset, when the server sent one (authoritative);
-    2. a ``<meta>`` charset the HTML declares about itself;
-    3. charset-normalizer's statistical detection;
-    4. utf-8, as a last resort.
-
-    The motivating bug: old Japanese pages served as Shift-JIS/cp932 with *no*
-    charset header — a blind utf-8 decode turned their titles to mojibake. An
-    unknown/junk label (e.g. a bogus ``charset=utf-8x-bogus``, which would raise
-    ``LookupError`` and escape ``fetch_one``'s except tuple) is skipped rather than
-    allowed to lose the page; ``errors="replace"`` throughout so undecodable bytes
-    never raise either.
-    """
-    # Header then <meta>; only if neither yields a usable label do we run the
-    # (relatively costly) statistical detection.
-    for label in (header_charset, _sniff_meta_charset(raw)):
-        decoded = _try_decode(raw, label)
-        if decoded is not None:
-            return decoded
-    detected = _try_decode(raw, _detect_charset(raw))
-    return detected if detected is not None else raw.decode("utf-8", errors="replace")
-
-
-def _request_url(url: str) -> str:
-    """Make a normalized URL safe to put on the HTTP request line.
-
-    ``normalize_url`` keeps the readable UTF-8 form (the cache key), but urllib
-    will not encode it: a non-ASCII host or path (e.g. a Japanese Weblio article,
-    ``/content/サンワイズ``) raises ``UnicodeEncodeError`` when urllib tries to
-    ASCII-encode the request line. So IDNA-encode a non-ASCII host and
-    percent-encode non-ASCII path/query bytes here, for the wire only. Idempotent:
-    an already-ASCII or already-percent-encoded URL is unchanged (``%`` is in the
-    safe set, so ``%E3`` is not double-encoded).
-    """
-    parts = urllib.parse.urlsplit(url)
-    host = parts.hostname or ""
-    if host and not host.isascii():
-        # leave as-is on failure; urlopen surfaces a clear error if it's truly bad
-        with contextlib.suppress(UnicodeError):
-            host = host.encode("idna").decode("ascii")
-    # parts.hostname strips the brackets an IPv6 literal needs; restore them, or
-    # the rebuilt netloc (e.g. ``::1:8080``) becomes ambiguous/malformed. A domain
-    # or IDNA-encoded host never contains ':', so this only fires for IPv6.
-    netloc = f"[{host}]" if ":" in host else host
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    if parts.username:
-        netloc = (
-            parts.username
-            + (f":{parts.password}" if parts.password else "")
-            + f"@{netloc}"
-        )
-    path = urllib.parse.quote(parts.path, safe="/%:@-._~!$&'()*+,;=")
-    query = urllib.parse.quote(parts.query, safe="%:@-._~!$&'()*+,;=/?")
-    return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, ""))
-
-
-def _http_get(url: str) -> _Resp:
-    """GET a URL with our UA, gating on content-type and response size.
-
-    Skips downloading the body for non-HTML content types, and caps the read at
-    MAX_RESPONSE_BYTES so a giant response can't be buffered into memory then
-    charset-decoded into garbage. ``final_url`` is the post-redirect URL — the
-    readable input ``url`` when we landed where we asked, else the redirect target.
-    """
-    request_url = _request_url(url)
-    req = urllib.request.Request(request_url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        status = resp.status
-        content_type = resp.headers.get_content_type()
-        landed = resp.geturl()
-        # geturl() echoes the (encoded) request URL when there was no redirect;
-        # return the original readable url then, so a non-ASCII page isn't re-keyed
-        # to its percent-encoded form on every fetch.
-        final_url = url if landed == request_url else landed
-        # None (not a utf-8 default) when the server omits the charset, so
-        # _decode_body can fall through to the page's own <meta>/detection — the
-        # headerless Shift-JIS case that a blind utf-8 decode mojibakes.
-        header_charset = resp.headers.get_content_charset()
-        if content_type not in HTML_CONTENT_TYPES:
-            return _Resp(status, content_type, final_url, None, None, "content-type")
-        raw = resp.read(MAX_RESPONSE_BYTES + 1)
-    if len(raw) > MAX_RESPONSE_BYTES:
-        return _Resp(status, content_type, final_url, None, None, "too-large")
-    text = _decode_body(raw, header_charset)
-    return _Resp(status, content_type, final_url, raw, text, None)
-
-
-class ExtractedMeta(NamedTuple):
-    """Readable content pulled from a page. Any field may be None."""
-
-    title: str | None
-    last_updated: str | None
-    text: str | None
-
-
-def _extract(html: str, url: str) -> ExtractedMeta:
-    """Run trafilatura for text/title; extract the date conservatively.
-
-    ``last_updated`` is a real date stated on the page, or None — never a guess.
-    trafilatura's default date extraction pads a weak year-only signal (a stray
-    "© 2024", a bare-year meta) up to a fabricated `YYYY-01-01`, which would
-    corrupt the "is this still live / need a 2023+ source" judgment. We instead
-    ask htmldate with ``extensive_search=False``, which returns None rather than
-    pad — for evidence, no date beats a wrong one. ``original_date`` is left False
-    (htmldate's default) so we get the page's most recent date, matching the
-    ``last_updated`` column name and the recency check.
-    """
-    import htmldate
-    import trafilatura
-
-    title: str | None = None
-    text: str | None = None
-    doc = trafilatura.bare_extraction(html, url=url, with_metadata=True)
-    if doc is not None:
-        title = getattr(doc, "title", None)
-        text = getattr(doc, "text", None)
-    # Fall back to a plain text extraction if metadata extraction yielded none.
-    if not text:
-        text = trafilatura.extract(html, url=url)
-    try:
-        last_updated = htmldate.find_date(html, extensive_search=False)
-    except Exception:
-        last_updated = None
-    return ExtractedMeta(title=title, last_updated=last_updated, text=text)
-
-
-# --------------------------------------------------------------------------- #
 # Fetch one page
 # --------------------------------------------------------------------------- #
 
@@ -296,6 +92,9 @@ def fetch_one(
     query: str | None,
     force: bool,
     max_age_days: int,
+    browser: LazyBrowser | None = None,
+    force_render: bool = False,
+    thin_chars: int = THIN_TEXT_CHARS,
 ) -> None:
     try:
         url = web_cache.normalize_url(raw_url)
@@ -330,7 +129,7 @@ def fetch_one(
     _rate_limit(domain)
     fetched_at = web_cache.now_iso()
     try:
-        resp = _http_get(url)
+        resp = http_get(url)
     except urllib.error.HTTPError as exc:
         print(f"HTTP {exc.code}: {url}", file=sys.stderr)
         web_cache.append_fetch(
@@ -383,19 +182,56 @@ def fetch_one(
         url = final_url
         existing = web_cache.get(url, con=con)
 
-    # Both are guaranteed non-None when skip is None (see _http_get).
-    assert resp.raw is not None
+    # text is guaranteed non-None when skip is None (see http_get).
     assert resp.text is not None
+    meta = extract(resp.text, url)
+
+    # JS-only pages extract to near-nothing from the plain GET; escalate to a
+    # headless render (unless disabled) and, if it succeeds, adopt its DOM as the
+    # stored blob. --render forces a render even when the plain fetch isn't thin.
+    rendered = False
+    render_attempted = False
+    if browser is not None and (force_render or is_thin(meta.text, thin_chars)):
+        render_attempted = True
+        # The render is a second hit to the domain (document + sub-resources), so
+        # honor the same per-domain spacing the plain GET did.
+        _rate_limit(urllib.parse.urlsplit(url).hostname or domain)
+        rresp = render(url, browser)
+        if rresp is not None:
+            # Reconcile the render's own redirect, mirroring the plain path above.
+            rfinal = web_cache.normalize_url(rresp.final_url)
+            if rfinal != url:
+                url = rfinal
+                existing = web_cache.get(url, con=con)
+            resp = rresp
+            rendered = True
+            assert resp.text is not None
+            meta = extract(resp.text, url)
+        else:
+            # The render was attempted and failed (render logged why). fetches is
+            # an audit of *every* fetch, so record the failed attempt — None status,
+            # flagged a render — even though we fall back to the plain result below.
+            web_cache.append_fetch(
+                con,
+                url=url,
+                fetched_at=fetched_at,
+                search_query=query,
+                http_status=None,
+                rendered=True,
+            )
+
+    # raw is guaranteed non-None for both a plain fetch (skip is None) and a render.
+    assert resp.raw is not None
     # Content-address the blob so each distinct version is preserved. An unchanged
     # refetch resolves to the same file (no rewrite); a changed one writes a new
     # blob alongside the old. `changed` is relative to the version last stored.
+    # (Rendered DOM is rarely byte-stable, so renders are usually 'changed'.)
     content_sha = web_cache.content_sha(resp.raw)
     changed = existing is None or existing.get("content_sha") != content_sha
     blob = web_cache.html_path(content_sha)
     if not blob.exists():
         blob.write_bytes(resp.raw)
 
-    meta = _extract(resp.text, url)
     web_cache.upsert_page(
         con,
         url=url,
@@ -408,6 +244,7 @@ def fetch_one(
         http_status=resp.status,
         content_type=resp.content_type,
         text=meta.text,
+        rendered=rendered,
     )
     web_cache.append_fetch(
         con,
@@ -417,10 +254,27 @@ def fetch_one(
         http_status=resp.status,
         content_sha=content_sha,
         changed=changed,
+        rendered=rendered,
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
+    if rendered:
+        state += ", rendered"
     title = meta.title or "(no title)"
     print(f"fetched [{resp.status}] ({state}): {url}\n    {title}")
+    # Loud failure: a still-thin page is the silent-200 bug surfacing. Warn whether
+    # or not we rendered, so detection is useful even under --no-render.
+    if is_thin(meta.text, thin_chars):
+        if rendered:
+            print(f"WARNING: still thin after render: {url}", file=sys.stderr)
+        elif not render_attempted:
+            # A render might rescue it; suggest it only when we didn't already try.
+            # --force too, since this page is now fresh and would otherwise skip.
+            print(
+                f"WARNING: thin content, likely JS-only: {url} "
+                "(retry with --force --render after `uv run playwright install chromium`)",
+                file=sys.stderr,
+            )
+        # else: a render was attempted and failed — render already logged why.
 
 
 # --------------------------------------------------------------------------- #
@@ -472,8 +326,34 @@ def main() -> int:
         default=DEFAULT_MAX_AGE_DAYS,
         help=f"Freshness window in days (default: {DEFAULT_MAX_AGE_DAYS}).",
     )
+    render_group = parser.add_mutually_exclusive_group()
+    render_group.add_argument(
+        "--no-render",
+        action="store_true",
+        help="Disable the headless-render fallback (pure stdlib fetch).",
+    )
+    render_group.add_argument(
+        "--render",
+        action="store_true",
+        help=(
+            "Force a headless render even when the plain fetch isn't thin. Pair "
+            "with --force to re-render a page that's already cached and fresh."
+        ),
+    )
+    parser.add_argument(
+        "--thin-chars",
+        type=int,
+        default=THIN_TEXT_CHARS,
+        help=(
+            "Extracted-text length below which a page is judged thin / JS-only "
+            f"and a render is tried (default: {THIN_TEXT_CHARS})."
+        ),
+    )
     args = parser.parse_args()
 
+    # One browser per run, threaded into fetch_one (a batch pays startup once, and
+    # lazily — see LazyBrowser). None disables the fallback entirely.
+    browser = None if args.no_render else LazyBrowser()
     con = web_cache.connect()
     web_cache.init_schema(con)
 
@@ -486,15 +366,26 @@ def main() -> int:
             parser.error("provide a URL or --from-file")
 
         for raw_url, query in requests:
-            fetch_one(
-                con,
-                raw_url,
-                query=query,
-                force=args.force,
-                max_age_days=args.max_age,
-            )
+            try:
+                fetch_one(
+                    con,
+                    raw_url,
+                    query=query,
+                    force=args.force,
+                    max_age_days=args.max_age,
+                    browser=browser,
+                    force_render=args.render,
+                    thin_chars=args.thin_chars,
+                )
+            except BrowserUnavailableError as exc:
+                # Render setup failed (no Chromium / no playwright). It won't fix
+                # itself mid-batch, so stop with the actionable message.
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
     finally:
         con.close()
+        if browser is not None:
+            browser.close()
     return 0
 
 

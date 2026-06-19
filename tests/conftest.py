@@ -3,7 +3,7 @@
 These are the project's first tests. They cover the web-scrape cache
 (scripts/web_scrape/), the most logic-heavy Python in the repo. Everything here
 runs fully offline: pure functions, a throwaway SQLite under tmp_path, and a
-monkeypatched ``_http_get`` — no network.
+monkeypatched ``http_get`` — no network.
 """
 
 from __future__ import annotations

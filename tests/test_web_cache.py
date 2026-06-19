@@ -143,3 +143,94 @@ def test_upsert_preserves_first_fetched_on_conflict(cache):
     row = _page(cache, url)
     assert row["first_fetched_at"] == first
     assert row["content_sha"] == sha2
+
+
+# --------------------------------------------------------------------------- #
+# blob path helpers — extension parameter (HTML default; PDFs later)
+# --------------------------------------------------------------------------- #
+
+
+def test_html_rel_and_path_default_to_html():
+    assert wc.html_rel("abc") == "html/abc.html"
+    assert wc.html_path("abc").name == "abc.html"
+
+
+def test_html_rel_and_path_accept_extension():
+    assert wc.html_rel("abc", ext="pdf") == "html/abc.pdf"
+    assert wc.html_path("abc", ext="pdf").name == "abc.pdf"
+
+
+# --------------------------------------------------------------------------- #
+# rendered provenance flag — storage + migration
+# --------------------------------------------------------------------------- #
+
+
+def test_rendered_flag_stored_on_page_and_fetch(cache):
+    url = wc.normalize_url("https://spa.com/x")
+    sha = wc.content_sha(b"x")
+    wc.upsert_page(
+        cache,
+        url=url,
+        raw_url=url,
+        content_sha=sha,
+        html_file=wc.html_rel(sha),
+        fetched_at=wc.now_iso(),
+        rendered=True,
+    )
+    assert _page(cache, url)["rendered"] == 1
+    wc.append_fetch(
+        cache,
+        url=url,
+        fetched_at=wc.now_iso(),
+        search_query=None,
+        http_status=200,
+        content_sha=sha,
+        changed=True,
+        rendered=True,
+    )
+    assert cache.execute("SELECT rendered FROM fetches").fetchone()[0] == 1
+
+
+def test_rendered_defaults_to_null_when_omitted(cache):
+    url = wc.normalize_url("https://plain.com/x")
+    _seed(cache, url=url)  # _seed never passes rendered
+    assert _page(cache, url)["rendered"] is None
+
+
+def test_init_schema_migrates_rendered_onto_legacy_cache(tmp_path, monkeypatch):
+    # A cache.sqlite created before `rendered` existed: init_schema must ALTER the
+    # column onto the existing tables, not just CREATE-IF-NOT-EXISTS around them.
+    web_dir = tmp_path / "web"
+    monkeypatch.setattr(wc, "WEB_DIR", web_dir)
+    monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
+    monkeypatch.setattr(wc, "HTML_DIR", web_dir / "html")
+    con = wc.connect()
+    con.executescript(
+        """
+        CREATE TABLE pages (
+          url TEXT PRIMARY KEY, raw_url TEXT, content_sha TEXT NOT NULL,
+          first_fetched_at TEXT NOT NULL, last_fetched_at TEXT NOT NULL,
+          last_updated TEXT, title TEXT, http_status INTEGER, content_type TEXT,
+          html_file TEXT NOT NULL, text TEXT
+        );
+        CREATE TABLE fetches (
+          id INTEGER PRIMARY KEY, url TEXT NOT NULL, fetched_at TEXT NOT NULL,
+          search_query TEXT, http_status INTEGER, content_sha TEXT, changed INTEGER
+        );
+        """
+    )
+    con.commit()
+
+    def _cols(table: str) -> set[str]:
+        return {
+            r[0] for r in con.execute("SELECT name FROM pragma_table_info(?)", (table,))
+        }
+
+    assert "rendered" not in _cols("pages")
+    assert "rendered" not in _cols("fetches")
+
+    wc.init_schema(con)  # idempotent + migrating
+
+    assert "rendered" in _cols("pages")
+    assert "rendered" in _cols("fetches")
+    con.close()
