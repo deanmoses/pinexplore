@@ -147,9 +147,9 @@ def content_sha(raw: bytes) -> str:
 def html_path(sha: str, ext: str = "html") -> Path:
     """Absolute path to a page's raw blob.
 
-    ``ext`` defaults to ``html``; it exists so a non-HTML blob (a fetched PDF,
-    once that lands) can be stored as ``<sha>.pdf`` and re-open in a viewer on
-    verify, rather than being mislabeled ``.html``.
+    ``ext`` defaults to ``html``; it exists so a non-HTML blob (a fetched PDF)
+    is stored as ``<sha>.pdf`` and re-opens in a viewer on verify, rather than
+    being mislabeled ``.html``.
     """
     return HTML_DIR / f"{sha}.{ext}"
 

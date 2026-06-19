@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless-render fallback for JavaScript-only pages (see docs/JsFetch.md).
+"""Headless-render fallback for JavaScript-only pages (see docs/WebCache.md).
 
 A client-rendered (React/Vue/Angular) page returns a skeleton to the plain GET
 that extracts to near-nothing. When that happens the fetcher escalates here:

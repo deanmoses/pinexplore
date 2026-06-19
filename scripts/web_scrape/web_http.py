@@ -22,14 +22,32 @@ USER_AGENT = (
 )
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
 HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+PDF_CONTENT_TYPE = "application/pdf"
+# Content types we can turn into evidence. HTML is charset-decoded then extracted
+# with trafilatura; a PDF's bytes are stored verbatim and parsed by web_extract
+# (no charset decode). Anything else still skips with skip="content-type".
+EXTRACTABLE_CONTENT_TYPES = HTML_CONTENT_TYPES | {PDF_CONTENT_TYPE}
+# Generic/ambiguous labels worth a %PDF- magic-byte sniff: servers routinely serve
+# a real PDF as octet-stream, and a response with no Content-Type header surfaces
+# (via get_content_type's default) as text/plain. We read the (size-capped) body
+# and let the signature decide, rather than skip a citable document.
+_SNIFFABLE_CONTENT_TYPES = {
+    "application/octet-stream",
+    "binary/octet-stream",
+    "text/plain",
+}
+_PDF_MAGIC = b"%PDF-"
 
 
 SkipReason = Literal["content-type", "too-large"]
 
 
 class Resp(NamedTuple):
-    """Result of an HTTP GET. ``raw``/``text`` are None when we declined the body
-    (``skip`` set to 'content-type' or 'too-large'); ``final_url`` is post-redirect."""
+    """Result of an HTTP GET. ``raw`` and ``text`` are both None when we declined
+    the body (``skip`` set to 'content-type' or 'too-large'). On success ``raw`` is
+    always set; ``text`` is the decoded body for HTML but None for a binary type
+    (a PDF), whose ``text`` is filled later by the extractor. ``final_url`` is
+    post-redirect."""
 
     status: int
     content_type: str
@@ -192,10 +210,28 @@ def http_get(url: str) -> Resp:
         # _decode_body can fall through to the page's own <meta>/detection — the
         # headerless Shift-JIS case that a blind utf-8 decode mojibakes.
         header_charset = resp.headers.get_content_charset()
-        if content_type not in HTML_CONTENT_TYPES:
+        # Read the body for an extractable type, or for a generic/empty label that
+        # a magic-byte sniff might reveal to be a PDF. Anything else skips unread.
+        if (
+            content_type not in EXTRACTABLE_CONTENT_TYPES
+            and content_type not in _SNIFFABLE_CONTENT_TYPES
+        ):
             return Resp(status, content_type, final_url, None, None, "content-type")
         raw = resp.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) > MAX_RESPONSE_BYTES:
+        # An over-cap sniffable type (octet-stream / text/plain) reports too-large
+        # rather than content-type — both skip + log; we can't sniff without reading.
         return Resp(status, content_type, final_url, None, None, "too-large")
+    # A %PDF- signature is authoritative: it identifies a PDF whatever the header
+    # claimed (octet-stream, a wrong text/* label, or nothing).
+    if raw.startswith(_PDF_MAGIC):
+        content_type = PDF_CONTENT_TYPE
+    elif content_type not in EXTRACTABLE_CONTENT_TYPES:
+        # A sniffable type that isn't a PDF (a genuine octet-stream download).
+        return Resp(status, content_type, final_url, None, None, "content-type")
+    if content_type == PDF_CONTENT_TYPE:
+        # Binary: store the raw bytes, skip charset decoding. text is filled in
+        # later by the PDF extractor (web_extract.extract_pdf).
+        return Resp(status, content_type, final_url, raw, None, None)
     text = _decode_body(raw, header_charset)
     return Resp(status, content_type, final_url, raw, text, None)

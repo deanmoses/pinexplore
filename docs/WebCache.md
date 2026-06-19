@@ -25,12 +25,13 @@ The **SQLite database is the system-of-record**; the main DuckDB is an analytica
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
   cache.sqlite                 system-of-record: pages + fetches + pages_fts (FTS5)
   html/<sha256(raw)>.html      raw page blobs, content-addressed + versioned
+                               (a fetched PDF lands as <sha>.pdf)
 
 scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert,
                              search() / quote() / get()
   web_http.py                transport: GET, charset decode, wire-safe URLs
-  web_extract.py             extraction: HTML → title/text/date (PDF later)
+  web_extract.py             extraction: HTML (trafilatura) / PDF (pypdf) → title/text/date
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + html/)
 
@@ -89,7 +90,7 @@ Scrape behavior:
 
 ### JavaScript-rendered pages
 
-A client-rendered (JavaScript-only) site returns a skeleton document to the plain `urllib` GET — trafilatura extracts little or no text, so there's nothing to quote. When the extracted text comes back **thin** (under `--thin-chars`, default 200), the fetcher escalates to a **headless-Chromium render** (Playwright), executes the page's JavaScript, and stores _that_ DOM as the blob, marked `rendered`. The fast stdlib path stays the default; the browser fires only on the thin fallback. See [JsFetch.md](JsFetch.md) for the full design.
+A client-rendered (JavaScript-only) site returns a skeleton document to the plain `urllib` GET — trafilatura extracts little or no text, so there's nothing to quote. When the extracted text comes back **thin** (under `--thin-chars`, default 200), the fetcher escalates to a **headless-Chromium render** (Playwright), executes the page's JavaScript, and stores _that_ DOM as the blob, marked `rendered`. The fast stdlib path stays the default; the browser fires only on the thin fallback.
 
 ```bash
 uv run playwright install chromium    # one-time: download the browser binary (~150MB)
@@ -98,6 +99,12 @@ uv run playwright install chromium    # one-time: download the browser binary (~
 Flags: `--no-render` (pure stdlib, never render), `--render` (force a render even when the plain fetch isn't thin, for sites known to be JS-only — pair with `--force` to re-render a page that's already cached and fresh), `--thin-chars N` (tune the threshold). The browser is launched once per run, lazily — an all-stdlib batch never pays browser startup.
 
 Two honest caveats about rendered blobs: the stored bytes are the **rendered DOM, not what the server sent** (hence the `rendered` flag, so a citation's provenance is clear), and their `content_sha` is **non-deterministic** (hydration, timestamps), so the unchanged-refetch dedup degrades — a `--force` on a JS page typically writes a _new_ blob alongside the old each time.
+
+### PDF documents
+
+PDFs (rulesheets, manufacturer flyers, press releases) are first-class evidence. A PDF is detected by its `application/pdf` content-type — or, when a server mislabels it (commonly `application/octet-stream`), by a `%PDF-` magic-byte sniff — then stored as the **raw bytes the server sent**, as a `<sha>.pdf` blob. [`pypdf`](https://pypdf.readthedocs.io/) pulls the readable text (for FTS + quoting) and title, and `last_updated` from the PDF's own `/ModDate` (falling back to `/CreationDate`), kept as conservative as the HTML date — a real date the document states, else null. No flags and no extra setup: a PDF URL is fetched exactly like any other.
+
+PDFs are the integrity opposite of rendered pages: the blob is the unmodified document, so `content_sha` is **deterministic** (dedup works perfectly) and a citation re-verifies against the exact bytes — a PDF never touches the `rendered` flag. An image-only/scanned PDF extracts to little or no text (there is no OCR); like a still-thin render, that prints a loud warning so a zero-quote document isn't silent.
 
 ## Querying
 

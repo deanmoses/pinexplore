@@ -12,6 +12,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "seaborn>=0.13.2",
     "trafilatura>=2.1.0",
+    "pypdf>=6.13.3",
 ]
 
 [dependency-groups]

@@ -40,15 +40,20 @@ def _stub_get(
     status: int = 200,
     content_type: str = "text/html",
     skip: web_http.SkipReason | None = None,
+    decode_body: bool = True,
 ) -> None:
     """Install a fake http_get returning a crafted Resp (final_url defaults to
-    the requested url; pass it to simulate a redirect)."""
+    the requested url; pass it to simulate a redirect).
+
+    ``decode_body=False`` mimics a binary fetch (a PDF): text is None and the raw
+    bytes carry through to the extractor, the way http_get returns a PDF."""
 
     def _get(url: str) -> web_http.Resp:
         fu = url if final_url is None else final_url
         if skip:
             return web_http.Resp(status, content_type, fu, None, None, skip)
-        return web_http.Resp(status, content_type, fu, body, body.decode(), None)
+        text = body.decode() if decode_body else None
+        return web_http.Resp(status, content_type, fu, body, text, None)
 
     monkeypatch.setattr(web_fetch, "http_get", _get)
 
@@ -164,11 +169,12 @@ def test_malformed_url_skipped_not_raised(cache, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_non_html_content_type_skipped_but_logged(cache, monkeypatch):
-    _stub_get(monkeypatch, skip="content-type", content_type="application/pdf")
-    _run(cache, "https://x.com/doc.pdf")
-    assert wc.get("https://x.com/doc.pdf", con=cache) is None  # no page row
-    assert _fetches(cache) == [("https://x.com/doc.pdf", 200, None, None)]  # logged
+def test_non_extractable_content_type_skipped_but_logged(cache, monkeypatch):
+    # An image is neither extractable nor PDF-sniffable: skipped, but still logged.
+    _stub_get(monkeypatch, skip="content-type", content_type="image/png")
+    _run(cache, "https://x.com/pic.png")
+    assert wc.get("https://x.com/pic.png", con=cache) is None  # no page row
+    assert _fetches(cache) == [("https://x.com/pic.png", 200, None, None)]  # logged
 
 
 def test_oversize_response_skipped_but_logged(cache, monkeypatch):
@@ -366,3 +372,53 @@ def test_rendered_then_still_thin_warns_distinctly(cache, monkeypatch, capsys):
     _stub_render(monkeypatch, body=THIN_HTML)  # render didn't help
     _run(cache, "https://spa.com/x", browser=object())
     assert "still thin after render" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# PDF documents (extracted via web_extract.extract_pdf, stored as .pdf blobs)
+# --------------------------------------------------------------------------- #
+
+
+def test_pdf_stored_as_pdf_blob_with_extracted_text(cache, monkeypatch, make_pdf):
+    raw = make_pdf(title="Spec Sheet", moddate="D:20240115093000Z")
+    _stub_get(monkeypatch, body=raw, content_type="application/pdf", decode_body=False)
+    _run(cache, "https://x.com/doc.pdf")
+    row = _page(cache, "https://x.com/doc.pdf")
+    assert row["content_type"] == "application/pdf"
+    assert row["html_file"].endswith(".pdf")  # blob keeps its .pdf extension
+    assert row["title"] == "Spec Sheet"
+    assert row["last_updated"] == "2024-01-15"
+    assert "Hello PDF evidence" in (row["text"] or "")
+    assert not row["rendered"]  # a PDF is never a render
+    assert wc.html_path(row["content_sha"], ext="pdf").exists()
+
+
+def test_pdf_dedups_deterministically_on_refetch(cache, monkeypatch, make_pdf):
+    # PDF bytes are stored verbatim, so an unchanged refetch is byte-identical
+    # (changed=0) — unlike a render, whose DOM is rarely byte-stable.
+    raw = make_pdf(title="Spec")
+    _stub_get(monkeypatch, body=raw, content_type="application/pdf", decode_body=False)
+    _run(cache, "https://x.com/doc.pdf", force=True)
+    _run(cache, "https://x.com/doc.pdf", force=True)
+    assert [r[3] for r in _fetches(cache)] == [1, 0]  # new, then unchanged
+
+
+def test_scanned_pdf_never_renders_and_warns(cache, monkeypatch, make_pdf, capsys):
+    # A scanned/image-only PDF extracts to nothing → reads as thin. It must NOT
+    # escalate to a browser render (even with --render), and warns distinctly.
+    _stub_get(
+        monkeypatch,
+        body=make_pdf(text=""),
+        content_type="application/pdf",
+        decode_body=False,
+    )
+    called: list[str] = []
+    monkeypatch.setattr(web_fetch, "render", lambda u, _b: called.append(u))
+    _run(cache, "https://x.com/scan.pdf", browser=object(), force_render=True)
+    assert called == []  # never escalated to render
+    row = _page(cache, "https://x.com/scan.pdf")
+    assert row["content_type"] == "application/pdf"
+    assert not row["rendered"]
+    err = capsys.readouterr().err
+    assert "scanned" in err
+    assert "--render" not in err  # not the JS-only message
