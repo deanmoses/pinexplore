@@ -250,7 +250,7 @@ def fetch_one(
     # The blob keeps its type's extension (a PDF as .pdf) so it re-opens in the
     # right viewer on verify rather than being mislabeled .html.
     ext = handler.extension
-    blob = web_cache.html_path(content_sha, ext=ext)
+    blob = web_cache.blob_path(content_sha, ext=ext)
     if not blob.exists():
         blob.write_bytes(resp.raw)
 
@@ -259,7 +259,6 @@ def fetch_one(
         url=url,
         raw_url=raw_url,
         content_sha=content_sha,
-        html_file=web_cache.html_rel(content_sha, ext=ext),
         fetched_at=fetched_at,
         last_updated=meta.last_updated,
         title=meta.title,

@@ -24,8 +24,9 @@ The **SQLite database is the system-of-record**; the main DuckDB is an analytica
 ```text
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
   cache.sqlite                 system-of-record: pages + fetches + pages_fts (FTS5)
-  html/<sha256(raw)>.html      raw page blobs, content-addressed + versioned
-                               (a fetched PDF lands as <sha>.pdf)
+  raw/<sha256(raw)>.<ext>      raw page blobs, content-addressed + versioned
+                               (HTML as <sha>.html, a fetched PDF as <sha>.pdf;
+                                the extension derives from the row's content_type)
 
 scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert,
@@ -36,23 +37,23 @@ scripts/web_scrape/
     html.py                  HTML: charset decode + trafilatura → title/text/date
     pdf.py                   PDF: %PDF- sniff + pypdf → title/text/date
   web_render.py              headless-render fallback for JS-only pages
-  web_fetch.py               CLI + per-URL orchestration (writes sqlite + html/)
+  web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
 
 sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
                              (raw-ingestion band, alongside 02_raw.sql)
 ```
 
-The raw HTML blob stays the copy we **re-verify quotes against**; it is kept on disk (not in SQLite) to keep the DB lean and the FTS index fast.
+The raw blob stays the copy we **re-verify quotes against**; it is kept on disk (not in SQLite) to keep the DB lean and the FTS index fast.
 
 ### SQLite schema
 
 Defined in [`web_cache.py`](../scripts/web_scrape/web_cache.py); two tables plus an FTS index:
 
 - **`pages`** — current state per normalized URL: the current version's
-  `content_sha` + `html_file`, the extracted `title`/`text`/`last_updated`, and a
+  `content_sha`, the (canonical) `content_type`, the extracted `title`/`text`/`last_updated`, and a
   `rendered` flag (1 when the stored blob is a headless-browser render, not the
-  bytes the server sent — see [JS-rendered pages](#javascript-rendered-pages)).
+  bytes the server sent — see [JS-rendered pages](#javascript-rendered-pages)). The blob's on-disk path is deliberately **not** a column — it's derived (see below).
 - **`fetches`** — append-only audit + version history: one row per fetch, with the
   `search_query` that drove it, the `content_sha` it saw, a `changed` flag, and a
   `rendered` flag.
@@ -61,13 +62,15 @@ A fetch upserts `pages` (preserving `first_fetched_at`) and appends one `fetches
 row. An `fts5` virtual table (`pages_fts`) indexes url+title+text, trigger-synced
 to `pages`.
 
-**HTML blobs are content-addressed and versioned.** A blob lives at
-`html/<sha256(raw bytes)>.html`, so every distinct version of a page is preserved: an unchanged refetch resolves to the same file (no rewrite), a changed one writes a new blob alongside the old. `pages` points at the current version; prior versions stay on disk and in the `fetches` log. This is what makes "reproducible quotes after a page changes" true.
+**Blobs are content-addressed and versioned.** A blob lives at
+`raw/<sha256(raw bytes)>.<ext>`, so every distinct version of a page is preserved: an unchanged refetch resolves to the same file (no rewrite), a changed one writes a new blob alongside the old. `pages` points at the current version (by `content_sha`); prior versions stay on disk and in the `fetches` log. This is what makes "reproducible quotes after a page changes" true.
+
+The blob path is **derived, not stored**: `raw/<content_sha>.<ext>`, where `<ext>` comes from the row's `content_type` (`content_types.extension_for`, or `web_cache.blob_path` from the fetcher). The row carries only the fact actually fetched — the type — and never bakes the directory name or a derivable extension into the data, so renaming the blob dir is a code-and-filesystem change that never touches a row.
 
 ## Lifecycle
 
 ```text
-web_fetch.py   →  writes cache.sqlite + html/ (localhost)
+web_fetch.py   →  writes cache.sqlite + raw/ (localhost)
    make push   →  R2 (durable; rides the existing ingest_sources manifest)
    make explore→  rebuilds web_pages / web_fetches from the sqlite
    query       →  scripts/web_scrape/web_cache.py helpers, or the main DuckDB

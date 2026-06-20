@@ -90,13 +90,13 @@ def cache(
 ) -> Iterator[sqlite3.Connection]:
     """Point the cache at a fresh tmp dir; return an initialized write connection.
 
-    Monkeypatches web_cache's path globals so connect()/get()/html_path() all
-    resolve under tmp_path — every test gets an isolated DB + html blob dir.
+    Monkeypatches web_cache's path globals so connect()/get()/blob_path() all
+    resolve under tmp_path — every test gets an isolated DB + raw blob dir.
     """
     web_dir = tmp_path / "web"
     monkeypatch.setattr(web_cache, "WEB_DIR", web_dir)
     monkeypatch.setattr(web_cache, "DB_PATH", web_dir / "cache.sqlite")
-    monkeypatch.setattr(web_cache, "HTML_DIR", web_dir / "html")
+    monkeypatch.setattr(web_cache, "RAW_DIR", web_dir / "raw")
     con = web_cache.connect()
     web_cache.init_schema(con)
     yield con

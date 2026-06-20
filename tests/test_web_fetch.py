@@ -18,6 +18,7 @@ import web_cache as wc
 import web_fetch
 import web_http
 import web_render
+from content_types import extension_for
 
 if TYPE_CHECKING:
     import sqlite3
@@ -240,8 +241,8 @@ def test_change_detection_versions_blobs_and_logs(cache, monkeypatch):
     sha2 = _page(cache, url)["content_sha"]
 
     assert sha1 != sha2
-    assert wc.html_path(sha1).exists()  # both versions kept
-    assert wc.html_path(sha2).exists()
+    assert wc.blob_path(sha1).exists()  # both versions kept
+    assert wc.blob_path(sha2).exists()
     assert _page(cache, url)["content_sha"] == sha2  # points at latest
     assert [r[3] for r in _fetches(cache)] == [1, 0, 1]  # new, unchanged, changed
 
@@ -251,7 +252,7 @@ def test_unchanged_refetch_does_not_rewrite_blob(cache, monkeypatch):
     _stub_get(monkeypatch, body=b"<html>same</html>")
     _run(cache, url, force=True)
     sha = _page(cache, url)["content_sha"]
-    blob = wc.html_path(sha)
+    blob = wc.blob_path(sha)
     mtime = blob.stat().st_mtime_ns
     _run(cache, url, force=True)
     assert blob.stat().st_mtime_ns == mtime  # not rewritten
@@ -386,12 +387,13 @@ def test_pdf_stored_as_pdf_blob_with_extracted_text(cache, monkeypatch, make_pdf
     _run(cache, "https://x.com/doc.pdf")
     row = _page(cache, "https://x.com/doc.pdf")
     assert row["content_type"] == "application/pdf"
-    assert row["html_file"].endswith(".pdf")  # blob keeps its .pdf extension
     assert row["title"] == "Spec Sheet"
     assert row["last_updated"] == "2024-01-15"
     assert "Hello PDF evidence" in (row["text"] or "")
     assert not row["rendered"]  # a PDF is never a render
-    assert wc.html_path(row["content_sha"], ext="pdf").exists()
+    # The blob's .pdf extension is derived from content_type, not stored on the row.
+    assert extension_for(row["content_type"]) == "pdf"
+    assert wc.blob_path(row["content_sha"], ext="pdf").exists()
 
 
 def test_pdf_dedups_deterministically_on_refetch(cache, monkeypatch, make_pdf):

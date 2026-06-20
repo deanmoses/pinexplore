@@ -83,7 +83,6 @@ def _seed(
         url=url,
         raw_url=raw_url or url,
         content_sha=sha,
-        html_file=wc.html_rel(sha),
         fetched_at=wc.now_iso(),
         title=title,
         text=text,
@@ -150,14 +149,13 @@ def test_upsert_preserves_first_fetched_on_conflict(cache):
 # --------------------------------------------------------------------------- #
 
 
-def test_html_rel_and_path_default_to_html():
-    assert wc.html_rel("abc") == "html/abc.html"
-    assert wc.html_path("abc").name == "abc.html"
+def test_blob_path_defaults_to_html():
+    assert wc.blob_path("abc").name == "abc.html"
+    assert wc.blob_path("abc").parent == wc.RAW_DIR
 
 
-def test_html_rel_and_path_accept_extension():
-    assert wc.html_rel("abc", ext="pdf") == "html/abc.pdf"
-    assert wc.html_path("abc", ext="pdf").name == "abc.pdf"
+def test_blob_path_accepts_extension():
+    assert wc.blob_path("abc", ext="pdf").name == "abc.pdf"
 
 
 # --------------------------------------------------------------------------- #
@@ -173,7 +171,6 @@ def test_rendered_flag_stored_on_page_and_fetch(cache):
         url=url,
         raw_url=url,
         content_sha=sha,
-        html_file=wc.html_rel(sha),
         fetched_at=wc.now_iso(),
         rendered=True,
     )
@@ -197,13 +194,15 @@ def test_rendered_defaults_to_null_when_omitted(cache):
     assert _page(cache, url)["rendered"] is None
 
 
-def test_init_schema_migrates_rendered_onto_legacy_cache(tmp_path, monkeypatch):
-    # A cache.sqlite created before `rendered` existed: init_schema must ALTER the
-    # column onto the existing tables, not just CREATE-IF-NOT-EXISTS around them.
+def test_init_schema_migrates_legacy_cache(tmp_path, monkeypatch):
+    # A cache.sqlite from before `rendered` existed and while a blob path was still
+    # stored in `html_file`: init_schema must ALTER `rendered` onto the existing
+    # tables (not just CREATE-IF-NOT-EXISTS around them) and DROP the obsolete
+    # `html_file` column — the extension now derives from content_type.
     web_dir = tmp_path / "web"
     monkeypatch.setattr(wc, "WEB_DIR", web_dir)
     monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
-    monkeypatch.setattr(wc, "HTML_DIR", web_dir / "html")
+    monkeypatch.setattr(wc, "RAW_DIR", web_dir / "raw")
     con = wc.connect()
     con.executescript(
         """
@@ -219,6 +218,12 @@ def test_init_schema_migrates_rendered_onto_legacy_cache(tmp_path, monkeypatch):
         );
         """
     )
+    con.execute(
+        "INSERT INTO pages (url, content_sha, first_fetched_at, last_fetched_at, "
+        "content_type, html_file, text) VALUES "
+        "('https://x.com/p', 'abc', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', "
+        "'text/html', 'html/abc.html', 'hi')"
+    )
     con.commit()
 
     def _cols(table: str) -> set[str]:
@@ -228,9 +233,15 @@ def test_init_schema_migrates_rendered_onto_legacy_cache(tmp_path, monkeypatch):
 
     assert "rendered" not in _cols("pages")
     assert "rendered" not in _cols("fetches")
+    assert "html_file" in _cols("pages")
 
     wc.init_schema(con)  # idempotent + migrating
 
     assert "rendered" in _cols("pages")
     assert "rendered" in _cols("fetches")
+    assert "html_file" not in _cols("pages")  # dropped
+    # The row's content survives the migration; content_type still drives the blob.
+    row = wc.get("https://x.com/p", con=con)
+    assert row is not None
+    assert row["content_type"] == "text/html"
     con.close()

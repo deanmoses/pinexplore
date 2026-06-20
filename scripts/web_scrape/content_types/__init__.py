@@ -69,6 +69,20 @@ def handler_for(content_type: str) -> ContentHandler | None:
     return _BY_MIME.get(content_type)
 
 
+def extension_for(content_type: str) -> str | None:
+    """The blob file extension for a stored ``content_type``, or None if unknown.
+
+    The bridge from a ``pages`` row to its blob on disk: a row stores the
+    (canonical) ``content_type`` but not the extension, so locate the blob with
+    ``raw/<content_sha>.<extension_for(content_type)>``. Always resolves for a
+    content type this cache actually stored — ``web_http`` canonicalizes the type
+    to a handler's own ``canonical_mime`` before it's written — so None signals a
+    type no handler claims, not a normal row.
+    """
+    handler = handler_for(content_type)
+    return handler.extension if handler else None
+
+
 def sniff(raw: bytes) -> ContentHandler | None:
     """The handler whose signature matches these leading bytes, or None.
 
@@ -88,6 +102,7 @@ __all__ = [
     "SNIFFABLE_CONTENT_TYPES",
     "ContentHandler",
     "ExtractedMeta",
+    "extension_for",
     "handler_for",
     "sniff",
 ]

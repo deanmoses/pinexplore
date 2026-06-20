@@ -55,6 +55,15 @@ def test_handler_extensions():
     assert ct.handler_for("application/pdf").extension == "pdf"
 
 
+def test_extension_for_resolves_stored_content_types():
+    # extension_for is the bridge from a pages row to its blob: a stored
+    # content_type maps to the blob's extension; an unknown type returns None
+    # rather than guessing (a row never holds one — http_get canonicalizes first).
+    assert ct.extension_for("text/html") == "html"
+    assert ct.extension_for("application/pdf") == "pdf"
+    assert ct.extension_for("application/octet-stream") is None
+
+
 def test_sniffed_canonical_mime_round_trips_to_a_handler():
     # http_get stamps content_type = sniffed.canonical_mime; web_fetch then re-looks
     # the handler up by it. Lock that round-trip: the stamped label must be one a

@@ -3,7 +3,7 @@
 
 This is the library behind the web-scrape cache (see docs/WebCache.md). It owns
 the SQLite system-of-record at ``ingest_sources/web/cache.sqlite`` plus the raw
-HTML blobs at ``ingest_sources/web/html/<sha>.html``. The fetcher
+blobs at ``ingest_sources/web/raw/<sha>.<ext>``. The fetcher
 (``web_fetch.py``) writes through it; patch authors read through it.
 
 Stdlib only (sqlite3, hashlib, urllib.parse, re). The SQLite ``fts5`` extension
@@ -11,8 +11,10 @@ ships with the standard CPython build.
 
 Layout (all under ingest_sources/web/, R2-backed and gitignored):
     cache.sqlite        pages + fetches + pages_fts (FTS5)
-    html/<sha>.html     raw page blobs, content-addressed (sha = sha256(raw
-                        bytes)) so every distinct version of a page is preserved
+    raw/<sha>.<ext>     raw page blobs, content-addressed (sha = sha256(raw
+                        bytes)) so every distinct version of a page is preserved.
+                        The extension is derived from a row's content_type, not
+                        stored — see content_types.extension_for / blob_path
 
 Query helpers:
     search(term)        FTS5 BM25-ranked pages (url, title, snippet)
@@ -33,7 +35,7 @@ from typing import TypedDict, cast
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WEB_DIR = REPO_ROOT / "ingest_sources" / "web"
 DB_PATH = WEB_DIR / "cache.sqlite"
-HTML_DIR = WEB_DIR / "html"
+RAW_DIR = WEB_DIR / "raw"
 
 
 # A URL canonicalized by ``normalize_url`` — the ``pages`` primary key and what
@@ -55,7 +57,6 @@ class PageRow(TypedDict):
     title: str | None
     http_status: int | None
     content_type: str | None
-    html_file: str
     text: str | None
     rendered: int | None  # 1 if the blob is a headless-browser render, else 0/null
 
@@ -134,7 +135,7 @@ def normalize_url(raw_url: str) -> NormalizedUrl:
 
 
 def content_sha(raw: bytes) -> str:
-    """sha256 of the raw page bytes; the html blob filename stem.
+    """sha256 of the raw page bytes; the raw blob filename stem.
 
     Content-addressed so each distinct version of a page is preserved: an
     unchanged refetch resolves to the same blob (no rewrite), a changed one
@@ -144,20 +145,16 @@ def content_sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def html_path(sha: str, ext: str = "html") -> Path:
-    """Absolute path to a page's raw blob.
+def blob_path(sha: str, ext: str = "html") -> Path:
+    """Absolute path to a page's raw blob, ``raw/<sha>.<ext>``.
 
-    ``ext`` defaults to ``html``; it exists so a non-HTML blob (a fetched PDF)
-    is stored as ``<sha>.pdf`` and re-opens in a viewer on verify, rather than
-    being mislabeled ``.html``.
+    ``ext`` defaults to ``html``; pass a non-HTML type's extension (a fetched
+    PDF as ``pdf``) so the blob is stored as ``<sha>.pdf`` and re-opens in the
+    right viewer on verify, rather than being mislabeled ``.html``. The fetcher
+    passes ``handler.extension``; to locate a blob from a stored ``pages`` row,
+    pass ``content_types.extension_for(row["content_type"])``.
     """
-    return HTML_DIR / f"{sha}.{ext}"
-
-
-def html_rel(sha: str, ext: str = "html") -> str:
-    """The ``html_file`` value stored in the DB (relative, posix). See ``html_path``
-    for the ``ext`` parameter."""
-    return f"html/{sha}.{ext}"
+    return RAW_DIR / f"{sha}.{ext}"
 
 
 def now_iso() -> str:
@@ -177,7 +174,7 @@ def connect(read_only: bool = False) -> sqlite3.Connection:
             raise FileNotFoundError(f"web cache not found: {DB_PATH}")
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     else:
-        HTML_DIR.mkdir(parents=True, exist_ok=True)
+        RAW_DIR.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(DB_PATH)
         # DELETE (rollback-journal) mode, not WAL: this is single-writer batch
         # tooling, so WAL's concurrent-reader benefit is moot, and it leaves the
@@ -200,8 +197,7 @@ CREATE TABLE IF NOT EXISTS pages (
   last_updated     TEXT,               -- page's own date if it states one, else null
   title            TEXT,
   http_status      INTEGER,
-  content_type     TEXT,
-  html_file        TEXT NOT NULL,      -- 'html/<content_sha>.html' (current version)
+  content_type     TEXT,               -- canonical MIME; the blob's extension derives from it
   text             TEXT,               -- extracted readable text (current version)
   rendered         INTEGER             -- 1 if the blob is a headless-browser render
 );
@@ -259,6 +255,13 @@ def init_schema(con: sqlite3.Connection) -> None:
     }
     if "rendered" not in pages_cols:
         con.execute("ALTER TABLE pages ADD COLUMN rendered INTEGER")
+    # `html_file` (a stored blob path like 'html/<sha>.html') was dropped: a blob's
+    # extension now derives from its `content_type` (content_types.extension_for),
+    # so the row needn't store the path. Drop it from pre-change caches; the paired
+    # on-disk move html/ -> raw/ is a filesystem step, not a schema one. Guard skips
+    # an already-migrated/fresh DB.
+    if "html_file" in pages_cols:
+        con.execute("ALTER TABLE pages DROP COLUMN html_file")
     fetches_cols = {
         r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
     }
@@ -278,7 +281,6 @@ def upsert_page(
     url: NormalizedUrl,
     raw_url: RawUrl,
     content_sha: str,
-    html_file: str,
     fetched_at: str,
     last_updated: str | None = None,
     title: str | None = None,
@@ -290,17 +292,17 @@ def upsert_page(
     """Insert or refresh a page row, keyed on the normalized URL.
 
     On conflict, points the row at the freshly-fetched version
-    (``content_sha``/``html_file``/``text``/``rendered``/...) and bumps
+    (``content_sha``/``content_type``/``text``/``rendered``/...) and bumps
     ``last_fetched_at`` while preserving ``first_fetched_at``.
     """
     con.execute(
         """
         INSERT INTO pages (
           url, raw_url, content_sha, first_fetched_at, last_fetched_at,
-          last_updated, title, http_status, content_type, html_file, text, rendered
+          last_updated, title, http_status, content_type, text, rendered
         ) VALUES (
           :url, :raw_url, :content_sha, :fetched_at, :fetched_at,
-          :last_updated, :title, :http_status, :content_type, :html_file, :text,
+          :last_updated, :title, :http_status, :content_type, :text,
           :rendered
         )
         ON CONFLICT(url) DO UPDATE SET
@@ -311,7 +313,6 @@ def upsert_page(
           title         = excluded.title,
           http_status   = excluded.http_status,
           content_type  = excluded.content_type,
-          html_file     = excluded.html_file,
           text          = excluded.text,
           rendered      = excluded.rendered
         """,
@@ -324,7 +325,6 @@ def upsert_page(
             "title": title,
             "http_status": http_status,
             "content_type": content_type,
-            "html_file": html_file,
             "text": text,
             "rendered": None if rendered is None else int(rendered),
         },
@@ -442,7 +442,7 @@ def search(
 
 # A pragmatic sentence splitter: break after ., !, or ? followed by whitespace,
 # or on a line break (paragraph/heading boundary). Good enough to isolate a
-# quotable sentence; the patch author verifies verbatim against the html blob
+# quotable sentence; the patch author verifies verbatim against the raw blob
 # anyway.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
@@ -456,7 +456,7 @@ def quote(url: str, needle: str, con: sqlite3.Connection | None = None) -> list[
     """Sentences in a page's extracted text containing ``needle`` (case-insensitive).
 
     The starting point for a verbatim ``note:`` quote in a data patch. The
-    author still confirms wording against the stored html blob before shipping.
+    author still confirms wording against the stored raw blob before shipping.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
