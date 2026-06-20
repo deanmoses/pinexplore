@@ -2,10 +2,11 @@
 """Polite web fetcher for the web evidence cache (see docs/WebCache.md).
 
 The CLI entry point and per-URL orchestration. Fetches a page once
-(``web_http``), extracts readable text and the page's own date (``web_extract``),
-escalating to a headless render for JavaScript-only pages (``web_render``), then
-stores the raw blob and an upserted ``pages`` row in the SQLite cache
-(``web_cache``) and logs the fetch event (and the search intent that drove it).
+(``web_http``), dispatches to its content-type handler (``content_types``) to
+extract readable text and the page's own date, escalating to a headless render
+for JavaScript-only pages (``web_render``), then stores the raw blob and an
+upserted ``pages`` row in the SQLite cache (``web_cache``) and logs the fetch
+event (and the search intent that drove it).
 
 Politeness: a descriptive User-Agent, a per-domain rate limit, and an
 idempotent skip when the URL was fetched within the max-age window.
@@ -22,9 +23,12 @@ skeleton), the fetcher escalates to a headless-Chromium render and stores that
 DOM, marked ``rendered``. The fallback is on by default; ``--no-render`` disables
 it, ``--render`` forces it, ``--thin-chars`` tunes the threshold.
 
-PDFs (rulesheets, flyers, press releases) are detected by content-type (or a
-``%PDF-`` magic-byte sniff) and stored as raw ``.pdf`` blobs, their text/title/date
-pulled with pypdf — no charset decode, no render.
+Each document type is a handler in ``content_types`` (one file per type): it
+claims its content types, recognizes itself from a magic-byte signature, and owns
+how its body is decoded, extracted, stored, and warned about. PDFs (rulesheets,
+flyers, press releases), for instance, are stored as raw ``.pdf`` blobs and parsed
+with pypdf — no charset decode, no render. A new type is a new file there, not a
+branch through this module.
 """
 
 from __future__ import annotations
@@ -45,8 +49,8 @@ if TYPE_CHECKING:
 # Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
-from web_extract import extract, extract_pdf
-from web_http import MAX_RESPONSE_BYTES, PDF_CONTENT_TYPE, http_get
+from content_types import handler_for
+from web_http import MAX_RESPONSE_BYTES, http_get
 from web_render import (
     THIN_TEXT_CHARS,
     BrowserUnavailableError,
@@ -163,7 +167,7 @@ def fetch_one(
 
     if resp.skip:
         why = (
-            f"non-HTML {resp.content_type}"
+            f"unsupported content-type {resp.content_type}"
             if resp.skip == "content-type"
             else f"response > {MAX_RESPONSE_BYTES // (1024 * 1024)}MB"
         )
@@ -185,27 +189,26 @@ def fetch_one(
         url = final_url
         existing = web_cache.get(url, con=con)
 
-    # Dispatch extraction by content-type. A PDF carries raw bytes and no decoded
-    # text (http_get skips charset decoding for binary); HTML carries decoded text.
-    # raw is non-None whenever skip is None, for both.
-    is_pdf = resp.content_type == PDF_CONTENT_TYPE
-    if is_pdf:
-        assert resp.raw is not None
-        meta = extract_pdf(resp.raw)
-    else:
-        assert resp.text is not None
-        meta = extract(resp.text, url)
+    # Dispatch extraction through the content-type handler. http_get only returns
+    # skip=None for an extractable type, so a handler is always found here; it pulls
+    # title/text/date from the raw bytes and/or decoded text, whichever its type
+    # uses (a binary type like a PDF carries bytes and no decoded text). raw is
+    # non-None whenever skip is None.
+    handler = handler_for(resp.content_type)
+    assert handler is not None
+    assert resp.raw is not None
+    meta = handler.extract(resp.raw, resp.text, url)
 
     # JS-only pages extract to near-nothing from the plain GET; escalate to a
     # headless render (unless disabled) and, if it succeeds, adopt its DOM as the
     # stored blob. --render forces a render even when the plain fetch isn't thin.
-    # A PDF is never escalated — a scanned PDF reads as thin too, but a browser
-    # can't extract its text either (that needs OCR, which is out of scope).
+    # Only a render-eligible type escalates — a PDF reads as thin when scanned too,
+    # but a browser can't extract its text either (that needs OCR, out of scope).
     rendered = False
     render_attempted = False
     if (
         browser is not None
-        and not is_pdf
+        and handler.renderable
         and (force_render or is_thin(meta.text, thin_chars))
     ):
         render_attempted = True
@@ -221,8 +224,8 @@ def fetch_one(
                 existing = web_cache.get(url, con=con)
             resp = rresp
             rendered = True
-            assert resp.text is not None
-            meta = extract(resp.text, url)
+            assert resp.raw is not None
+            meta = handler.extract(resp.raw, resp.text, url)
         else:
             # The render was attempted and failed (render logged why). fetches is
             # an audit of *every* fetch, so record the failed attempt — None status,
@@ -244,8 +247,9 @@ def fetch_one(
     # (Rendered DOM is rarely byte-stable, so renders are usually 'changed'.)
     content_sha = web_cache.content_sha(resp.raw)
     changed = existing is None or existing.get("content_sha") != content_sha
-    # A PDF blob keeps its .pdf extension so it re-opens in a viewer on verify.
-    ext = "pdf" if is_pdf else "html"
+    # The blob keeps its type's extension (a PDF as .pdf) so it re-opens in the
+    # right viewer on verify rather than being mislabeled .html.
+    ext = handler.extension
     blob = web_cache.html_path(content_sha, ext=ext)
     if not blob.exists():
         blob.write_bytes(resp.raw)
@@ -279,27 +283,16 @@ def fetch_one(
         state += ", rendered"
     title = meta.title or "(no title)"
     print(f"fetched [{resp.status}] ({state}): {url}\n    {title}")
-    # Loud failure: a still-thin page is the silent-200 bug surfacing. Warn whether
-    # or not we rendered, so detection is useful even under --no-render.
+    # Loud failure: a still-thin page is the silent-200 bug surfacing. The handler
+    # phrases its type's warning (a scanned PDF vs a JS-only page) given whether a
+    # render was tried, and returns None to stay quiet (a render attempted+failed —
+    # render already logged why).
     if is_thin(meta.text, thin_chars):
-        if is_pdf:
-            # The PDF analog of a still-thin render: an image-only/scanned PDF (no
-            # OCR) or one pypdf couldn't parse. Loud, so a 0-quote PDF isn't silent.
-            print(
-                f"WARNING: PDF extracted to little/no text (scanned?): {url}",
-                file=sys.stderr,
-            )
-        elif rendered:
-            print(f"WARNING: still thin after render: {url}", file=sys.stderr)
-        elif not render_attempted:
-            # A render might rescue it; suggest it only when we didn't already try.
-            # --force too, since this page is now fresh and would otherwise skip.
-            print(
-                f"WARNING: thin content, likely JS-only: {url} "
-                "(retry with --force --render after `uv run playwright install chromium`)",
-                file=sys.stderr,
-            )
-        # else: a render was attempted and failed — render already logged why.
+        warning = handler.thin_warning(
+            url, rendered=rendered, render_attempted=render_attempted
+        )
+        if warning is not None:
+            print(warning, file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #

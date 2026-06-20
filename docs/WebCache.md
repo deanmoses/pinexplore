@@ -30,8 +30,11 @@ ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
 scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert,
                              search() / quote() / get()
-  web_http.py                transport: GET, charset decode, wire-safe URLs
-  web_extract.py             extraction: HTML (trafilatura) / PDF (pypdf) → title/text/date
+  web_http.py                transport: GET, content-type gate, wire-safe URLs
+  content_types/             one handler per document type (the registry)
+    base.py                  the ContentHandler interface + ExtractedMeta
+    html.py                  HTML: charset decode + trafilatura → title/text/date
+    pdf.py                   PDF: %PDF- sniff + pypdf → title/text/date
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + html/)
 
@@ -105,6 +108,10 @@ Two honest caveats about rendered blobs: the stored bytes are the **rendered DOM
 PDFs (rulesheets, manufacturer flyers, press releases) are first-class evidence. A PDF is detected by its `application/pdf` content-type — or, when a server mislabels it (commonly `application/octet-stream`), by a `%PDF-` magic-byte sniff — then stored as the **raw bytes the server sent**, as a `<sha>.pdf` blob. [`pypdf`](https://pypdf.readthedocs.io/) pulls the readable text (for FTS + quoting) and title, and `last_updated` from the PDF's own `/ModDate` (falling back to `/CreationDate`), kept as conservative as the HTML date — a real date the document states, else null. No flags and no extra setup: a PDF URL is fetched exactly like any other.
 
 PDFs are the integrity opposite of rendered pages: the blob is the unmodified document, so `content_sha` is **deterministic** (dedup works perfectly) and a citation re-verifies against the exact bytes — a PDF never touches the `rendered` flag. An image-only/scanned PDF extracts to little or no text (there is no OCR); like a still-thin render, that prints a loud warning so a zero-quote document isn't silent.
+
+### Adding a content type
+
+Each document type is a self-contained **handler** under `scripts/web_scrape/content_types/` (one file per type), and the registry in `content_types/__init__.py` is the only place that lists them. A handler declares the content types it claims, the blob extension, whether it's render-eligible, and — for a type recognizable by its first bytes — a magic-byte `signature` (plus the `canonical_mime` to stamp when a server mislabels it). It must implement `extract` (→ `title`/`text`/`last_updated`); it overrides `decode` only if it's a text type (the base default treats the body as binary and hands `extract` the raw bytes) and `thin_warning` only to phrase its own no-text case. The registry validates each handler at import, so a missing extension or an inconsistent `canonical_mime` fails loudly up front rather than mid-fetch. `web_http` (the transport) and `web_fetch` (the orchestrator) branch only on the handler — never on a concrete type — so a new type (plain text, `.docx`, an image with OCR) is a new file plus one line in the `HANDLERS` tuple, not an edit threaded through the pipeline.
 
 ## Querying
 

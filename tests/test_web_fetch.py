@@ -3,8 +3,9 @@
 Covers the guards, content gates, redirect handling, change detection, failure
 logging, and the headless-render escalation/fallback (``http_get`` and
 ``render`` stubbed). The pieces fetch_one composes are tested in their own
-modules: transport/charset in test_web_http, extraction in test_web_extract,
-the render primitives in test_web_render.
+modules: the transport gate in test_web_http, the content-type handlers
+(charset + extraction) in test_content_types, the render primitives in
+test_web_render.
 """
 
 from __future__ import annotations
@@ -375,7 +376,7 @@ def test_rendered_then_still_thin_warns_distinctly(cache, monkeypatch, capsys):
 
 
 # --------------------------------------------------------------------------- #
-# PDF documents (extracted via web_extract.extract_pdf, stored as .pdf blobs)
+# PDF documents (extracted via the PDF handler, stored as .pdf blobs)
 # --------------------------------------------------------------------------- #
 
 
