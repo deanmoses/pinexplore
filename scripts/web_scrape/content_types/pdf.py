@@ -11,7 +11,7 @@ the ``ContentHandler`` interface — they never mention PDF.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from .base import ContentHandler, ExtractedMeta
 
@@ -87,13 +87,15 @@ class PdfHandler(ContentHandler):
 
     mime_types = frozenset({"application/pdf"})
     canonical_mime = "application/pdf"
-    signature = b"%PDF-"
+    signature: bytes | None = b"%PDF-"
     extension = "pdf"
     renderable = False
 
+    @override
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:
         return _extract_pdf(raw)
 
+    @override
     def thin_warning(
         self, url: str, *, rendered: bool, render_attempted: bool
     ) -> str | None:

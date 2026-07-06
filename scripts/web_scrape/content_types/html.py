@@ -11,6 +11,7 @@ mention HTML.
 from __future__ import annotations
 
 import re
+from typing import override
 
 from .base import ContentHandler, ExtractedMeta
 
@@ -151,17 +152,20 @@ class HtmlHandler(ContentHandler):
 
     mime_types = frozenset({"text/html", "application/xhtml+xml"})
     canonical_mime = "text/html"
-    signature = None
+    signature: bytes | None = None
     extension = "html"
     renderable = True
 
+    @override
     def decode(self, raw: bytes, header_charset: str | None) -> str | None:
         return _decode_body(raw, header_charset)
 
+    @override
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:
         assert text is not None  # HTML always carries decoded text (or a render's)
         return _extract_html(text, url)
 
+    @override
     def thin_warning(
         self, url: str, *, rendered: bool, render_attempted: bool
     ) -> str | None:

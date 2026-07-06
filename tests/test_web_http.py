@@ -98,8 +98,8 @@ class _FakeResp:
     def __enter__(self) -> _FakeResp:
         return self
 
-    def __exit__(self, *_: object) -> bool:
-        return False
+    def __exit__(self, *_: object) -> None:
+        return None
 
 
 def _stub_urlopen(
