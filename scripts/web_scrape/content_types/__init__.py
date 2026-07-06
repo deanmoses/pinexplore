@@ -13,11 +13,12 @@ from __future__ import annotations
 from .base import ContentHandler, ExtractedMeta
 from .html import HtmlHandler
 from .pdf import PdfHandler
+from .vtt import VttHandler
 
 # The registered handlers. One per document type; order is the sniff order (the
 # first whose signature matches a body wins, so list more specific signatures
 # first if two could ever overlap).
-HANDLERS: tuple[ContentHandler, ...] = (HtmlHandler(), PdfHandler())
+HANDLERS: tuple[ContentHandler, ...] = (HtmlHandler(), PdfHandler(), VttHandler())
 
 
 def _validate(handlers: tuple[ContentHandler, ...]) -> None:

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 # Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
+import web_video
 from content_types import handler_for
 from web_http import MAX_RESPONSE_BYTES, http_get
 from web_render import (
@@ -118,6 +119,16 @@ def fetch_one(
         print(f"skip (unsupported or malformed URL): {raw_url}", file=sys.stderr)
         return
     domain = host
+
+    # A video URL is a different transport entirely: the watch page is a JS
+    # shell and the evidence is spoken. Route it to the yt-dlp caption path,
+    # keyed on the canonical watch URL (youtu.be/shorts/live shapes dedup).
+    video_url = web_video.canonical_video_url(url)
+    if video_url is not None:
+        _fetch_video_one(
+            con, raw_url, video_url, query=query, force=force, max_age_days=max_age_days
+        )
+        return
 
     existing = web_cache.get(url, con=con)
     # For the freshness skip, also match a prior fetch that redirected: its row is
@@ -290,6 +301,101 @@ def fetch_one(
         warning = handler.thin_warning(
             url, rendered=rendered, render_attempted=render_attempted
         )
+        if warning is not None:
+            print(warning, file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# Fetch one video (caption track via web_video)
+# --------------------------------------------------------------------------- #
+
+
+def _fetch_video_one(
+    con: sqlite3.Connection,
+    raw_url: str,
+    url: str,
+    *,
+    query: str | None,
+    force: bool,
+    max_age_days: int,
+) -> None:
+    """Fetch one video's caption track into the cache (transport: web_video).
+
+    Mirrors fetch_one's skeleton on the canonical watch URL: freshness skip,
+    rate limit, content-addressed blob (the raw ``.vtt``), pages + fetches
+    rows. A video with no captions at all logs a loud warning and an audit row
+    but no page — there is no transcript to quote, and the video description
+    often links the written source to cite instead.
+    """
+    existing = web_cache.get(url, con=con)
+    fresh_row = existing or web_cache.get_by_raw_url(raw_url, con=con)
+    if fresh_row and not force:
+        age_days = (datetime.now(UTC) - _parse_iso(fresh_row["last_fetched_at"])).days
+        if age_days <= max_age_days:
+            print(f"skip (fresh, {age_days}d): {fresh_row['url']}")
+            return
+
+    _rate_limit(urllib.parse.urlsplit(url).hostname or "www.youtube.com")
+    fetched_at = web_cache.now_iso()
+    video = web_video.fetch_video(url)
+    if video is None:
+        # web_video logged why. fetches is an audit of *every* fetch.
+        print(f"FAILED: {url} (video extraction)", file=sys.stderr)
+        web_cache.append_fetch(
+            con, url=url, fetched_at=fetched_at, search_query=query, http_status=None
+        )
+        return
+    if video.vtt is None:
+        print(
+            f"WARNING: no captions: {url} — no transcript to quote (livestream "
+            f"archives often have none; check the video description for a "
+            f"written source)",
+            file=sys.stderr,
+        )
+        web_cache.append_fetch(
+            con, url=url, fetched_at=fetched_at, search_query=query, http_status=200
+        )
+        return
+
+    handler = handler_for("text/vtt")
+    assert handler is not None
+    meta = handler.extract(video.vtt, handler.decode(video.vtt, None), url)
+    content_sha = web_cache.content_sha(video.vtt)
+    changed = existing is None or existing.get("content_sha") != content_sha
+    blob = web_cache.blob_path(content_sha, ext=handler.extension)
+    if not blob.exists():
+        blob.write_bytes(video.vtt)
+
+    # Title and date come from the video's metadata, not the VTT: the caption
+    # file carries no title, and the video's publish date is the evidence date.
+    web_cache.upsert_page(
+        con,
+        url=url,
+        raw_url=raw_url,
+        content_sha=content_sha,
+        fetched_at=fetched_at,
+        last_updated=video.upload_date,
+        title=video.title,
+        http_status=200,
+        content_type="text/vtt",
+        text=meta.text,
+        rendered=False,
+    )
+    web_cache.append_fetch(
+        con,
+        url=url,
+        fetched_at=fetched_at,
+        search_query=query,
+        http_status=200,
+        content_sha=content_sha,
+        changed=changed,
+    )
+    state = "new" if existing is None else ("changed" if changed else "unchanged")
+    track = video.caption_note or "captions"
+    title = video.title or "(no title)"
+    print(f"fetched [{track}] ({state}): {url}\n    {title}")
+    if is_thin(meta.text, THIN_TEXT_CHARS):
+        warning = handler.thin_warning(url, rendered=False, render_attempted=False)
         if warning is not None:
             print(warning, file=sys.stderr)
 

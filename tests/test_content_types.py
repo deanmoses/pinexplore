@@ -31,6 +31,7 @@ def test_extractable_set_is_the_union_of_handler_mime_types():
         "text/html",
         "application/xhtml+xml",
         "application/pdf",
+        "text/vtt",
     } == ct.EXTRACTABLE_CONTENT_TYPES
 
 

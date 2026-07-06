@@ -32,10 +32,12 @@ scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert,
                              search() / quote() / get()
   web_http.py                transport: GET, content-type gate, wire-safe URLs
+  web_video.py               transport: YouTube caption tracks via yt-dlp
   content_types/             one handler per document type (the registry)
     base.py                  the ContentHandler interface + ExtractedMeta
     html.py                  HTML: charset decode + trafilatura → title/text/date
     pdf.py                   PDF: %PDF- sniff + pypdf → title/text/date
+    vtt.py                   WebVTT captions → spoken-line transcript
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
 
@@ -111,6 +113,14 @@ Two honest caveats about rendered blobs: the stored bytes are the **rendered DOM
 PDFs (rulesheets, manufacturer flyers, press releases) are first-class evidence. A PDF is detected by its `application/pdf` content-type — or, when a server mislabels it (commonly `application/octet-stream`), by a `%PDF-` magic-byte sniff — then stored as the **raw bytes the server sent**, as a `<sha>.pdf` blob. [`pypdf`](https://pypdf.readthedocs.io/) pulls the readable text (for FTS + quoting) and title, and `last_updated` from the PDF's own `/ModDate` (falling back to `/CreationDate`), kept as conservative as the HTML date — a real date the document states, else null. No flags and no extra setup: a PDF URL is fetched exactly like any other.
 
 PDFs are the integrity opposite of rendered pages: the blob is the unmodified document, so `content_sha` is **deterministic** (dedup works perfectly) and a citation re-verifies against the exact bytes — a PDF never touches the `rendered` flag. An image-only/scanned PDF extracts to little or no text (there is no OCR); like a still-thin render, that prints a loud warning so a zero-quote document isn't silent.
+
+### Video transcripts (YouTube)
+
+A YouTube URL is evidence whose text is **spoken**, so it gets its own transport: `web_video.py` uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to pull the video's metadata and best caption track, and the fetcher stores the raw `.vtt` as the blob with the parsed transcript as the page text — searchable and quotable like any cached page. No new flags: `web_fetch.py <any youtube url>` routes there automatically, and every URL shape (`watch?v=`, `youtu.be/`, `/shorts/`, `/live/`, `/embed/`) collapses to the one canonical `https://www.youtube.com/watch?v=<id>` cache key. The page's `title` is the video title and `last_updated` its upload date.
+
+Track choice: **manual subtitles beat auto-captions** (a human wrote them), English is preferred among manual tracks, and among auto-captions the **original spoken language** (`xx-orig`/`xx`) beats YouTube's machine translations — every other language there is one lossy step further from the evidence. The `fetches` log records which track was taken. The transcript keeps one spoken line per row with the rolling-caption repetition deduped and inline timing tags stripped; timestamps stay in the `.vtt` blob for anyone hunting a citation's `locator:` moment.
+
+A video with **no captions at all** (common for livestream archives) logs a loud warning and an audit row but no page — there is no transcript to quote. Check the video's description for the written source it usually links, and cite that instead.
 
 ### Adding a content type
 
