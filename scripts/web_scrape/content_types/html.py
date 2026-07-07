@@ -111,6 +111,19 @@ def _decode_body(raw: bytes, header_charset: str | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
+# A closed googleoff/googleon pair is the page's own machine-readable "this is
+# not content" marker (cookie banners, ad blocks). On pages whose real content
+# is thin — a short machine list beside a verbose consent dialog — trafilatura
+# picks the banner as main content, so these spans are dropped before
+# extraction. Unclosed googleoff markers are left alone (stripping to EOF on a
+# malformed page would be worse than a noisy extraction).
+_GOOGLEOFF_RE = re.compile(
+    r"<!--\s*googleoff:\s*(?:all|index|snippet|anchor)\s*-->.*?"
+    r"<!--\s*googleon:\s*(?:all|index|snippet|anchor)\s*-->",
+    re.S | re.I,
+)
+
+
 def _extract_html(html: str, url: str) -> ExtractedMeta:
     """Run trafilatura for text/title; extract the date conservatively.
 
@@ -126,15 +139,24 @@ def _extract_html(html: str, url: str) -> ExtractedMeta:
     import htmldate
     import trafilatura
 
+    html = _GOOGLEOFF_RE.sub("", html)
     title: str | None = None
     text: str | None = None
-    doc = trafilatura.bare_extraction(html, url=url, with_metadata=True)
+    # include_images so a thin image-caption list (a photo-gallery page whose
+    # only body text is the captions) isn't pruned as link-dense boilerplate;
+    # the ![alt](url) markers it emits are stripped below so evidence text
+    # stays prose.
+    doc = trafilatura.bare_extraction(html, url=url, with_metadata=True, include_images=True)
     if doc is not None:
         title = getattr(doc, "title", None)
         text = getattr(doc, "text", None)
     # Fall back to a plain text extraction if metadata extraction yielded none.
     if not text:
-        text = trafilatura.extract(html, url=url)
+        text = trafilatura.extract(html, url=url, include_images=True)
+    if text:
+        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
     try:
         last_updated = htmldate.find_date(html, extensive_search=False)
     except Exception:

@@ -240,6 +240,58 @@ def test_extract_date_is_most_recent_real_date():
 
 
 # --------------------------------------------------------------------------- #
+# HTML handler — googleoff blocks (cookie banners) never win extraction
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_keeps_image_caption_lists_without_image_markers():
+    # Some evidence pages (tilt.it maker pages) are a thin caption list beside
+    # a photo gallery — the page's only body text. Plain trafilatura prunes the
+    # link/image-dense block as boilerplate and keeps only the comments; we
+    # extract with images enabled so those paragraphs survive, then strip the
+    # ![alt](url) markers so the evidence text stays prose.
+    gallery = "".join(
+        f'<a href="http://x/g/{i}.jpg"><img src="http://x/g/t{i}.jpg" alt="www.x"/></a>'
+        for i in range(6)
+    )
+    html = (
+        "<html><body><article>"
+        '<div class="entry-content"><h1>P.C.</h1>'
+        f"<p>Marte (“Electra Pool”)<br/>{gallery}</p></div>"
+        "</article></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Marte" in text
+    assert "![" not in text
+
+
+def test_extract_skips_googleoff_blocks():
+    # A page whose real content is thin (a short machine list) while a
+    # googleoff-delimited cookie-consent block is by far the largest text on
+    # the page — trafilatura would otherwise pick the banner as main content
+    # (seen on tilt.it maker pages using the WP Cookie Law Info plugin).
+    banner = (
+        "<!--googleoff: all-->"
+        '<div id="cookie-law-info-bar" data-nosnippet="true">'
+        + "<p>This website uses cookies to improve your experience. "
+        "We assume you are ok with this, but you can opt out if you wish. "
+        "Necessary cookies are absolutely essential for the website to function "
+        "properly and are stored on your browser. " * 20
+        + "</p></div><!--googleon: all-->"
+    )
+    html = (
+        "<html><body>"
+        + banner
+        + '<article><div class="entry-content"><h1>LORI</h1>'
+        "<p>Jungle Life<br>Count-Down<br>KO<br>Space Orbit</p>"
+        "</div></article></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Jungle Life" in text
+    assert "uses cookies" not in text
+
+
+# --------------------------------------------------------------------------- #
 # PDF handler — text/title/date from raw PDF bytes (pypdf)
 # --------------------------------------------------------------------------- #
 
