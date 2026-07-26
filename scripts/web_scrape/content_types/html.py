@@ -120,7 +120,7 @@ def _decode_body(raw: bytes, header_charset: str | None) -> str:
 _GOOGLEOFF_RE = re.compile(
     r"<!--\s*googleoff:\s*(?:all|index|snippet|anchor)\s*-->.*?"
     r"<!--\s*googleon:\s*(?:all|index|snippet|anchor)\s*-->",
-    re.S | re.I,
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -146,7 +146,9 @@ def _extract_html(html: str, url: str) -> ExtractedMeta:
     # only body text is the captions) isn't pruned as link-dense boilerplate;
     # the ![alt](url) markers it emits are stripped below so evidence text
     # stays prose.
-    doc = trafilatura.bare_extraction(html, url=url, with_metadata=True, include_images=True)
+    doc = trafilatura.bare_extraction(
+        html, url=url, with_metadata=True, include_images=True
+    )
     if doc is not None:
         title = getattr(doc, "title", None)
         text = getattr(doc, "text", None)
