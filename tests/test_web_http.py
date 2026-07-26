@@ -183,14 +183,28 @@ def test_http_get_plain_text_non_pdf_skipped(monkeypatch):
     assert resp.raw is None
 
 
-def test_http_get_image_skipped_without_reading_body(monkeypatch):
+def test_http_get_archive_skipped_without_reading_body(monkeypatch):
     # A non-extractable, non-sniffable type declines the body entirely (may_read).
     _stub_urlopen(
-        monkeypatch, content_type="image/png", body=b"\x89PNG", may_read=False
+        monkeypatch, content_type="application/zip", body=b"PK\x03\x04", may_read=False
     )
-    resp = web_http.http_get("https://x.com/pic.png")
+    resp = web_http.http_get("https://x.com/dump.zip")
     assert resp.skip == "content-type"
     assert resp.raw is None
+
+
+def test_http_get_image_is_read_as_binary_evidence(monkeypatch):
+    # Images became extractable when OCR gave them text: the body is read and
+    # carried through as raw bytes (text stays None — the handler OCRs later),
+    # exactly like a PDF.
+    _stub_urlopen(
+        monkeypatch, content_type="image/jpeg", body=b"\xff\xd8\xff\xe0 jpegish"
+    )
+    resp = web_http.http_get("https://x.com/flyer.jpg")
+    assert resp.skip is None
+    assert resp.raw == b"\xff\xd8\xff\xe0 jpegish"
+    assert resp.text is None
+    assert resp.content_type == "image/jpeg"
 
 
 def test_http_get_html_still_decoded(monkeypatch):

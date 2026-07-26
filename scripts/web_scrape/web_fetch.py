@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
 import web_video
-from content_types import handler_for
+from content_types import ContentHandler, ExtractedMeta, handler_for
 from web_http import MAX_RESPONSE_BYTES, http_get
 from web_render import (
     THIN_TEXT_CHARS,
@@ -86,6 +86,84 @@ def _rate_limit(domain: Domain) -> None:
         if wait > 0:
             time.sleep(wait)
     _last_request[domain] = time.monotonic()
+
+
+# --------------------------------------------------------------------------- #
+# Which text a refetch stores
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_text(
+    meta: ExtractedMeta,
+    existing: web_cache.PageRow | None,
+    *,
+    changed: bool,
+    handler: ContentHandler,
+) -> tuple[ExtractedMeta, str | None]:
+    """Decide whether this fetch's extraction replaces the stored text.
+
+    A fetch normally stores what it just extracted. Two cases must not, both of
+    them a *worse* text silently replacing a better one on bytes that didn't
+    change — and logged as an innocuous ``changed=0``:
+
+    **This run produced no result.** Image OCR needs macOS Vision, and the cache
+    is shared through R2, so a page OCR'd on a Mac can be refetched from a host
+    that can't OCR — or from one where Vision times out. Either way
+    ``meta.unavailable`` says we learned nothing this time, which is not "this
+    document has no text"; blanking the row would destroy evidence — and its FTS
+    entry — that the byte-identical blob still supports.
+
+    **The stored text is a human transcription.** ``text_source='manual'`` is the
+    one rung where a person is answerable for the words, and it exists precisely
+    because machine extraction was unavailable or too poor to quote. Re-extracting
+    identical bytes would trade a reviewed transcription for OCR output. Changing
+    a transcription stays a deliberate act through ``web_import.py``, which is the
+    single audited path for it — never a side effect of a routine refetch.
+
+    Both hinge on the bytes being unchanged, because then the earlier text still
+    describes what we store. When the bytes *did* change, the new extraction wins:
+    a transcription of the old version would misdescribe the new one. A superseded
+    transcription is called out loudly, with the ``text_sha`` that finds it in the
+    audit log, since nobody would otherwise notice a person's work going stale.
+    """
+    if existing is None:
+        return meta, handler.text_source
+
+    keep_manual = bool(existing["text_source"] == "manual" and existing["text"])
+    if not changed and (keep_manual or meta.unavailable):
+        # The stored text is kept either way; the two cases differ only on the
+        # metadata around it. A human owns a manual row wholesale — `--title` and
+        # `--date` are part of what they set, so a PDF imported with a corrected
+        # title must not have its own "Untitled-1" put back (and where the
+        # importer supplied nothing, the stored values came from this same
+        # extraction anyway, since identical bytes extract identically). The
+        # unavailable case extracted nothing at all, so it takes the stored values
+        # only where it has none of its own.
+        return (
+            meta._replace(
+                title=existing["title"]
+                if keep_manual
+                else meta.title or existing["title"],
+                last_updated=(
+                    existing["last_updated"]
+                    if keep_manual
+                    else meta.last_updated or existing["last_updated"]
+                ),
+                text=existing["text"],
+                unavailable=False,
+            ),
+            existing["text_source"],
+        )
+    if changed and keep_manual:
+        superseded = web_cache.text_sha(existing["text"])
+        print(
+            f"WARNING: source changed, so its reviewed transcription no longer "
+            f"describes it: {existing['url']} (superseded text_sha "
+            f"{superseded[:12] if superseded else '?'}; re-review the new version "
+            f"and re-import if the transcription still applies)",
+            file=sys.stderr,
+        )
+    return meta, handler.text_source
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +343,8 @@ def fetch_one(
     if not blob.exists():
         blob.write_bytes(resp.raw)
 
+    meta, text_source = _resolve_text(meta, existing, changed=changed, handler=handler)
+
     web_cache.upsert_page(
         con,
         url=url,
@@ -277,6 +357,8 @@ def fetch_one(
         content_type=resp.content_type,
         text=meta.text,
         rendered=rendered,
+        text_source=text_source,
+        imported=False,
     )
     web_cache.append_fetch(
         con,
@@ -287,6 +369,7 @@ def fetch_one(
         content_sha=content_sha,
         changed=changed,
         rendered=rendered,
+        text_sha=web_cache.text_sha(meta.text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
     if rendered:
@@ -368,18 +451,30 @@ def _fetch_video_one(
 
     # Title and date come from the video's metadata, not the VTT: the caption
     # file carries no title, and the video's publish date is the evidence date.
+    # They go through _resolve_text with the transcript so this path obeys the
+    # same rule as every other fetch — a video with no captions is exactly the
+    # case someone transcribes by hand and imports under the watch URL, and
+    # machine text must not overwrite that on unchanged bytes.
+    meta, text_source = _resolve_text(
+        meta._replace(title=video.title, last_updated=video.upload_date),
+        existing,
+        changed=changed,
+        handler=handler,
+    )
     web_cache.upsert_page(
         con,
         url=url,
         raw_url=raw_url,
         content_sha=content_sha,
         fetched_at=fetched_at,
-        last_updated=video.upload_date,
-        title=video.title,
+        last_updated=meta.last_updated,
+        title=meta.title,
         http_status=200,
         content_type="text/vtt",
         text=meta.text,
         rendered=False,
+        text_source=text_source,
+        imported=False,
     )
     web_cache.append_fetch(
         con,
@@ -389,6 +484,7 @@ def _fetch_video_one(
         http_status=200,
         content_sha=content_sha,
         changed=changed,
+        text_sha=web_cache.text_sha(meta.text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
     track = video.caption_note or "captions"

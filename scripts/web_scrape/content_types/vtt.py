@@ -69,6 +69,7 @@ class VttHandler(ContentHandler):
     canonical_mime = "text/vtt"
     signature: bytes | None = b"WEBVTT"
     extension = "vtt"
+    text_source = "vtt"
     renderable = False
 
     @override

@@ -59,6 +59,8 @@ class PageRow(TypedDict):
     content_type: str | None
     text: str | None
     rendered: int | None  # 1 if the blob is a headless-browser render, else 0/null
+    text_source: str | None  # how `text` was derived: html|pdf|vtt|ocr|manual
+    imported: int | None  # 1 if a human handed these bytes over, else 0/null
 
 
 class SearchHit(TypedDict):
@@ -145,6 +147,25 @@ def content_sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def text_sha(text: str | None) -> str | None:
+    """sha256 of a page's stored text, or None when there is no text.
+
+    The audit trail for the one field in this store that is mutable state. Bytes
+    are versioned — content-addressed, every version kept on disk, the prior
+    ``content_sha`` still in the ``fetches`` log — so a change to them is always
+    visible and recoverable. ``pages.text`` has no such history: re-storing a
+    page with a corrected transcription leaves the blob untouched and would
+    otherwise show up only as "an import happened", making the field most worth
+    scrutinising the one with no record. Logging this hash per fetch makes a
+    text-only change provable rather than inferable.
+
+    Hashes the text exactly as stored (no normalization): any difference is a
+    difference. None for absent or empty text — a fetch that stored no page
+    logs NULL rather than the hash of "".
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None
+
+
 def blob_path(sha: str, ext: str = "html") -> Path:
     """Absolute path to a page's raw blob, ``raw/<sha>.<ext>``.
 
@@ -199,7 +220,9 @@ CREATE TABLE IF NOT EXISTS pages (
   http_status      INTEGER,
   content_type     TEXT,               -- canonical MIME; the blob's extension derives from it
   text             TEXT,               -- extracted readable text (current version)
-  rendered         INTEGER             -- 1 if the blob is a headless-browser render
+  rendered         INTEGER,            -- 1 if the blob is a headless-browser render
+  text_source      TEXT,               -- how `text` was derived: html|pdf|vtt|ocr|manual
+  imported         INTEGER             -- 1 if a human handed these bytes over
 );
 
 CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
@@ -210,7 +233,9 @@ CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
   http_status  INTEGER,
   content_sha  TEXT,                   -- the version this fetch saw (blob stem)
   changed      INTEGER,                -- 1 if content differed from the prior fetch
-  rendered     INTEGER                 -- 1 if this fetch was a headless render
+  rendered     INTEGER,                -- 1 if this fetch was a headless render
+  imported     INTEGER,                -- 1 if this row is a manual import, not a fetch
+  text_sha     TEXT                    -- sha256 of the text this fetch stored
 );
 
 CREATE INDEX IF NOT EXISTS fetches_url ON fetches(url);
@@ -262,11 +287,32 @@ def init_schema(con: sqlite3.Connection) -> None:
     # an already-migrated/fresh DB.
     if "html_file" in pages_cols:
         con.execute("ALTER TABLE pages DROP COLUMN html_file")
+    # `text_source` arrived with image OCR, when the cache first held text of
+    # materially different reliability (a Vision transcription vs a PDF's own
+    # text layer). Rows written before it stay NULL: we know how they were
+    # extracted, but back-filling a guess into an evidence column is exactly
+    # the kind of after-the-fact assertion this store must not make.
+    if "text_source" not in pages_cols:
+        con.execute("ALTER TABLE pages ADD COLUMN text_source TEXT")
+    # `imported` arrived with the manual-import path (web_import.py). Rows that
+    # predate it were genuinely fetched, but NULL is still the honest value:
+    # it says "written before this distinction existed" rather than asserting
+    # something about bytes nobody recorded a provenance for.
+    if "imported" not in pages_cols:
+        con.execute("ALTER TABLE pages ADD COLUMN imported INTEGER")
     fetches_cols = {
         r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
     }
     if "rendered" not in fetches_cols:
         con.execute("ALTER TABLE fetches ADD COLUMN rendered INTEGER")
+    if "imported" not in fetches_cols:
+        con.execute("ALTER TABLE fetches ADD COLUMN imported INTEGER")
+    # `text_sha` closes the audit gap around the only mutable field (see
+    # text_sha()). Rows logged before it stay NULL — the text they stored is
+    # not recoverable after the fact, and inventing a hash of whatever the page
+    # holds *now* would assert exactly the thing the column exists to prove.
+    if "text_sha" not in fetches_cols:
+        con.execute("ALTER TABLE fetches ADD COLUMN text_sha TEXT")
     con.commit()
 
 
@@ -288,22 +334,30 @@ def upsert_page(
     content_type: str | None = None,
     text: str | None = None,
     rendered: bool | None = None,
+    text_source: str | None = None,
+    imported: bool | None = None,
 ) -> None:
     """Insert or refresh a page row, keyed on the normalized URL.
 
     On conflict, points the row at the freshly-fetched version
     (``content_sha``/``content_type``/``text``/``rendered``/...) and bumps
     ``last_fetched_at`` while preserving ``first_fetched_at``.
+
+    ``text_source`` records how ``text`` was derived (``html``/``pdf``/``vtt``
+    from the handler that extracted it, ``ocr`` for a machine-read image,
+    ``manual`` for a human transcription), so a consumer can weigh a quote by
+    how lossy its extraction path was.
     """
     con.execute(
         """
         INSERT INTO pages (
           url, raw_url, content_sha, first_fetched_at, last_fetched_at,
-          last_updated, title, http_status, content_type, text, rendered
+          last_updated, title, http_status, content_type, text, rendered,
+          text_source, imported
         ) VALUES (
           :url, :raw_url, :content_sha, :fetched_at, :fetched_at,
           :last_updated, :title, :http_status, :content_type, :text,
-          :rendered
+          :rendered, :text_source, :imported
         )
         ON CONFLICT(url) DO UPDATE SET
           raw_url       = excluded.raw_url,
@@ -314,7 +368,9 @@ def upsert_page(
           http_status   = excluded.http_status,
           content_type  = excluded.content_type,
           text          = excluded.text,
-          rendered      = excluded.rendered
+          rendered      = excluded.rendered,
+          text_source   = excluded.text_source,
+          imported      = excluded.imported
         """,
         {
             "url": url,
@@ -327,6 +383,8 @@ def upsert_page(
             "content_type": content_type,
             "text": text,
             "rendered": None if rendered is None else int(rendered),
+            "text_source": text_source,
+            "imported": None if imported is None else int(imported),
         },
     )
     con.commit()
@@ -342,11 +400,20 @@ def append_fetch(
     content_sha: str | None = None,
     changed: bool | None = None,
     rendered: bool | None = None,
+    imported: bool | None = None,
+    text_sha: str | None = None,
 ) -> None:
-    """Append one row to the fetch audit log + version history."""
+    """Append one row to the fetch audit log + version history.
+
+    ``imported`` marks a row the manual importer wrote: bytes a human handed
+    over, never retrieved by this code. Such a row carries no ``http_status``
+    — no request was made, and a fabricated 200 would make this log lie about
+    the one thing it exists to record.
+    """
     con.execute(
         "INSERT INTO fetches (url, fetched_at, search_query, http_status, "
-        "content_sha, changed, rendered) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "content_sha, changed, rendered, imported, text_sha) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             url,
             fetched_at,
@@ -355,6 +422,8 @@ def append_fetch(
             content_sha,
             None if changed is None else int(changed),
             None if rendered is None else int(rendered),
+            None if imported is None else int(imported),
+            text_sha,
         ),
     )
     con.commit()

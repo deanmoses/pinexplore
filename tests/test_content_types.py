@@ -2,13 +2,16 @@
 
 The registry routing (handler_for / sniff / the extractable + sniffable sets),
 plus each handler's per-type behavior: the HTML handler's charset decoding and
-conservative date extraction, and the PDF handler's pypdf text/title/date pull.
+conservative date extraction, the PDF handler's pypdf text/title/date pull, and
+the image handler's OCR (the Vision backend itself lives in test_web_ocr).
 """
 
 from __future__ import annotations
 
 import content_types as ct
+import web_ocr
 from content_types.html import HtmlHandler, _sniff_meta_charset
+from content_types.image import JpegHandler, PngHandler
 from content_types.pdf import PdfHandler
 
 # --------------------------------------------------------------------------- #
@@ -20,10 +23,12 @@ def test_handler_for_routes_known_types():
     assert isinstance(ct.handler_for("text/html"), HtmlHandler)
     assert isinstance(ct.handler_for("application/xhtml+xml"), HtmlHandler)
     assert isinstance(ct.handler_for("application/pdf"), PdfHandler)
+    assert isinstance(ct.handler_for("image/jpeg"), JpegHandler)
+    assert isinstance(ct.handler_for("image/png"), PngHandler)
 
 
 def test_handler_for_unknown_type_is_none():
-    assert ct.handler_for("image/png") is None
+    assert ct.handler_for("application/zip") is None
 
 
 def test_extractable_set_is_the_union_of_handler_mime_types():
@@ -32,12 +37,23 @@ def test_extractable_set_is_the_union_of_handler_mime_types():
         "application/xhtml+xml",
         "application/pdf",
         "text/vtt",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
     } == ct.EXTRACTABLE_CONTENT_TYPES
 
 
 def test_sniff_matches_pdf_signature_whatever_the_header():
     # The %PDF- signature identifies a PDF served as octet-stream / mislabeled.
     assert isinstance(ct.sniff(b"%PDF-1.4\nstuff"), PdfHandler)
+
+
+def test_sniff_matches_image_signatures():
+    # JPEG (SOI + marker) and PNG magic, so an image handed over as
+    # octet-stream — or with no content type at all, the manual-import case —
+    # still routes to the right handler and blob extension.
+    assert isinstance(ct.sniff(b"\xff\xd8\xff\xe0\x00\x10JFIF"), JpegHandler)
+    assert isinstance(ct.sniff(b"\x89PNG\r\n\x1a\n\x00"), PngHandler)
 
 
 def test_sniff_returns_none_for_non_signature_bytes():
@@ -51,9 +67,16 @@ def test_pdf_handler_is_not_renderable_html_is():
     assert ct.handler_for("application/pdf").renderable is False
 
 
+def test_image_handler_is_not_renderable():
+    # A browser can't pull text out of a JPEG either — OCR is the only path.
+    assert ct.handler_for("image/jpeg").renderable is False
+
+
 def test_handler_extensions():
     assert ct.handler_for("text/html").extension == "html"
     assert ct.handler_for("application/pdf").extension == "pdf"
+    assert ct.handler_for("image/jpeg").extension == "jpg"
+    assert ct.handler_for("image/png").extension == "png"
 
 
 def test_extension_for_resolves_stored_content_types():
@@ -62,7 +85,34 @@ def test_extension_for_resolves_stored_content_types():
     # rather than guessing (a row never holds one — http_get canonicalizes first).
     assert ct.extension_for("text/html") == "html"
     assert ct.extension_for("application/pdf") == "pdf"
+    assert ct.extension_for("image/jpeg") == "jpg"
     assert ct.extension_for("application/octet-stream") is None
+
+
+def test_image_alias_mime_canonicalizes_to_one_extension():
+    # Servers do send image/jpg; it must not become a `.jpeg`/`.jpg` split, and
+    # the canonical label a sniff stamps is the real one.
+    assert ct.extension_for("image/jpg") == "jpg"
+    assert ct.handler_for("image/jpg").canonical_mime == "image/jpeg"
+
+
+# --------------------------------------------------------------------------- #
+# text_source — how a row's text was derived (evidence-quality provenance)
+# --------------------------------------------------------------------------- #
+
+
+def test_each_handler_declares_how_its_text_was_derived():
+    # Stored on the page row so a consumer can weigh a quote by its extraction
+    # path — OCR and speech-to-text are lossier than reading a PDF's text layer.
+    assert ct.handler_for("text/html").text_source == "html"
+    assert ct.handler_for("application/pdf").text_source == "pdf"
+    assert ct.handler_for("text/vtt").text_source == "vtt"
+    assert ct.handler_for("image/jpeg").text_source == "ocr"
+
+
+def test_every_registered_handler_declares_a_text_source():
+    for handler in ct.HANDLERS:
+        assert handler.text_source, f"{type(handler).__name__} declares no text_source"
 
 
 def test_sniffed_canonical_mime_round_trips_to_a_handler():
@@ -98,6 +148,14 @@ def test_html_thin_warning_quiet_when_render_attempted_and_failed():
         HtmlHandler().thin_warning("http://x", rendered=False, render_attempted=True)
         is None
     )
+
+
+def test_image_thin_warning_names_ocr():
+    msg = ct.handler_for("image/jpeg").thin_warning(
+        "http://x/f.jpg", rendered=False, render_attempted=False
+    )
+    assert msg is not None
+    assert "OCR" in msg
 
 
 def test_pdf_thin_warning_is_scanned_message_regardless_of_render_flags():
@@ -276,13 +334,12 @@ def test_extract_skips_googleoff_blocks():
         + "<p>This website uses cookies to improve your experience. "
         "We assume you are ok with this, but you can opt out if you wish. "
         "Necessary cookies are absolutely essential for the website to function "
-        "properly and are stored on your browser. " * 20
+        "properly and are stored on your browser. "
+        * 20
         + "</p></div><!--googleon: all-->"
     )
     html = (
-        "<html><body>"
-        + banner
-        + '<article><div class="entry-content"><h1>LORI</h1>'
+        "<html><body>" + banner + '<article><div class="entry-content"><h1>LORI</h1>'
         "<p>Jungle Life<br>Count-Down<br>KO<br>Space Orbit</p>"
         "</div></article></body></html>"
     )
@@ -336,3 +393,65 @@ def test_extract_pdf_malformed_returns_empty_not_raises():
 def test_extract_pdf_scanned_image_only_has_no_text(make_pdf):
     # An image-only PDF (here: empty content) extracts to nothing — text is None.
     assert _extract_pdf(make_pdf(text="")).text is None
+
+
+# --------------------------------------------------------------------------- #
+# Image handler — text via OCR (the Vision backend is stubbed; see test_web_ocr)
+# --------------------------------------------------------------------------- #
+
+
+def _extract_jpeg(monkeypatch, ocr_result):
+    monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: ocr_result)
+    return JpegHandler().extract(b"\xff\xd8\xff fake jpeg", None, "http://x/f.jpg")
+
+
+def test_extract_image_uses_ocr_for_text(monkeypatch):
+    meta = _extract_jpeg(monkeypatch, "MECATRONICS INDUSTRIA E COMERCIO LTDA.")
+    assert meta.text == "MECATRONICS INDUSTRIA E COMERCIO LTDA."
+
+
+def test_extract_image_has_no_title_or_date(monkeypatch):
+    # An image carries no metadata we'd trust: OCR'd text is not a title, and an
+    # EXIF timestamp is when the *photo/scan* was taken, not the document's date.
+    # Both stay None rather than being guessed; the importer can supply them.
+    meta = _extract_jpeg(monkeypatch, "some words")
+    assert meta.title is None
+    assert meta.last_updated is None
+
+
+def test_extract_image_with_no_recognized_text_is_empty(monkeypatch):
+    # A photo with no legible text: no text, no crash — the blob is still stored
+    # and the caller's thin-content warning fires. A fact about the *document*,
+    # so `unavailable` stays False and the result may overwrite a stale row.
+    meta = _extract_jpeg(monkeypatch, None)
+    assert meta.text is None
+    assert meta.unavailable is False
+
+
+def test_extract_image_survives_missing_ocr_backend(monkeypatch):
+    # No pyobjc / not macOS: warn and keep going rather than killing a batch that
+    # happens to include an image URL — but flag it `unavailable`, a fact about
+    # this *host*. Without that the caller can't tell it from "this image has no
+    # text" and would blank a row another host had already OCR'd.
+    def _boom(raw: bytes) -> str | None:
+        raise web_ocr.OcrUnavailableError("no Vision here")
+
+    monkeypatch.setattr(web_ocr, "ocr_text", _boom)
+    meta = JpegHandler().extract(b"\xff\xd8\xff", None, "http://x/f.jpg")
+    assert meta.text is None
+    assert meta.unavailable is True
+
+
+def test_extract_image_makes_no_claim_when_the_ocr_request_fails(monkeypatch, capsys):
+    # Vision errors cover both a bad file and a bad moment (timeout, OOM), and
+    # Apple's error codes don't separate them reliably. So a failed request is
+    # "no result", never "this document has no text" — otherwise a transient
+    # failure blanks text the identical bytes still support.
+    def _boom(raw: bytes) -> str | None:
+        raise web_ocr.OcrFailedError("not a decodable image")
+
+    monkeypatch.setattr(web_ocr, "ocr_text", _boom)
+    meta = JpegHandler().extract(b"\xff\xd8\xff", None, "http://x/f.jpg")
+    assert meta.text is None
+    assert meta.unavailable is True
+    assert "ocr failed" in capsys.readouterr().err.lower()

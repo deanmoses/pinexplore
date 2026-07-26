@@ -17,7 +17,9 @@ import pytest
 import web_cache as wc
 import web_fetch
 import web_http
+import web_ocr
 import web_render
+import web_video
 from content_types import extension_for
 
 if TYPE_CHECKING:
@@ -172,11 +174,11 @@ def test_malformed_url_skipped_not_raised(cache, monkeypatch):
 
 
 def test_non_extractable_content_type_skipped_but_logged(cache, monkeypatch):
-    # An image is neither extractable nor PDF-sniffable: skipped, but still logged.
-    _stub_get(monkeypatch, skip="content-type", content_type="image/png")
-    _run(cache, "https://x.com/pic.png")
-    assert wc.get("https://x.com/pic.png", con=cache) is None  # no page row
-    assert _fetches(cache) == [("https://x.com/pic.png", 200, None, None)]  # logged
+    # A zip is neither extractable nor sniffable: skipped, but still logged.
+    _stub_get(monkeypatch, skip="content-type", content_type="application/zip")
+    _run(cache, "https://x.com/dump.zip")
+    assert wc.get("https://x.com/dump.zip", con=cache) is None  # no page row
+    assert _fetches(cache) == [("https://x.com/dump.zip", 200, None, None)]  # logged
 
 
 def test_oversize_response_skipped_but_logged(cache, monkeypatch):
@@ -425,3 +427,362 @@ def test_scanned_pdf_never_renders_and_warns(cache, monkeypatch, make_pdf, capsy
     err = capsys.readouterr().err
     assert "scanned" in err
     assert "--render" not in err  # not the JS-only message
+
+
+# --------------------------------------------------------------------------- #
+# Images (text via OCR, stored as .jpg/.png blobs)
+# --------------------------------------------------------------------------- #
+
+JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00 not a real jpeg, enough for a sniff"
+
+
+def _stub_ocr(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+    monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: text)
+
+
+def test_image_stored_as_jpg_blob_with_ocr_text(cache, monkeypatch):
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO. " * 10)
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+    row = _page(cache, "https://x.com/flyer.jpg")
+    assert row["content_type"] == "image/jpeg"
+    assert "O MELHOR FLIPPER" in (row["text"] or "")
+    # The text came out of an OCR engine, and the row says so.
+    assert row["text_source"] == "ocr"
+    assert not row["rendered"]
+    assert extension_for(row["content_type"]) == "jpg"
+    assert wc.blob_path(row["content_sha"], ext="jpg").exists()
+
+
+def test_image_never_renders_and_warns_when_no_text_recognized(
+    cache, monkeypatch, capsys
+):
+    # A photo with no legible text reads as thin. It must NOT escalate to a
+    # browser render (a browser can't read a JPEG either), and warns about OCR.
+    _stub_ocr(monkeypatch, None)
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    called: list[str] = []
+    monkeypatch.setattr(web_fetch, "render", lambda u, _b: called.append(u))
+    _run(cache, "https://x.com/photo.jpg", browser=object(), force_render=True)
+    assert called == []
+    err = capsys.readouterr().err
+    assert "OCR" in err
+    assert "--render" not in err
+
+
+def test_image_dedups_deterministically_on_refetch(cache, monkeypatch):
+    # Image bytes are stored verbatim, so an unchanged refetch is byte-identical.
+    _stub_ocr(monkeypatch, "text")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+    assert [r[3] for r in _fetches(cache)] == [1, 0]  # new, then unchanged
+
+
+# --------------------------------------------------------------------------- #
+# text_source — every fetched row records how its text was derived
+# --------------------------------------------------------------------------- #
+
+
+def test_html_page_records_html_text_source(cache, monkeypatch):
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, "https://x.com/a")
+    assert _page(cache, "https://x.com/a")["text_source"] == "html"
+
+
+def test_pdf_records_pdf_text_source(cache, monkeypatch, make_pdf):
+    _stub_get(
+        monkeypatch,
+        body=make_pdf(title="Spec"),
+        content_type="application/pdf",
+        decode_body=False,
+    )
+    _run(cache, "https://x.com/doc.pdf")
+    assert _page(cache, "https://x.com/doc.pdf")["text_source"] == "pdf"
+
+
+def test_rendered_page_still_records_html_text_source(cache, monkeypatch):
+    # `rendered` and `text_source` answer different questions: where the bytes
+    # came from vs what turned them into text. A render is still HTML extraction.
+    _stub_get(monkeypatch, body=THIN_HTML)
+    _stub_render(monkeypatch, body=RICH_HTML)
+    _run(cache, "https://spa.com/x", browser=object())
+    row = _page(cache, "https://spa.com/x")
+    assert row["rendered"] == 1
+    assert row["text_source"] == "html"
+
+
+# --------------------------------------------------------------------------- #
+# A missing extraction backend must not blank an already-cached page
+# --------------------------------------------------------------------------- #
+
+
+def _stub_ocr_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(raw: bytes) -> str | None:
+        raise web_ocr.OcrUnavailableError("no Vision on this host")
+
+    monkeypatch.setattr(web_ocr, "ocr_text", _boom)
+
+
+def test_refetch_without_ocr_backend_keeps_the_stored_text(cache, monkeypatch):
+    # The cache is shared through R2, so a page OCR'd on macOS can be refetched
+    # from a host with no Vision. "No backend here" is not "this image has no
+    # text": blanking the row (and its FTS entry) would destroy evidence that
+    # the unchanged blob still supports.
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+
+    _stub_ocr_unavailable(monkeypatch)
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+
+    row = _page(cache, "https://x.com/flyer.jpg")
+    assert row["text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
+    assert row["text_source"] == "ocr"
+    assert [r[3] for r in _fetches(cache)] == [1, 0]  # new, then unchanged
+    # Still searchable — the FTS entry survived too.
+    assert [h["url"] for h in wc.search("flipper", con=cache)] == [
+        "https://x.com/flyer.jpg"
+    ]
+
+
+def test_changed_bytes_without_ocr_backend_do_not_keep_stale_text(cache, monkeypatch):
+    # The other side of it: when the image itself changed, the old text no
+    # longer describes the stored blob, so it must not be carried over.
+    _stub_ocr(monkeypatch, "text of the first version")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+
+    _stub_ocr_unavailable(monkeypatch)
+    _stub_get(
+        monkeypatch,
+        body=JPEG_BYTES + b" version two",
+        content_type="image/jpeg",
+        decode_body=False,
+    )
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+
+    row = _page(cache, "https://x.com/flyer.jpg")
+    assert row["text"] is None
+    assert [r[3] for r in _fetches(cache)] == [1, 1]  # new, then changed
+
+
+def test_fetch_logs_the_hash_of_the_text_it_stored(cache, monkeypatch):
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, "https://x.com/a")
+    stored = _page(cache, "https://x.com/a")["text"]
+    row = cache.execute("SELECT text_sha FROM fetches").fetchone()[0]
+    assert row == wc.text_sha(stored)
+
+
+def test_preserved_text_logs_the_unchanged_hash(cache, monkeypatch):
+    # The OCR-unavailable path keeps the earlier extraction, so the audit trail
+    # must show the text did NOT change — the whole point of the column.
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+    _stub_ocr_unavailable(monkeypatch)
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+
+    shas = [r[0] for r in cache.execute("SELECT text_sha FROM fetches ORDER BY id")]
+    assert shas[0] == shas[1] == wc.text_sha("O MELHOR FLIPPER JAMAIS FABRICADO")
+
+
+# --------------------------------------------------------------------------- #
+# A successful fetch must not downgrade a human-reviewed transcription
+# --------------------------------------------------------------------------- #
+
+
+def _seed_manual(con, url: str, *, body: bytes, text: str) -> None:
+    """A page whose text a person wrote (what web_import leaves behind)."""
+    wc.upsert_page(
+        con,
+        url=url,
+        raw_url=url,
+        content_sha=wc.content_sha(body),
+        fetched_at=wc.now_iso(),
+        http_status=None,
+        content_type="image/jpeg",
+        text=text,
+        text_source="manual",
+        imported=True,
+    )
+
+
+TRANSCRIPTION = "MECATRONICS INDÚSTRIA E COMÉRCIO LTDA. " * 8
+
+
+def test_refetch_keeps_manual_text_when_bytes_are_identical(cache, monkeypatch):
+    # A source that 403s (hence the import) can become fetchable later, or land
+    # in a --from-file batch. Re-extracting the same bytes would replace a
+    # person's reviewed transcription with OCR output and log it as changed=0.
+    url = "https://x.com/flyer.jpg"
+    _seed_manual(cache, url, body=JPEG_BYTES, text=TRANSCRIPTION)
+    _stub_ocr(monkeypatch, "MEGATRONICS SAUTTL BUMON")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, url, force=True)
+
+    row = _page(cache, url)
+    assert row["text"] == TRANSCRIPTION
+    assert row["text_source"] == "manual"
+    # The bytes genuinely came from the server this time, so the byte-provenance
+    # flag flips even though the text provenance doesn't — they answer different
+    # questions and are independent by design.
+    assert row["imported"] == 0
+    assert row["http_status"] == 200
+
+
+def test_changed_bytes_supersede_manual_text_but_warn(cache, monkeypatch, capsys):
+    # The transcription described the *old* bytes, so carrying it onto a new
+    # version would be worse than losing it — but it must not vanish quietly.
+    url = "https://x.com/flyer.jpg"
+    _seed_manual(cache, url, body=JPEG_BYTES, text=TRANSCRIPTION)
+    _stub_ocr(monkeypatch, "text of the new version " * 12)
+    _stub_get(
+        monkeypatch,
+        body=JPEG_BYTES + b" version two",
+        content_type="image/jpeg",
+        decode_body=False,
+    )
+    _run(cache, url, force=True)
+
+    row = _page(cache, url)
+    assert row["text_source"] == "ocr"
+    assert TRANSCRIPTION not in (row["text"] or "")
+    err = capsys.readouterr().err
+    assert "transcription" in err.lower()
+    # Names the superseded text so it can be found in the audit log.
+    assert wc.text_sha(TRANSCRIPTION)[:12] in err
+
+
+def test_ordinary_fetch_records_imported_zero_not_null(cache, monkeypatch):
+    # NULL now means "predates the column"; a fetch knows its bytes weren't
+    # handed over, so it says so rather than leaving the question open.
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, "https://x.com/a")
+    assert _page(cache, "https://x.com/a")["imported"] == 0
+
+
+def test_refetch_keeps_manually_supplied_title_and_date(cache, monkeypatch, make_pdf):
+    # A PDF imported with --title/--date corrections: a later refetch of the
+    # same bytes must not put the document's own metadata back. Preserving the
+    # transcription but not the metadata the same person set is half a rule.
+    url = "https://x.com/doc.pdf"
+    raw = make_pdf(title="Untitled-1", moddate="D:20200101000000Z")
+    wc.upsert_page(
+        cache,
+        url=url,
+        raw_url=url,
+        content_sha=wc.content_sha(raw),
+        fetched_at=wc.now_iso(),
+        title="Mecatronics price list",
+        last_updated="1986-05-01",
+        content_type="application/pdf",
+        text=TRANSCRIPTION,
+        text_source="manual",
+        imported=True,
+    )
+    _stub_get(monkeypatch, body=raw, content_type="application/pdf", decode_body=False)
+    _run(cache, url, force=True)
+
+    row = _page(cache, url)
+    assert row["title"] == "Mecatronics price list"
+    assert row["last_updated"] == "1986-05-01"
+    assert row["text"] == TRANSCRIPTION
+
+
+def test_failed_ocr_request_keeps_stored_text_on_unchanged_bytes(cache, monkeypatch):
+    # Vision fails for host reasons too — timeout, out-of-memory, internal error —
+    # not only for bytes it can't decode. A transient failure must not blank text
+    # the byte-identical blob still supports. Safe in every case, because
+    # preservation only fires when the content hash is unchanged.
+    url = "https://x.com/flyer.jpg"
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, url)
+
+    def _fail(raw: bytes) -> str | None:
+        raise web_ocr.OcrFailedError("Vision could not read this image: timeout")
+
+    monkeypatch.setattr(web_ocr, "ocr_text", _fail)
+    _run(cache, url, force=True)
+
+    row = _page(cache, url)
+    assert row["text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
+    assert row["text_source"] == "ocr"
+
+
+# --------------------------------------------------------------------------- #
+# The video path plays by the same rules as every other fetch
+# --------------------------------------------------------------------------- #
+
+VTT = b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nthe machine shipped in 1986\n"
+WATCH_URL = "https://www.youtube.com/watch?v=O-2BXTXLXIY"
+
+
+def _stub_video(monkeypatch: pytest.MonkeyPatch, *, vtt: bytes = VTT) -> None:
+    monkeypatch.setattr(
+        web_video,
+        "fetch_video",
+        lambda url: web_video.VideoResp(
+            title="Machine history",
+            upload_date="2024-03-01",
+            vtt=vtt,
+            caption_note="en",
+        ),
+    )
+
+
+def test_video_refetch_keeps_a_reviewed_transcription(cache, monkeypatch):
+    # A video with no captions is exactly the case someone transcribes by hand
+    # and imports under the watch URL. Captions appearing later — or any refetch
+    # of identical caption bytes — must not overwrite that with machine text.
+    wc.upsert_page(
+        cache,
+        url=WATCH_URL,
+        raw_url=WATCH_URL,
+        content_sha=wc.content_sha(VTT),
+        fetched_at=wc.now_iso(),
+        title="Reviewed title",
+        last_updated="1986-05-01",
+        content_type="text/vtt",
+        text=TRANSCRIPTION,
+        text_source="manual",
+        imported=True,
+    )
+    _stub_video(monkeypatch)
+    _run(cache, WATCH_URL, force=True)
+
+    row = _page(cache, WATCH_URL)
+    assert row["text"] == TRANSCRIPTION
+    assert row["text_source"] == "manual"
+    assert row["title"] == "Reviewed title"
+    assert row["last_updated"] == "1986-05-01"
+
+
+def test_video_fetch_without_a_prior_row_uses_the_video_metadata(cache, monkeypatch):
+    # The ordinary path is unchanged: title and date come from the video, not
+    # the caption file, which carries neither.
+    _stub_video(monkeypatch)
+    _run(cache, WATCH_URL)
+    row = _page(cache, WATCH_URL)
+    assert row["title"] == "Machine history"
+    assert row["last_updated"] == "2024-03-01"
+    assert row["text_source"] == "vtt"
+    assert "shipped in 1986" in (row["text"] or "")

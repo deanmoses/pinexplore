@@ -30,23 +30,59 @@ except ImportError:
 
 DB = "explore.duckdb"
 SQL_DIR = pathlib.Path("sql")
+# The web cache's own modules live in a flat scripts dir, imported by basename
+# (the same sys.path dance web_fetch and the cross-repo patch authors do).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "web_scrape"))
 
 # Empty-schema stand-ins for the web cache tables, created when 03_raw_web.sql is
 # skipped (--remote, or no local cache) so any later layer that LEFT JOINs them
 # stays green in every build mode. Columns mirror scripts/web_scrape/web_cache.py
 # (SQLite TEXT→VARCHAR, INTEGER→BIGINT); the populated path uses SELECT * instead.
+#
+# Being a hand-written copy, this drifts silently: a column added to the SQLite
+# schema is simply missing in these build modes, and a query over it fails only
+# there — the mode nobody runs locally. tests/test_rebuild_explore.py compares
+# the two column lists so the drift fails loudly instead.
 WEB_STUB_SQL = """
 CREATE OR REPLACE TABLE web_pages (
   url VARCHAR, raw_url VARCHAR, content_sha VARCHAR, first_fetched_at VARCHAR,
   last_fetched_at VARCHAR, last_updated VARCHAR, title VARCHAR,
   http_status BIGINT, content_type VARCHAR, text VARCHAR,
-  rendered BIGINT
+  rendered BIGINT, text_source VARCHAR, imported BIGINT
 );
 CREATE OR REPLACE TABLE web_fetches (
   id BIGINT, url VARCHAR, fetched_at VARCHAR, search_query VARCHAR,
-  http_status BIGINT, content_sha VARCHAR, changed BIGINT, rendered BIGINT
+  http_status BIGINT, content_sha VARCHAR, changed BIGINT, rendered BIGINT,
+  imported BIGINT, text_sha VARCHAR
 );
 """
+
+
+def migrate_web_cache() -> None:
+    """Bring the local web cache's schema up to date before the build reads it.
+
+    ``03_raw_web.sql`` ATTACHes the cache READ_ONLY and materializes ``SELECT *``,
+    so a cache file written before a column existed doesn't surface that column
+    as NULL — it produces ``web_pages`` / ``web_fetches`` that simply lack it, and
+    a documented query over it fails until some unrelated fetch happens to
+    migrate the file. That's the state ``make pull`` leaves behind whenever R2
+    still holds an older cache, which is exactly when a build is run.
+
+    The migrations are additive and idempotent (see ``web_cache.init_schema``), so
+    running them here costs a no-op open on an already-current cache. A missing
+    cache is left missing: the build stubs the tables instead, and conjuring a
+    database as a side effect of looking for one is precisely what the importer's
+    dry run was fixed not to do.
+    """
+    import web_cache
+
+    if not web_cache.DB_PATH.exists():
+        return
+    con = web_cache.connect()
+    try:
+        web_cache.init_schema(con)
+    finally:
+        con.close()
 
 
 def _make_timeout_handler(
@@ -133,6 +169,9 @@ def main() -> None:
                 con.execute(WEB_STUB_SQL)
                 print(f"  {layer} → empty web_pages/web_fetches ({skip_reason})")
                 continue
+            # The ATTACH below is read-only and materializes SELECT *, so the
+            # cache's schema has to be current *before* it is read.
+            migrate_web_cache()
 
         sql = sql_path.read_text()
         if layer == "02_raw.sql":

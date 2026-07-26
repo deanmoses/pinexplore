@@ -194,6 +194,31 @@ def test_rendered_defaults_to_null_when_omitted(cache):
     assert _page(cache, url)["rendered"] is None
 
 
+# --------------------------------------------------------------------------- #
+# text_source — how the row's text was derived (extraction-quality provenance)
+# --------------------------------------------------------------------------- #
+
+
+def test_text_source_stored_on_page(cache):
+    url = wc.normalize_url("https://ipdb.org/images/1/x.jpg")
+    wc.upsert_page(
+        cache,
+        url=url,
+        raw_url=url,
+        content_sha=wc.content_sha(b"jpeg"),
+        fetched_at=wc.now_iso(),
+        text="MECATRONICS",
+        text_source="ocr",
+    )
+    assert _page(cache, url)["text_source"] == "ocr"
+
+
+def test_text_source_defaults_to_null_when_omitted(cache):
+    url = wc.normalize_url("https://a.com/legacy")
+    _seed(cache, url=url)  # _seed never passes text_source
+    assert _page(cache, url)["text_source"] is None
+
+
 def test_init_schema_migrates_legacy_cache(tmp_path, monkeypatch):
     # A cache.sqlite from before `rendered` existed and while a blob path was still
     # stored in `html_file`: init_schema must ALTER `rendered` onto the existing
@@ -233,15 +258,101 @@ def test_init_schema_migrates_legacy_cache(tmp_path, monkeypatch):
 
     assert "rendered" not in _cols("pages")
     assert "rendered" not in _cols("fetches")
+    assert "text_source" not in _cols("pages")
+    assert "imported" not in _cols("pages")
+    assert "text_sha" not in _cols("fetches")
+    assert "imported" not in _cols("fetches")
     assert "html_file" in _cols("pages")
 
     wc.init_schema(con)  # idempotent + migrating
 
     assert "rendered" in _cols("pages")
     assert "rendered" in _cols("fetches")
+    # text_source arrived with image OCR: rows written before it stay NULL rather
+    # than being back-filled with a guess about how their text was extracted.
+    assert "text_source" in _cols("pages")
+    # `imported` arrived with the manual-import path; a pre-existing row was
+    # genuinely fetched, and NULL says "this predates the distinction" rather
+    # than asserting anything about how those bytes were obtained.
+    assert "imported" in _cols("pages")
+    assert "text_sha" in _cols("fetches")
+    assert "imported" in _cols("fetches")
     assert "html_file" not in _cols("pages")  # dropped
     # The row's content survives the migration; content_type still drives the blob.
     row = wc.get("https://x.com/p", con=con)
     assert row is not None
     assert row["content_type"] == "text/html"
+    assert row["text_source"] is None
     con.close()
+
+
+# --------------------------------------------------------------------------- #
+# imported provenance flag — storage + migration
+# --------------------------------------------------------------------------- #
+
+
+def test_imported_flag_stored_on_page_and_fetch(cache):
+    url = wc.normalize_url("https://blocked.example/flyer.jpg")
+    sha = wc.content_sha(b"jpeg")
+    wc.upsert_page(
+        cache,
+        url=url,
+        raw_url=url,
+        content_sha=sha,
+        fetched_at=wc.now_iso(),
+        imported=True,
+    )
+    assert _page(cache, url)["imported"] == 1
+    wc.append_fetch(
+        cache,
+        url=url,
+        fetched_at=wc.now_iso(),
+        search_query=None,
+        http_status=None,
+        content_sha=sha,
+        changed=True,
+        imported=True,
+    )
+    row = cache.execute("SELECT imported, http_status FROM fetches").fetchone()
+    assert row[0] == 1
+    assert row[1] is None  # an import never claims an HTTP status
+
+
+def test_imported_defaults_to_null_when_omitted(cache):
+    url = wc.normalize_url("https://fetched.example/x")
+    _seed(cache, url=url)  # _seed never passes imported
+    assert _page(cache, url)["imported"] is None
+
+
+# --------------------------------------------------------------------------- #
+# text_sha — the audit trail for the one mutable field
+# --------------------------------------------------------------------------- #
+
+
+def test_text_sha_hashes_the_stored_text():
+    assert wc.text_sha("hello") == hashlib.sha256(b"hello").hexdigest()
+    # Exact, not normalized: any change to what we stored is a change.
+    assert wc.text_sha("hello ") != wc.text_sha("hello")
+
+
+def test_text_sha_of_no_text_is_none():
+    # A fetch that stored no page (a 403, a captionless video) logs NULL, not the
+    # hash of an empty string — there was no text, which is not the same as "".
+    assert wc.text_sha(None) is None
+    assert wc.text_sha("") is None
+
+
+def test_text_sha_stored_on_the_fetch_row(cache):
+    url = wc.normalize_url("https://x.com/p")
+    wc.append_fetch(
+        cache,
+        url=url,
+        fetched_at=wc.now_iso(),
+        search_query=None,
+        http_status=200,
+        content_sha=wc.content_sha(b"bytes"),
+        changed=True,
+        text_sha=wc.text_sha("the extracted text"),
+    )
+    stored = cache.execute("SELECT text_sha FROM fetches").fetchone()[0]
+    assert stored == wc.text_sha("the extracted text")

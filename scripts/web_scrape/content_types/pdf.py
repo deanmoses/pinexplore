@@ -89,6 +89,7 @@ class PdfHandler(ContentHandler):
     canonical_mime = "application/pdf"
     signature: bytes | None = b"%PDF-"
     extension = "pdf"
+    text_source = "pdf"
     renderable = False
 
     @override

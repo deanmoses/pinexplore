@@ -178,6 +178,7 @@ class HtmlHandler(ContentHandler):
     canonical_mime = "text/html"
     signature: bytes | None = None
     extension = "html"
+    text_source = "html"
     renderable = True
 
     @override

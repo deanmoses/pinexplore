@@ -12,13 +12,20 @@ from __future__ import annotations
 
 from .base import ContentHandler, ExtractedMeta
 from .html import HtmlHandler
+from .image import JpegHandler, PngHandler
 from .pdf import PdfHandler
 from .vtt import VttHandler
 
 # The registered handlers. One per document type; order is the sniff order (the
 # first whose signature matches a body wins, so list more specific signatures
 # first if two could ever overlap).
-HANDLERS: tuple[ContentHandler, ...] = (HtmlHandler(), PdfHandler(), VttHandler())
+HANDLERS: tuple[ContentHandler, ...] = (
+    HtmlHandler(),
+    PdfHandler(),
+    VttHandler(),
+    JpegHandler(),
+    PngHandler(),
+)
 
 
 def _validate(handlers: tuple[ContentHandler, ...]) -> None:
@@ -34,6 +41,7 @@ def _validate(handlers: tuple[ContentHandler, ...]) -> None:
         name = type(handler).__name__
         assert handler.mime_types, f"{name} declares no mime_types"
         assert handler.extension, f"{name} sets no blob extension"
+        assert handler.text_source, f"{name} declares no text_source"
         if handler.signature is not None:
             assert handler.canonical_mime in handler.mime_types, (
                 f"{name}.canonical_mime must be one of its own mime_types"

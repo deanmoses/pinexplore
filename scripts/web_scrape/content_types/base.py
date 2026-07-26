@@ -25,6 +25,14 @@ class ExtractedMeta(NamedTuple):
     title: str | None
     last_updated: str | None
     text: str | None
+    # True when this run produced no *result* — the backend the type needs is
+    # missing (image OCR on a non-macOS host) or it ran and failed (Vision
+    # timing out, running out of memory, refusing the file). Distinct from
+    # running fine and finding no text, which is a real finding. The distinction
+    # is load-bearing: "no text in this document" is a fact about the document
+    # and should overwrite a stale row, while "we learned nothing this time" must
+    # never blank text already extracted from the very same bytes.
+    unavailable: bool = False
 
 
 class ContentHandler:
@@ -50,6 +58,15 @@ class ContentHandler:
     # verify (a PDF as ``.pdf``, not mislabeled ``.html``). No default — each type
     # states its own, or the registry rejects it. Required.
     extension: str = ""
+    # How this handler derives its text, stored on the page row as
+    # ``text_source``. Not a restatement of the content type: it answers "how
+    # lossy is this text?", which is the question a patch author weighs before
+    # quoting. Machine transcription (``ocr``, ``vtt``) is materially less
+    # reliable than reading a document's own text layer (``html``, ``pdf``), and
+    # a human-typed transcription (``manual``, set by the importer rather than by
+    # a handler) is a different thing again. Required — the registry rejects a
+    # handler that leaves it blank.
+    text_source: str = ""
     # Whether a thin extraction should escalate to a headless render. HTML yes (an
     # SPA skeleton); a binary document like a PDF no — a browser can't read it
     # either (that needs OCR, out of scope).
