@@ -96,7 +96,8 @@ def test_legacy_cache_is_migrated_before_it_is_attached(tmp_path, monkeypatch):
     finally:
         con.close()
     assert {"text_source", "imported"} <= pages
-    assert {"imported", "text_sha"} <= fetches
+    assert "imported" in fetches
+    assert "text_sha" not in fetches  # retired; migration must not resurrect it
 
 
 def test_migrate_is_a_no_op_without_a_cache(tmp_path, monkeypatch):

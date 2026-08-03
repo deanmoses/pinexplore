@@ -363,34 +363,6 @@ def test_imported_page_is_quotable_and_searchable(cache, jpeg):
 
 
 # --------------------------------------------------------------------------- #
-# text_sha — a text-only correction is provable, not merely inferable
-# --------------------------------------------------------------------------- #
-
-
-def test_correcting_the_text_of_cached_bytes_is_visible_in_the_audit_log(cache, jpeg):
-    # The scenario this exists for: a page is cached and cited, then someone
-    # re-imports the same image with different text. The bytes are versioned
-    # (content_sha unchanged, blob untouched), so without a hash of the text the
-    # only trace would be "an import happened" — and the field most worth
-    # scrutinising would be the one field with no audit trail.
-    _run(cache, jpeg, text="MEGATRONICS")
-    _run(cache, jpeg, text="MECATRONICS", force=True)
-
-    rows = _fetch_rows(cache)
-    assert [r["content_sha"] for r in rows] == [wc.content_sha(JPEG_BYTES)] * 2
-    assert [r["changed"] for r in rows] == [1, 0]  # same bytes both times
-    assert rows[0]["text_sha"] == wc.text_sha("MEGATRONICS")
-    assert rows[1]["text_sha"] == wc.text_sha("MECATRONICS")
-    assert rows[0]["text_sha"] != rows[1]["text_sha"]
-
-
-def test_import_logs_the_hash_of_the_text_it_stored(cache, jpeg):
-    _run(cache, jpeg, text="O MELHOR FLIPPER JAMAIS FABRICADO")
-    (row,) = _fetch_rows(cache)
-    assert row["text_sha"] == wc.text_sha(_page(cache, FLYER_URL)["text"])
-
-
-# --------------------------------------------------------------------------- #
 # CLI behavior: dry run really writes nothing; unreadable input is reported
 # --------------------------------------------------------------------------- #
 

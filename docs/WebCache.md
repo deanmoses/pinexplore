@@ -66,8 +66,7 @@ Defined in [`web_cache.py`](../scripts/web_scrape/web_cache.py); two tables plus
   `text_source` label (see [How the text was derived](#how-the-text-was-derived)). The blob's on-disk path is deliberately **not** a column — it's derived (see below).
 - **`fetches`** — append-only audit + version history: one row per fetch, with the
   `search_query` that drove it, the `content_sha` it saw, a `changed` flag, a
-  `rendered` flag, an `imported` flag (see [Manual import](#manual-import)), and
-  the `text_sha` of the text that fetch stored (see below).
+  `rendered` flag, and an `imported` flag (see [Manual import](#manual-import)).
 
 A fetch upserts `pages` (preserving `first_fetched_at`) and appends one `fetches`
 row. An `fts5` virtual table (`pages_fts`) indexes url+title+text, trigger-synced
@@ -75,15 +74,7 @@ to `pages`.
 
 **Blobs are content-addressed.** A blob lives at `raw/<sha256(raw bytes)>.<ext>`, so an unchanged refetch resolves to the same file and rewrites nothing, while a changed one writes a new blob alongside the old. `pages` points at the current version by `content_sha`, and that current blob is what re-extraction reads. Superseded blobs stay on disk as a side effect of content addressing, not as a feature — nothing resolves a historical `content_sha`, and per [Automated quote verification](#automated-quote-verification) nothing needs to.
 
-**Text is the one mutable field, so each fetch logs its `text_sha`.** Everything else about a version is already tamper-evident: bytes are content-addressed, every version stays on disk, and the prior `content_sha` stays in the append-only log — so changed bytes are always visible and the old ones recoverable. `pages.text` has none of that. Re-storing a page with a corrected transcription leaves the blob untouched and would otherwise surface only as "an import happened", which makes the field most worth scrutinising the one with no record. The per-fetch hash of the stored text closes that: a text-only change becomes provable rather than inferable — two audit rows with the same `content_sha` and different `text_sha`.
-
-```sql
--- transcriptions that changed while the bytes stayed identical
-SELECT url, count(DISTINCT text_sha) AS versions FROM web_fetches
-WHERE text_sha IS NOT NULL GROUP BY url, content_sha HAVING versions > 1;
-```
-
-This matters most where a patch author and the evidence live in the same filesystem: `make verify-quotes` checks a quote against `pages.text`, so the cheapest way to clear a failing check is to edit the source it's checked against. **If a quote doesn't verify, the presumption is that the quote is wrong** — changing cached text to match a claim is a deliberate human act, never a side effect of making a check pass. Rows logged before this column exists stay NULL: what they stored isn't recoverable after the fact, and hashing whatever the page holds _now_ would assert precisely what the column exists to prove.
+`make verify-quotes` checks a quote against `pages.text`, so the cheapest way to clear a failing check is to edit the source it's checked against. **If a quote doesn't verify, the presumption is that the quote is wrong** — changing cached text to match a claim is a deliberate human act, never a side effect of making a check pass.
 
 The blob path is **derived, not stored**: `raw/<content_sha>.<ext>`, where `<ext>` comes from the row's `content_type` (`content_types.extension_for`, or `web_cache.blob_path` from the fetcher). The row carries only the fact actually fetched — the type — and never bakes the directory name or a derivable extension into the data, so renaming the blob dir is a code-and-filesystem change that never touches a row.
 
@@ -184,7 +175,7 @@ This is the **minority path**, for sources we can't download — not a routine a
 
 **Store the bytes under the URL that serves them.** For the flyer above that's `https://www.ipdb.org/images/4583/image-3.jpg`, not the viewer page `https://www.ipdb.org/showpic.pl?id=4583&picno=6433` that displays it. The viewer URL serves HTML; filing JPEG bytes under it would make `content_type`, `content_sha` and the `.jpg` blob all describe a resource that URL does not return — a quiet falsehood that then rides along in every citation. The file type itself is taken from the **magic bytes**, not the filename, because a browser's "Save image as" cheerfully lands a JPEG under `.txt` or no suffix at all.
 
-**A reviewed transcription outranks a later re-extraction.** A source that 403s today can become fetchable tomorrow, or land in a `--from-file` batch — and re-extracting the same bytes would trade a person's transcription for OCR output while logging it as `changed=0`. So a successful fetch never replaces `text_source = 'manual'` text when the bytes are unchanged; it updates the fetch metadata around it (`imported` flips to 0, because those bytes really did come off the wire this time, while `text_source` stays `manual` — the two answer different questions). When the bytes _did_ change the new extraction wins, since a transcription of the old version misdescribes the new one, but the supersession is announced loudly with the `text_sha` that finds the old text in the audit log. Changing a transcription stays a deliberate act through `web_import.py --force`, the one audited path for it.
+**A reviewed transcription outranks a later re-extraction.** A source that 403s today can become fetchable tomorrow, or land in a `--from-file` batch — and re-extracting the same bytes would trade a person's transcription for OCR output while logging it as `changed=0`. So a successful fetch never replaces `text_source = 'manual'` text when the bytes are unchanged; it updates the fetch metadata around it (`imported` flips to 0, because those bytes really did come off the wire this time, while `text_source` stays `manual` — the two answer different questions). When the bytes _did_ change the new extraction wins, since a transcription of the old version misdescribes the new one, but the supersession is announced loudly so the reviewer knows to re-review the new version. Changing a transcription stays a deliberate act through `web_import.py --force`, the one audited path for it.
 
 **Text is mandatory.** An import with nothing to quote is refused, not stored: blank-text pages are excluded from flippatch's `evidence_pages` and can't be indexed by FTS, so the row would be evidence in name only. Supply a transcription with `--text-file` (recorded as `text_source = 'manual'`) or let the file's own handler extract it.
 

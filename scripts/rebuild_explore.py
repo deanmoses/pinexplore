@@ -53,7 +53,7 @@ CREATE OR REPLACE TABLE web_pages (
 CREATE OR REPLACE TABLE web_fetches (
   id BIGINT, url VARCHAR, fetched_at VARCHAR, search_query VARCHAR,
   http_status BIGINT, content_sha VARCHAR, changed BIGINT, rendered BIGINT,
-  imported BIGINT, text_sha VARCHAR
+  imported BIGINT
 );
 """
 
@@ -68,8 +68,10 @@ def migrate_web_cache() -> None:
     migrate the file. That's the state ``make pull`` leaves behind whenever R2
     still holds an older cache, which is exactly when a build is run.
 
-    The migrations are additive and idempotent (see ``web_cache.init_schema``), so
-    running them here costs a no-op open on an already-current cache. A missing
+    The migrations are idempotent (see ``web_cache.init_schema``) — mostly
+    additive column ALTERs, plus the occasional guarded column drop, which backs
+    up ``cache.sqlite`` to a timestamped sibling before running — so calling them
+    here costs a no-op open on an already-current cache. A missing
     cache is left missing: the build stubs the tables instead, and conjuring a
     database as a side effect of looking for one is precisely what the importer's
     dry run was fixed not to do.

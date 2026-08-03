@@ -322,7 +322,6 @@ def import_one(
         content_sha=sha,
         changed=changed,
         imported=True,
-        text_sha=web_cache.text_sha(page_text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
     print(f"imported [{stored_source}] ({state}): {normalized}\n    {blob}")

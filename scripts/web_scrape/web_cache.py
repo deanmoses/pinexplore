@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import sqlite3
 import urllib.parse
 from datetime import UTC, datetime
@@ -147,25 +148,6 @@ def content_sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def text_sha(text: str | None) -> str | None:
-    """sha256 of a page's stored text, or None when there is no text.
-
-    The audit trail for the one field in this store that is mutable state. Bytes
-    are versioned — content-addressed, every version kept on disk, the prior
-    ``content_sha`` still in the ``fetches`` log — so a change to them is always
-    visible and recoverable. ``pages.text`` has no such history: re-storing a
-    page with a corrected transcription leaves the blob untouched and would
-    otherwise show up only as "an import happened", making the field most worth
-    scrutinising the one with no record. Logging this hash per fetch makes a
-    text-only change provable rather than inferable.
-
-    Hashes the text exactly as stored (no normalization): any difference is a
-    difference. None for absent or empty text — a fetch that stored no page
-    logs NULL rather than the hash of "".
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None
-
-
 def blob_path(sha: str, ext: str = "html") -> Path:
     """Absolute path to a page's raw blob, ``raw/<sha>.<ext>``.
 
@@ -234,8 +216,7 @@ CREATE TABLE IF NOT EXISTS fetches (   -- append-only audit + version history
   content_sha  TEXT,                   -- the version this fetch saw (blob stem)
   changed      INTEGER,                -- 1 if content differed from the prior fetch
   rendered     INTEGER,                -- 1 if this fetch was a headless render
-  imported     INTEGER,                -- 1 if this row is a manual import, not a fetch
-  text_sha     TEXT                    -- sha256 of the text this fetch stored
+  imported     INTEGER                 -- 1 if this row is a manual import, not a fetch
 );
 
 CREATE INDEX IF NOT EXISTS fetches_url ON fetches(url);
@@ -262,22 +243,49 @@ END;
 """
 
 
+def _backup_before_destructive_migration() -> None:
+    """Copy ``cache.sqlite`` to a timestamped sibling before a destructive step.
+
+    Called only when a destructive migration (a column drop) is actually pending,
+    never on a routine open — this SQLite is the system-of-record, so a botched
+    drop must be recoverable from disk rather than from R2 (`make pull` would
+    overwrite the migrated cache with whatever older copy R2 holds). The copy is
+    consistent: ``connect()`` forces DELETE journal mode and the caller has
+    committed before any drop runs. Dot-prefixed so ``make push``'s walk (which
+    skips dotfiles) never ships backups to R2.
+    """
+    if DB_PATH.exists():
+        stamp = now_iso().replace(":", "")
+        shutil.copy(DB_PATH, DB_PATH.with_name(f".{DB_PATH.name}.bak-{stamp}"))
+
+
 def init_schema(con: sqlite3.Connection) -> None:
     """Create tables, the FTS5 index, and sync triggers if absent (idempotent).
 
-    Then run additive column migrations: ``_SCHEMA`` is CREATE-only (it never
-    touches an existing table), so a column added after a cache shipped — like
-    ``rendered`` — must be ALTERed in here for older ``cache.sqlite`` files. This
-    SQLite is the system-of-record (not a blow-away-safe artifact like the DuckDB
-    tables), so once it holds shipped/accumulated evidence a schema change must be
-    a real migration like the one below, guarded so it's a no-op on fresh DBs.
+    Then run column migrations: ``_SCHEMA`` is CREATE-only (it never touches an
+    existing table), so a column added after a cache shipped — like ``rendered``
+    — must be ALTERed in here for older ``cache.sqlite`` files, and a retired one
+    dropped. This SQLite is the system-of-record (not a blow-away-safe artifact
+    like the DuckDB tables), so once it holds shipped/accumulated evidence a
+    schema change must be a real migration like the ones below, guarded so it's
+    a no-op on fresh DBs. Destructive steps write a timestamped backup first
+    (see ``_backup_before_destructive_migration``).
     """
     con.executescript(_SCHEMA)
-    # `rendered` was added with the headless-render fallback; ALTER it onto caches
-    # created before it (a fresh DB already has it from _SCHEMA — guard skips it).
     pages_cols = {
         r[0] for r in con.execute("SELECT name FROM pragma_table_info('pages')")
     }
+    fetches_cols = {
+        r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
+    }
+    # One safety copy per run, taken before any migration touches the file and
+    # only when a destructive step (a column drop) is actually pending — never
+    # on a routine open. The file is consistent here: `executescript` committed
+    # and nothing below has run yet.
+    if "html_file" in pages_cols or "text_sha" in fetches_cols:
+        _backup_before_destructive_migration()
+    # `rendered` was added with the headless-render fallback; ALTER it onto caches
+    # created before it (a fresh DB already has it from _SCHEMA — guard skips it).
     if "rendered" not in pages_cols:
         con.execute("ALTER TABLE pages ADD COLUMN rendered INTEGER")
     # `html_file` (a stored blob path like 'html/<sha>.html') was dropped: a blob's
@@ -300,19 +308,18 @@ def init_schema(con: sqlite3.Connection) -> None:
     # something about bytes nobody recorded a provenance for.
     if "imported" not in pages_cols:
         con.execute("ALTER TABLE pages ADD COLUMN imported INTEGER")
-    fetches_cols = {
-        r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
-    }
     if "rendered" not in fetches_cols:
         con.execute("ALTER TABLE fetches ADD COLUMN rendered INTEGER")
     if "imported" not in fetches_cols:
         con.execute("ALTER TABLE fetches ADD COLUMN imported INTEGER")
-    # `text_sha` closes the audit gap around the only mutable field (see
-    # text_sha()). Rows logged before it stay NULL — the text they stored is
-    # not recoverable after the fact, and inventing a hash of whatever the page
-    # holds *now* would assert exactly the thing the column exists to prove.
-    if "text_sha" not in fetches_cols:
-        con.execute("ALTER TABLE fetches ADD COLUMN text_sha TEXT")
+    # `text_sha` (sha256 of the text each fetch stored) was dropped: nothing ever
+    # read it, and its tamper-evidence rationale didn't survive scrutiny — the
+    # hash lived in the same local file as the text it was meant to police, and
+    # quote verification only needs to hold from patch authoring to patch commit,
+    # not across the store's history. Drop it from pre-change caches.
+    if "text_sha" in fetches_cols:
+        _backup_before_destructive_migration()
+        con.execute("ALTER TABLE fetches DROP COLUMN text_sha")
     con.commit()
 
 
@@ -401,7 +408,6 @@ def append_fetch(
     changed: bool | None = None,
     rendered: bool | None = None,
     imported: bool | None = None,
-    text_sha: str | None = None,
 ) -> None:
     """Append one row to the fetch audit log + version history.
 
@@ -412,8 +418,8 @@ def append_fetch(
     """
     con.execute(
         "INSERT INTO fetches (url, fetched_at, search_query, http_status, "
-        "content_sha, changed, rendered, imported, text_sha) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "content_sha, changed, rendered, imported) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             url,
             fetched_at,
@@ -423,7 +429,6 @@ def append_fetch(
             None if changed is None else int(changed),
             None if rendered is None else int(rendered),
             None if imported is None else int(imported),
-            text_sha,
         ),
     )
     con.commit()

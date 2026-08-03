@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
+import sqlite3
 
 import web_cache as wc
-
-if TYPE_CHECKING:
-    import sqlite3
 
 # --------------------------------------------------------------------------- #
 # normalize_url (pure)
@@ -275,15 +272,68 @@ def test_init_schema_migrates_legacy_cache(tmp_path, monkeypatch):
     # genuinely fetched, and NULL says "this predates the distinction" rather
     # than asserting anything about how those bytes were obtained.
     assert "imported" in _cols("pages")
-    assert "text_sha" in _cols("fetches")
+    # `text_sha` was retired; the migration must not resurrect it.
+    assert "text_sha" not in _cols("fetches")
     assert "imported" in _cols("fetches")
     assert "html_file" not in _cols("pages")  # dropped
+    # A destructive migration (the html_file drop) was pending, so exactly one
+    # pre-migration safety copy must exist beside the DB, dot-prefixed so
+    # `make push` never ships it.
+    backups = list(web_dir.glob(".cache.sqlite.bak-*"))
+    assert len(backups) == 1
     # The row's content survives the migration; content_type still drives the blob.
     row = wc.get("https://x.com/p", con=con)
     assert row is not None
     assert row["content_type"] == "text/html"
     assert row["text_source"] is None
     con.close()
+
+
+def test_init_schema_drops_text_sha_with_a_backup(tmp_path, monkeypatch):
+    # A cache.sqlite from the era when fetches logged a text_sha: init_schema must
+    # DROP the retired column, and — because a drop is destructive and this file is
+    # the system-of-record — write a timestamped safety copy first. The copy still
+    # holds the column, so a botched migration is recoverable from disk rather
+    # than from R2 (whose cache may be older than the live one).
+    web_dir = tmp_path / "web"
+    monkeypatch.setattr(wc, "WEB_DIR", web_dir)
+    monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
+    monkeypatch.setattr(wc, "RAW_DIR", web_dir / "raw")
+    con = wc.connect()
+    wc.init_schema(con)
+    con.execute("ALTER TABLE fetches ADD COLUMN text_sha TEXT")
+    con.commit()
+    con.close()
+
+    con = wc.connect()
+    wc.init_schema(con)
+    cols = {r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")}
+    assert "text_sha" not in cols
+    con.close()
+    backups = list(web_dir.glob(".cache.sqlite.bak-*"))
+    assert len(backups) == 1
+    backup_con = sqlite3.connect(backups[0])
+    backup_cols = {
+        r[0]
+        for r in backup_con.execute("SELECT name FROM pragma_table_info('fetches')")
+    }
+    backup_con.close()
+    assert "text_sha" in backup_cols
+
+
+def test_init_schema_skips_backup_when_no_drop_pending(tmp_path, monkeypatch):
+    # The safety copy fires only for a pending destructive migration. A fresh DB
+    # (and every routine re-open after it) must not accrete backups — silently
+    # copying the store on every open is the failure mode the guard exists for.
+    web_dir = tmp_path / "web"
+    monkeypatch.setattr(wc, "WEB_DIR", web_dir)
+    monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
+    monkeypatch.setattr(wc, "RAW_DIR", web_dir / "raw")
+    for _ in range(2):
+        con = wc.connect()
+        wc.init_schema(con)
+        con.close()
+    assert list(web_dir.glob(".cache.sqlite.bak-*")) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -322,37 +372,3 @@ def test_imported_defaults_to_null_when_omitted(cache):
     url = wc.normalize_url("https://fetched.example/x")
     _seed(cache, url=url)  # _seed never passes imported
     assert _page(cache, url)["imported"] is None
-
-
-# --------------------------------------------------------------------------- #
-# text_sha — the audit trail for the one mutable field
-# --------------------------------------------------------------------------- #
-
-
-def test_text_sha_hashes_the_stored_text():
-    assert wc.text_sha("hello") == hashlib.sha256(b"hello").hexdigest()
-    # Exact, not normalized: any change to what we stored is a change.
-    assert wc.text_sha("hello ") != wc.text_sha("hello")
-
-
-def test_text_sha_of_no_text_is_none():
-    # A fetch that stored no page (a 403, a captionless video) logs NULL, not the
-    # hash of an empty string — there was no text, which is not the same as "".
-    assert wc.text_sha(None) is None
-    assert wc.text_sha("") is None
-
-
-def test_text_sha_stored_on_the_fetch_row(cache):
-    url = wc.normalize_url("https://x.com/p")
-    wc.append_fetch(
-        cache,
-        url=url,
-        fetched_at=wc.now_iso(),
-        search_query=None,
-        http_status=200,
-        content_sha=wc.content_sha(b"bytes"),
-        changed=True,
-        text_sha=wc.text_sha("the extracted text"),
-    )
-    stored = cache.execute("SELECT text_sha FROM fetches").fetchone()[0]
-    assert stored == wc.text_sha("the extracted text")

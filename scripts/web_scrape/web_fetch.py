@@ -123,8 +123,8 @@ def _resolve_text(
     Both hinge on the bytes being unchanged, because then the earlier text still
     describes what we store. When the bytes *did* change, the new extraction wins:
     a transcription of the old version would misdescribe the new one. A superseded
-    transcription is called out loudly, with the ``text_sha`` that finds it in the
-    audit log, since nobody would otherwise notice a person's work going stale.
+    transcription is called out loudly, since nobody would otherwise notice a
+    person's work going stale.
     """
     if existing is None:
         return meta, handler.text_source
@@ -155,11 +155,9 @@ def _resolve_text(
             existing["text_source"],
         )
     if changed and keep_manual:
-        superseded = web_cache.text_sha(existing["text"])
         print(
             f"WARNING: source changed, so its reviewed transcription no longer "
-            f"describes it: {existing['url']} (superseded text_sha "
-            f"{superseded[:12] if superseded else '?'}; re-review the new version "
+            f"describes it: {existing['url']} (re-review the new version "
             f"and re-import if the transcription still applies)",
             file=sys.stderr,
         )
@@ -369,7 +367,6 @@ def fetch_one(
         content_sha=content_sha,
         changed=changed,
         rendered=rendered,
-        text_sha=web_cache.text_sha(meta.text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
     if rendered:
@@ -484,7 +481,6 @@ def _fetch_video_one(
         http_status=200,
         content_sha=content_sha,
         changed=changed,
-        text_sha=web_cache.text_sha(meta.text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
     track = video.caption_note or "captions"

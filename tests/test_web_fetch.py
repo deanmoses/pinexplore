@@ -577,29 +577,6 @@ def test_changed_bytes_without_ocr_backend_do_not_keep_stale_text(cache, monkeyp
     assert [r[3] for r in _fetches(cache)] == [1, 1]  # new, then changed
 
 
-def test_fetch_logs_the_hash_of_the_text_it_stored(cache, monkeypatch):
-    _stub_get(monkeypatch, body=RICH_HTML)
-    _run(cache, "https://x.com/a")
-    stored = _page(cache, "https://x.com/a")["text"]
-    row = cache.execute("SELECT text_sha FROM fetches").fetchone()[0]
-    assert row == wc.text_sha(stored)
-
-
-def test_preserved_text_logs_the_unchanged_hash(cache, monkeypatch):
-    # The OCR-unavailable path keeps the earlier extraction, so the audit trail
-    # must show the text did NOT change — the whole point of the column.
-    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO")
-    _stub_get(
-        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
-    )
-    _run(cache, "https://x.com/flyer.jpg")
-    _stub_ocr_unavailable(monkeypatch)
-    _run(cache, "https://x.com/flyer.jpg", force=True)
-
-    shas = [r[0] for r in cache.execute("SELECT text_sha FROM fetches ORDER BY id")]
-    assert shas[0] == shas[1] == wc.text_sha("O MELHOR FLIPPER JAMAIS FABRICADO")
-
-
 # --------------------------------------------------------------------------- #
 # A successful fetch must not downgrade a human-reviewed transcription
 # --------------------------------------------------------------------------- #
@@ -665,8 +642,9 @@ def test_changed_bytes_supersede_manual_text_but_warn(cache, monkeypatch, capsys
     assert TRANSCRIPTION not in (row["text"] or "")
     err = capsys.readouterr().err
     assert "transcription" in err.lower()
-    # Names the superseded text so it can be found in the audit log.
-    assert wc.text_sha(TRANSCRIPTION)[:12] in err
+    # Tells the reviewer what to do about it.
+    assert "re-review" in err
+    assert url in err
 
 
 def test_ordinary_fetch_records_imported_zero_not_null(cache, monkeypatch):
