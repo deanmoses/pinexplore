@@ -12,11 +12,14 @@ and the render fallback (``web_render``) both speak. No SQLite, no policy.
 from __future__ import annotations
 
 import contextlib
+import ssl
 import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Literal, NamedTuple
+
+import certifi
 
 # Allow `import content_types` whether run as a script or imported (mirrors the
 # sibling-import dance the other web_scrape modules do).
@@ -28,6 +31,15 @@ USER_AGENT = (
     "(+https://github.com/deanmoses/pindata; pinball catalog evidence cache)"
 )
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
+
+# Verify TLS against certifi's CA bundle, not whatever the interpreter happens to
+# trust. `urlopen` with no context uses the latter, which on a stock macOS Python
+# lacks intermediates plenty of real sites serve: americanpinball.com failed with
+# "self-signed certificate in certificate chain" while curl fetched it fine. That
+# failure is indistinguishable from a dead site at the call site, so a page the
+# author can see in a browser silently becomes uncitable. certifi ships with
+# trafilatura, so this adds no dependency.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 SkipReason = Literal["content-type", "too-large"]
@@ -97,7 +109,7 @@ def http_get(url: str) -> Resp:
     """
     wire_url = request_url(url)
     req = urllib.request.Request(wire_url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=60, context=_SSL_CONTEXT) as resp:
         status = resp.status
         content_type = resp.headers.get_content_type()
         landed = resp.geturl()

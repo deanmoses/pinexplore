@@ -4,6 +4,7 @@ test_content_types.py."""
 
 from __future__ import annotations
 
+import ssl
 import urllib.request
 from typing import TYPE_CHECKING
 
@@ -111,7 +112,16 @@ def _stub_urlopen(
     charset: str | None = None,
     may_read: bool = True,
 ) -> None:
-    def _open(req: urllib.request.Request, timeout: float | None = None) -> _FakeResp:
+    def _open(
+        req: urllib.request.Request,
+        timeout: float | None = None,
+        *,
+        context: ssl.SSLContext | None = None,
+    ) -> _FakeResp:
+        # Verification is the point of passing a context at all; a None one
+        # would silently fall back to the interpreter's own trust store.
+        assert context is not None
+        assert context.verify_mode is ssl.CERT_REQUIRED
         # Echo the requested wire URL as geturl() → no redirect.
         return _FakeResp(
             status=status,
