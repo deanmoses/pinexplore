@@ -185,6 +185,8 @@ This is the **minority path**, for sources we can't download — not a routine a
 
 **Text is mandatory.** An import with nothing to quote is refused, not stored: blank-text pages are excluded from flippatch's `evidence_pages` and can't be indexed by FTS, so the row would be evidence in name only. Supply a transcription with `--text-file` (recorded as `text_source = 'manual'`) or let the file's own handler extract it.
 
+**`--text-source` says which machine read supplied text**, when the answer isn't "a person". The case that needs it is a **scanned PDF**: the PDF handler reads a text layer, a scan has none, and there is no OCR on that path — so the words have to come from OCR run outside this tool (render the pages, read them with the same Vision backend and confidence floor `web_ocr` uses), and `--text-file` alone would file a machine's reading as a transcription. `--text-source ocr` keeps `manual` meaning the one thing it exists to mean, and keeps the row out of the transcription-outranks-refetch protection above, which a machine draft hasn't earned. It accepts only labels the cache records — every handler's own plus `manual` — and only alongside `--text-file`, since without one the handler's extraction is stored under its own label and declaring a different one would just overwrite the truth.
+
 The intended flow for an image, and the reason `--dry-run` exists:
 
 1. **Draft** — run with `--dry-run` to see exactly what would be stored, including the full OCR text, and whether the URL is already cached. Nothing is written: a dry run opens the cache read-only, and on a fresh checkout doesn't create it at all.

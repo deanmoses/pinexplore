@@ -177,6 +177,31 @@ def test_supplied_text_wins_over_ocr(cache, jpeg, monkeypatch):
     assert row["text_source"] == "manual"
 
 
+def test_supplied_text_can_declare_the_machine_that_read_it(cache, tmp_path, make_pdf):
+    # A scanned PDF has no text layer and no OCR path in its handler, so its
+    # text must be supplied — but it is machine output, and only `manual` says
+    # a person is answerable for the words.
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(make_pdf(title="Scan"))
+    url = "https://www.ipdb.org/files/1343/scan.pdf"
+    _run(cache, path, url=url, text="1990 JANICE AVE", text_source="ocr")
+    row = _page(cache, url)
+    assert row["text"] == "1990 JANICE AVE"
+    assert row["text_source"] == "ocr"
+
+
+def test_declared_text_source_must_be_one_the_cache_knows(cache, jpeg):
+    with pytest.raises(web_import.ImportRefusedError, match="text-source"):
+        _run(cache, jpeg, text="MECATRONICS", text_source="vision")
+
+
+def test_declared_text_source_needs_text_to_describe(cache, jpeg):
+    # Without --text-file the handler's own extraction is stored, and its
+    # provenance is a fact about the handler, not something to declare.
+    with pytest.raises(web_import.ImportRefusedError, match="text-source"):
+        _run(cache, jpeg, text_source="ocr")
+
+
 def test_imported_pdf_keeps_its_handler_text_source(cache, tmp_path, make_pdf):
     # A hand-downloaded PDF (403 to the fetcher, fine in a browser) still gets
     # its text from pypdf; only the *provenance of the bytes* differs.

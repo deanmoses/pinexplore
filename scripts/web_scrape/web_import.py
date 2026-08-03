@@ -31,8 +31,12 @@ survives into every citation.
 Text is mandatory: a page with no text is dropped from flippatch's
 ``evidence_pages`` and can't be indexed or quoted, so importing one would be a
 no-op dressed as evidence. Supply it with ``--text-file`` (recorded as
-``text_source='manual'``) or let the file's own handler extract it — OCR for an
-image, pypdf for a PDF, trafilatura for saved HTML. For an image, prefer
+``text_source='manual'``, or what ``--text-source`` declares) or let the file's
+own handler extract it — OCR for an image, pypdf for a PDF, trafilatura for
+saved HTML. A **scanned PDF** is the case that needs the override: its handler
+reads a text layer that isn't there, so its words have to come from OCR run
+outside this tool, and ``--text-source ocr`` keeps ``manual`` meaning what it
+says — a person is answerable for those words. For an image, prefer
 reviewing the OCR draft (``--dry-run``) against the picture and importing the
 corrected text: OCR is faithful to pixels but garbles stylized lettering, and a
 correction should be justified by something visible in the document, never by
@@ -55,7 +59,14 @@ if TYPE_CHECKING:
 # Allow sibling imports whether run as a script or imported (mirrors web_fetch).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
-from content_types import ContentHandler, handler_for, sniff
+from content_types import HANDLERS, ContentHandler, handler_for, sniff
+
+# What ``--text-source`` may declare: every provenance a handler can produce,
+# plus ``manual``. Derived from the registry rather than spelled out, so a new
+# handler's label is accepted here the moment it exists — and a typo is not.
+TEXT_SOURCES: frozenset[str] = frozenset(
+    {handler.text_source for handler in HANDLERS} | {"manual"}
+)
 
 # A date the importer will accept: exactly one unambiguous form. A date is
 # evidence too, and "Jan 1986" or "01/02/86" would have to be guessed at. The
@@ -77,6 +88,25 @@ def _check_date(date: str) -> None:
         datetime.date.fromisoformat(date)
     except ValueError as exc:
         raise ImportRefusedError(f"--date {date!r} is not a real date ({exc})") from exc
+
+
+def _check_text_source(text_source: str, *, has_text: bool) -> None:
+    """Reject a --text-source that isn't a known label, or has nothing to label.
+
+    Without ``--text-file`` the stored text is the handler's own extraction, and
+    its provenance is a fact about that handler — declaring one would overwrite
+    the truth with a preference.
+    """
+    if not has_text:
+        raise ImportRefusedError(
+            "--text-source describes the text --text-file supplies; without it "
+            "the handler's own extraction is stored under its own label"
+        )
+    if text_source not in TEXT_SOURCES:
+        known = ", ".join(sorted(TEXT_SOURCES))
+        raise ImportRefusedError(
+            f"--text-source {text_source!r} is not one the cache records ({known})"
+        )
 
 
 class ImportRefusedError(ValueError):
@@ -152,6 +182,7 @@ def import_one(
     *,
     url: str,
     text: str | None = None,
+    text_source: str | None = None,
     title: str | None = None,
     date: str | None = None,
     query: str | None = None,
@@ -160,13 +191,19 @@ def import_one(
 ) -> None:
     """Import one hand-obtained file into the cache under ``url``.
 
-    ``text`` is a human transcription and always wins over what the file's
-    handler extracts. ``title``/``date`` likewise override extracted values —
-    for an image both are otherwise null, since OCR'd words are not a title and
-    an EXIF timestamp is not the document's date.
+    ``text`` is supplied text and always wins over what the file's handler
+    extracts; it lands on ``text_source='manual'`` unless ``text_source`` says
+    which machine read it instead. That override exists for the document a
+    handler cannot read at all — a scanned PDF routes to pypdf, which finds no
+    text layer, so OCR run outside this tool is the only way to give it words,
+    and calling that a transcription would put a person's name on a machine's
+    reading. ``title``/``date`` likewise override extracted values — for an
+    image both are otherwise null, since OCR'd words are not a title and an
+    EXIF timestamp is not the document's date.
 
     Raises ``ImportRefusedError`` (before writing anything) on an unusable URL or
-    date, an unrecognized file type, text that is blank, or an already-cached
+    date, an unrecognized file type, text that is blank, a ``text_source``
+    outside :data:`TEXT_SOURCES` or given without ``text``, or an already-cached
     URL without ``force``. ``dry_run`` prints what would be stored and writes
     nothing — the review step for an OCR draft; it accepts ``con=None`` so a
     fresh checkout can preview an import without a database being created as a
@@ -174,6 +211,8 @@ def import_one(
     """
     if date is not None:
         _check_date(date)
+    if text_source is not None:
+        _check_text_source(text_source, has_text=text is not None)
     normalized = _check_url(url)
     raw = path.read_bytes()
     handler = _resolve_handler(raw, path)
@@ -202,10 +241,10 @@ def import_one(
         )
     if text is not None:
         page_text: str | None = text
-        text_source = "manual"
+        stored_source = text_source or "manual"
     else:
         page_text = meta.text
-        text_source = handler.text_source
+        stored_source = handler.text_source
 
     sha = web_cache.content_sha(raw)
     blob = web_cache.blob_path(sha, ext=handler.extension)
@@ -232,7 +271,7 @@ def import_one(
         print(f"    blob would be {blob}")
         print(f"    title        {page_title or '(none)'}")
         print(f"    date         {last_updated or '(none)'}")
-        print(f"    text_source  {text_source}")
+        print(f"    text_source  {stored_source}")
         if page_text and page_text.strip():
             print(f"    text ({len(page_text):,} chars) — review against the original:")
             print("\n".join(f"      {line}" for line in page_text.splitlines()))
@@ -271,7 +310,7 @@ def import_one(
         content_type=handler.canonical_mime or None,
         text=page_text,
         rendered=False,
-        text_source=text_source,
+        text_source=stored_source,
         imported=True,
     )
     web_cache.append_fetch(
@@ -286,7 +325,7 @@ def import_one(
         text_sha=web_cache.text_sha(page_text),
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
-    print(f"imported [{text_source}] ({state}): {normalized}\n    {blob}")
+    print(f"imported [{stored_source}] ({state}): {normalized}\n    {blob}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -305,8 +344,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--text-file",
         help=(
-            "A transcription to store as the page text (recorded as "
-            "text_source=manual). Wins over whatever the file's handler extracts."
+            "Text to store as the page text (recorded as text_source=manual "
+            "unless --text-source says otherwise). Wins over whatever the "
+            "file's handler extracts."
+        ),
+    )
+    parser.add_argument(
+        "--text-source",
+        choices=sorted(TEXT_SOURCES),
+        help=(
+            "How the --text-file text was derived, when it isn't a human "
+            "transcription: 'ocr' for pixels a machine read (a scanned PDF, "
+            "whose handler finds no text layer to extract)."
         ),
     )
     parser.add_argument("--title", help="Title for the page row.")
@@ -343,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.file),
             url=args.url,
             text=text,
+            text_source=args.text_source,
             title=args.title,
             date=args.date,
             query=args.query,
