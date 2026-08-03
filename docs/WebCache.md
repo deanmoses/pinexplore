@@ -7,11 +7,15 @@ Most catalog data going forward will be sourced not from IPDB/OPDB but from the 
 This cache fetches each page **once** and reuses it, so we:
 
 - **stop re-hitting sources** — fetch once, reuse forever;
-- get **reproducible verbatim quotes** even after a page changes or the site dies (critical for _defunct_ makers, whose sites vanish);
-- build a **searchable corpus** of pinball evidence that grows over years;
-- capture **provenance** — when we fetched, the search intent that led there, and the page's own publish/modified date.
+- support [automated quote verification](#automated-quote-verification)
+- build a **searchable corpus** of pinball evidence that grows over years
+- capture **provenance** — when we fetched, the search intent that led there, and the page's own publish/modified date
 
 New catalog data / corrections to existing catalog data are written as curated [data patches](#data-patches).
+
+## Automated quote verification
+
+One job of this cache is to back flippatch's automated quote verification. That gate must be **fast, deterministic and offline** — it runs against stored text, never a live fetch. A quote needs to verify for one brief window: from the moment a session authors a data patch containing it, to the moment that patch is committed. That is when `make verify-quotes` runs. After that the quote is shipped and immutable, and nothing re-checks it.
 
 ## Relationship to the main DuckDB
 
@@ -24,7 +28,7 @@ The **SQLite database is the system-of-record**; the main DuckDB is an analytica
 ```text
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
   cache.sqlite                 system-of-record: pages + fetches + pages_fts (FTS5)
-  raw/<sha256(raw)>.<ext>      raw page blobs, content-addressed + versioned
+  raw/<sha256(raw)>.<ext>      raw page blobs, content-addressed
                                (HTML as <sha>.html, a fetched PDF as <sha>.pdf;
                                 the extension derives from the row's content_type)
 
@@ -49,7 +53,7 @@ sql/
                              (raw-ingestion band, alongside 02_raw.sql)
 ```
 
-The raw blob stays the copy we **re-verify quotes against**; it is kept on disk (not in SQLite) to keep the DB lean and the FTS index fast.
+The raw blob is kept for **re-extraction** — re-deriving `pages.text` when the extraction changes, and testing new ways of extracting against real pages without re-hitting any source. That is its only job. It lives on disk rather than in SQLite to keep the DB lean and the FTS index fast.
 
 ### SQLite schema
 
@@ -69,8 +73,7 @@ A fetch upserts `pages` (preserving `first_fetched_at`) and appends one `fetches
 row. An `fts5` virtual table (`pages_fts`) indexes url+title+text, trigger-synced
 to `pages`.
 
-**Blobs are content-addressed and versioned.** A blob lives at
-`raw/<sha256(raw bytes)>.<ext>`, so every distinct version of a page is preserved: an unchanged refetch resolves to the same file (no rewrite), a changed one writes a new blob alongside the old. `pages` points at the current version (by `content_sha`); prior versions stay on disk and in the `fetches` log. This is what makes "reproducible quotes after a page changes" true.
+**Blobs are content-addressed.** A blob lives at `raw/<sha256(raw bytes)>.<ext>`, so an unchanged refetch resolves to the same file and rewrites nothing, while a changed one writes a new blob alongside the old. `pages` points at the current version by `content_sha`, and that current blob is what re-extraction reads. Superseded blobs stay on disk as a side effect of content addressing, not as a feature — nothing resolves a historical `content_sha`, and per [Automated quote verification](#automated-quote-verification) nothing needs to.
 
 **Text is the one mutable field, so each fetch logs its `text_sha`.** Everything else about a version is already tamper-evident: bytes are content-addressed, every version stays on disk, and the prior `content_sha` stays in the append-only log — so changed bytes are always visible and the old ones recoverable. `pages.text` has none of that. Re-storing a page with a corrected transcription leaves the blob untouched and would otherwise surface only as "an import happened", which makes the field most worth scrutinising the one with no record. The per-fetch hash of the stored text closes that: a text-only change becomes provable rather than inferable — two audit rows with the same `content_sha` and different `text_sha`.
 
@@ -209,7 +212,7 @@ web_cache.quote(url, "2024")         # sentences in the page containing a needle
 web_cache.get(url)                   # full page record
 ```
 
-`quote()` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Data patches](#data-patches)). Confirm wording against the stored blob before shipping. `make explore` also materializes the cache into the `web_pages` / `web_fetches` DuckDB tables (via `03_raw_web.sql`) for joining against the catalog.
+`quote()` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Data patches](#data-patches)). `make explore` also materializes the cache into the `web_pages` / `web_fetches` DuckDB tables (via `03_raw_web.sql`) for joining against the catalog.
 
 ## Data patches
 
@@ -222,7 +225,7 @@ cite:
   locator: in the 1978 machine list # optional: where in the page it sits
 ```
 
-- **`quote`** is the only field that must match the source word for word — it is what `make verify-quotes` checks. Take it from `web_cache.quote()` and confirm the wording against the stored blob before shipping.
+- **`quote`** is the only field that must match the source word for word — it is what `make verify-quotes` checks. Take it from `web_cache.quote()`.
 - **`locator`** is freeform for a web page, and says where the excerpt lives so a reader can find it.
 - **`note:`** is the edit summary — rationale beyond the evidence, uncertainty, why the value follows. It is never a verbatim excerpt, and a cite carrying a quote usually needs no note at all.
 
