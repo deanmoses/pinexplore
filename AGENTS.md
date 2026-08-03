@@ -37,10 +37,7 @@ the catalog. Its job is to surface corrections.
 Now that the catalog is live, full re-ingests no longer happen — corrections
 discovered in pinexplore are applied as **data patches**: numbered, attributed,
 cited YAML files in flippatch's `patches/`, replayed onto flipcommons with
-`make ingest-patches`. Web-sourced evidence (a verbatim `note:` quote plus a
-`cite:` URL) comes from pinexplore's
-[web evidence cache](WebCache.md). The canonical patch guides live in the
-flipcommons repo:
+`make ingest-patches`. Web-sourced evidence — a cite whose `ref` is the page URL and whose `quote` is the verbatim excerpt — comes from pinexplore's [web evidence cache](WebCache.md). The canonical patch guides live in the flipcommons repo:
 
 - [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
   — the patch file format and how patches are applied.

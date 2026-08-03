@@ -193,7 +193,9 @@ The intended flow for an image, and the reason `--dry-run` exists:
 2. **Review** — compare that draft against the picture. Correct only what the document itself contradicts: its clean-type footer, a string repeated elsewhere on the page. Never "correct" it toward what the text is expected to say — that substitutes an expectation for the evidence, which is the failure mode OCR was chosen to avoid.
 3. **Import** — pass the reviewed text with `--text-file`.
 
-An accurate transcription verifies downstream by the ordinary path, with no special-casing in flippatch: `make verify-quotes` resolves an `http(s)` cite through `web_cache.get(url)` and requires the quote to be a verbatim substring of the stored text once smart quotes are straightened and whitespace runs collapsed. Keep the document's line structure in the transcription and the gate's whitespace collapsing handles the rest.
+An accurate transcription verifies downstream by the ordinary path, with no special-casing in flippatch: `make verify-quotes` resolves an `http(s)` cite through `web_cache.get(url)` and requires the cite's `quote` to be a verbatim substring of the stored text once smart quotes are straightened and whitespace runs collapsed. Keep the document's line structure in the transcription and the gate's whitespace collapsing handles the rest.
+
+**The gate covers pending patches only.** It globs `patches/[0-9]*.yaml` non-recursively, so the patches under `patches/shipped/` are never re-checked — shipping retires a quote from verification, and shipped quotes are immutable. A change to how this cache extracts text therefore cannot break a shipped patch; it can only affect quotes still being authored.
 
 ## Querying
 
@@ -207,20 +209,23 @@ web_cache.quote(url, "2024")         # sentences in the page containing a needle
 web_cache.get(url)                   # full page record
 ```
 
-`quote()` is the starting point for a verbatim `note:` — confirm wording against
-the stored blob before shipping. `make explore` also materializes the cache into
-the `web_pages` / `web_fetches` DuckDB tables (via `03_raw_web.sql`) for joining
-against the catalog.
+`quote()` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Data patches](#data-patches)). Confirm wording against the stored blob before shipping. `make explore` also materializes the cache into the `web_pages` / `web_fetches` DuckDB tables (via `03_raw_web.sql`) for joining against the catalog.
 
 ## Data patches
 
-The cache feeds the two evidence fields of a [data
-patch](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
-(authored in the [flippatch](https://github.com/deanmoses/flippatch) repo):
+The cache is where the evidence in a [data patch](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md) comes from (patches are authored in the [flippatch](https://github.com/deanmoses/flippatch) repo). A cached page becomes a cite in mapping form:
 
-- **`note:`** — a verbatim quote from `web_cache.quote()`, formatted with flippatch's
-  `patchkit.source_note()`.
-- **`cite:`** — the page URL.
+```yaml
+cite:
+  ref: https://www.tilt.it/flipper_pinball/ipdb/cea # the page URL
+  quote: "Fly Man – ss – 1p" # verbatim, from web_cache.quote()
+  locator: in the 1978 machine list # optional: where in the page it sits
+```
 
-See DataPatches.md for the cite rules (a URL cite needs its website root seeded
-first; a known-scheme URL like `ipdb.org` cites as `scheme:id`).
+- **`quote`** is the only field that must match the source word for word — it is what `make verify-quotes` checks. Take it from `web_cache.quote()` and confirm the wording against the stored blob before shipping.
+- **`locator`** is freeform for a web page, and says where the excerpt lives so a reader can find it.
+- **`note:`** is the edit summary — rationale beyond the evidence, uncertainty, why the value follows. It is never a verbatim excerpt, and a cite carrying a quote usually needs no note at all.
+
+`cite:` also takes a list, and the policy for AI-authored patches is to corroborate a fact from as many separate sources as possible.
+
+See DataPatches.md for the full cite grammar (a URL cite needs its website root seeded first; a known-scheme URL like `ipdb.org` cites as `scheme:id`), and [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md) for the authoring rules on quoting.
