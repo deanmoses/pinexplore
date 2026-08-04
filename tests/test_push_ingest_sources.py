@@ -18,6 +18,7 @@ import io
 import json
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,7 +52,9 @@ class _StubS3:
 
     exceptions = types.SimpleNamespace(NoSuchKey=_NoSuchKeyError)
 
-    def __init__(self, keys: dict[str, int], manifest: object = None) -> None:
+    def __init__(
+        self, keys: dict[str, int], manifest: bytes | Exception | None = None
+    ) -> None:
         self.keys = keys
         self.manifest = manifest  # bytes, None (absent), or an exception to raise
 
@@ -62,7 +65,7 @@ class _StubS3:
         pages = [{"Contents": items[:1]}, {"Contents": items[1:]}]
         return types.SimpleNamespace(paginate=lambda **_: pages)
 
-    def get_object(self, Bucket: str, Key: str) -> dict:  # noqa: N803
+    def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
         if isinstance(self.manifest, Exception):
             raise self.manifest
         if self.manifest is None:
@@ -70,11 +73,11 @@ class _StubS3:
         return {"Body": io.BytesIO(self.manifest)}
 
 
-def _entry(rel: str, data: bytes) -> dict:
+def _entry(rel: str, data: bytes) -> dict[str, Any]:
     return {"path": rel, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def _manifest(*entries: dict) -> bytes:
+def _manifest(*entries: dict[str, Any]) -> bytes:
     return json.dumps(list(entries)).encode()
 
 
@@ -195,7 +198,7 @@ def test_fetch_remote_manifest_propagates_other_errors():
 # --- _compare ---------------------------------------------------------------
 
 
-def _tree(n: int) -> list[dict]:
+def _tree(n: int) -> list[dict[str, Any]]:
     return [_entry(f"f{i}.json", str(i).encode() * 50) for i in range(n)]
 
 
