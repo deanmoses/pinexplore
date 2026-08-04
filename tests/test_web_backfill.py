@@ -138,17 +138,33 @@ def test_backfill_skips_missing_blob(cache, capsys):
     assert _row(cache, url)["text"] == "still here"
 
 
-def test_backfill_warns_on_new_replacement_characters(cache, capsys):
+def test_backfill_skips_on_decode_regression(cache, capsys):
     # A blob whose declared charset can't decode a byte: U+FFFD appears where
-    # the stored text (decoded at fetch time with the header charset) had none.
+    # the stored text (decoded at fetch time with the header charset) had
+    # none. The stored text is the only artifact encoding the correct
+    # charset, so the row is skipped — a --force refetch is the fix.
     mojibake = (
         b'<html><head><meta charset="utf-8"><title>T</title></head>'
         b"<body><p>caf\xe9 latin-1 byte</p></body></html>"
     )
-    _seed_row(cache, "https://a.example/moji", mojibake, text="cafe latin-1 byte")
+    url = _seed_row(cache, "https://a.example/moji", mojibake, text="cafe latin-1 byte")
     tally = web_backfill.backfill(con=cache)
-    assert tally["rewritten"] == 1  # rewritten, but loudly
+    assert tally["rewritten"] == 0
+    assert tally["skipped (decode regression)"] == 1
     assert "U+FFFD" in capsys.readouterr().err
+    assert _row(cache, url)["text"] == "cafe latin-1 byte"
+
+
+def test_backfill_includes_xhtml_rows(cache):
+    url = _seed_row(
+        cache,
+        "https://a.example/xhtml",
+        PAGE,
+        content_type="application/xhtml+xml",
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 1
+    assert "1510 Webster Street" in (_row(cache, url)["text"] or "")
 
 
 def test_backfill_writes_no_fetch_rows_and_updates_fts(cache):

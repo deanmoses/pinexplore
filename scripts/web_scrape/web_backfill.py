@@ -25,12 +25,16 @@ What it may replace is exactly the text the HTML extractor produced:
 
 Two guards earn their place. Never overwrite non-empty text with empty —
 re-running cannot recover from a blanking bug, because the same bug produces
-the same empty result. And warn when the re-extracted text contains U+FFFD
-where the stored text didn't: the backfill decodes from the blob alone,
-without the original HTTP header charset (never stored). Measured, that
-reproduces fetch-time decoding for the whole current corpus — every HTML blob
-either declares a ``<meta>`` charset or is valid UTF-8 — so the warning is one
-line of insurance for the blob this measurement hasn't met yet.
+the same empty result. And never overwrite on a decode regression: the
+backfill decodes from the blob alone, without the original HTTP header
+charset (never stored), so re-extracted text containing U+FFFD where the
+stored text had none means the stored text is the only artifact that encoded
+the correct charset — replacing it would be unrecoverable. Such rows are
+skipped and tallied; a ``web_fetch.py --force`` refetch restores the header
+charset and re-extracts properly. Measured, blob-only decoding reproduces
+fetch-time decoding for the whole current corpus — every HTML blob either
+declares a ``<meta>`` charset or is valid UTF-8 — so this guard is insurance
+for the blob that measurement hasn't met yet.
 
 ``title`` is rewritten along with ``text`` — both come from the same
 extractor. ``last_updated`` is left alone: htmldate and its inputs are
@@ -64,14 +68,21 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
         "skipped (other text_source)": 0,
         "skipped (missing blob)": 0,
         "skipped (empty re-extraction)": 0,
+        "skipped (decode regression)": 0,
     }
     try:
-        rows = db.execute(
-            "SELECT url, content_sha, content_type, text, text_source FROM pages "
-            "WHERE content_type = 'text/html' ORDER BY url"
-        ).fetchall()
         handler = handler_for("text/html")
         assert handler is not None
+        # Every MIME type the HTML handler claims (text/html and
+        # application/xhtml+xml), not a literal — an XHTML row must not be
+        # silently left on the old extraction forever.
+        mimes = sorted(handler.mime_types)
+        placeholders = ", ".join("?" for _ in mimes)
+        rows = db.execute(
+            f"SELECT url, content_sha, content_type, text, text_source FROM pages "  # noqa: S608
+            f"WHERE content_type IN ({placeholders}) ORDER BY url",
+            mimes,
+        ).fetchall()
         for row in rows:
             source = row["text_source"]
             if source is not None and source != "html":
@@ -109,12 +120,15 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                 )
                 continue
             if "�" in new_text and "�" not in old_text:
+                tally["skipped (decode regression)"] += 1
                 print(
-                    f"WARNING: replacement characters (U+FFFD) appeared in "
-                    f"re-extracted text (header-charset decode difference?): "
-                    f"{row['url']}",
+                    f"WARNING: re-extraction introduced replacement characters "
+                    f"(U+FFFD) — the stored text was decoded with the original "
+                    f"header charset and must not be replaced; refetch with "
+                    f"--force to re-extract properly: {row['url']}",
                     file=sys.stderr,
                 )
+                continue
             db.execute(
                 "UPDATE pages SET text = ?, title = ?, text_source = 'html' "
                 "WHERE url = ?",

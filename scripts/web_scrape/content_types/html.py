@@ -259,10 +259,12 @@ def _head_metadata(tree: HtmlElement) -> tuple[str | None, str | None, list[str]
     Returns ``(title_tag, og_title, lines)``: the ``<title>`` text, the first
     ``og:title`` value (both for the title fallback chain), and the
     ``key: value`` lines to emit. One string is emitted once however many tags
-    carry it: values are deduped case-insensitively across the whole allowlist,
-    with ``title`` most general of all, then allowlist order. Genuinely
-    differing values all appear — a page can legitimately carry both a
-    ``description:`` and an ``og:description:`` line.
+    carry it: values are deduped exactly (after whitespace collapse) across the
+    whole allowlist, with ``title`` most general of all, then allowlist order.
+    Genuinely differing values all appear — a page can legitimately carry both
+    a ``description:`` and an ``og:description:`` line, and a case difference
+    is genuine: the quote gate collapses whitespace but never case, so ``ACME``
+    and ``Acme`` are distinct quotable text.
     """
     title_el = tree.find(".//title")
     title_tag = _collapse_ws(title_el.text_content()) if title_el is not None else None
@@ -281,12 +283,12 @@ def _head_metadata(tree: HtmlElement) -> tuple[str | None, str | None, list[str]
     seen: set[str] = set()
     if title_tag:
         lines.append(f"title: {title_tag}")
-        seen.add(title_tag.casefold())
+        seen.add(title_tag)
     for key in _META_ALLOWLIST:
         for value in by_key.get(key, []):
-            if value.casefold() in seen:
+            if value in seen:
                 continue
-            seen.add(value.casefold())
+            seen.add(value)
             lines.append(f"{key}: {value}")
     return title_tag, og_title, lines
 
@@ -538,7 +540,15 @@ def _extract_html(html: str) -> ExtractedMeta:
         or None
     )
 
-    text = "\n".join(["---", *meta_lines, "---", "", body_md]).strip()
+    # A parseable but contentless document stores no text: bare "---\n---"
+    # scaffolding is semantically empty but truthy, which would defeat both the
+    # importer's text-is-mandatory gate and the backfill's never-blank guard.
+    # body_text stays "" — an empty body is a real, thin answer.
+    text = (
+        "\n".join(["---", *meta_lines, "---", "", body_md]).strip()
+        if meta_lines or body_md
+        else None
+    )
 
     return ExtractedMeta(
         title=title, last_updated=last_updated, text=text, body_text=body_md

@@ -585,6 +585,28 @@ def test_meta_dedup_prefers_most_general_key():
     assert "twitter:description:" not in text
 
 
+def test_meta_case_distinct_values_all_emitted():
+    # The quote gate collapses whitespace but never case, so a case difference
+    # is a genuine difference — both variants must be quotable.
+    html = (
+        "<html><head><title>ACME PINBALL</title>"
+        '<meta property="og:title" content="Acme Pinball"></head>'
+        "<body><p>x</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "title: ACME PINBALL" in text
+    assert "og:title: Acme Pinball" in text
+
+
+def test_contentless_page_stores_no_text():
+    # A parseable document with no metadata and an empty body must not store
+    # bare "---\n---" scaffolding: truthy-but-empty text would defeat the
+    # importer's text-is-mandatory gate and the backfill's never-blank guard.
+    meta = _extract_html("<html><body></body></html>")
+    assert meta.text is None
+    assert meta.body_text == ""  # a real, thin body — not a missing one
+
+
 def test_meta_differing_values_all_emitted():
     html = (
         "<html><head>"

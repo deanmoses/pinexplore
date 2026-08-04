@@ -327,8 +327,10 @@ def init_schema(con: sqlite3.Connection) -> None:
     # hash lived in the same local file as the text it was meant to police, and
     # quote verification only needs to hold from patch authoring to patch commit,
     # not across the store's history. Drop it from pre-change caches.
+    # The safety copy for this drop was already taken by the single top-of-run
+    # backup above — a second call here could overwrite that pristine copy with
+    # a mid-migration state (the filename is second-resolution).
     if "text_sha" in fetches_cols:
-        _backup_before_destructive_migration()
         con.execute("ALTER TABLE fetches DROP COLUMN text_sha")
     con.commit()
 
