@@ -158,6 +158,10 @@ Intro text.
 - The **frontmatter** carries the `<title>` and an allowlist of `<head>` tags (`description`, `og:*`, `twitter:*`, `article:*`, …) as `key: value` lines. The delimiters are always present, even when no metadata was found.
 - The **body** is the `<body>` as markdown, block-level only. Page headings keep their **source** ATX levels (an `<h1>` is `#`) with nothing above them to outrank, so the document is well-formed markdown and `"in the Specifications section"` is a locator the text itself supports. Inline markup (`<a>`, `<b>`, `<em>`…) is deliberately not converted — its markers would land inside quotable spans — so the conversion never introduces `**` or `[text](url)` of its own. Table rows keep their pipes with empty cells preserved (`| Cavalier | 1979 | | … |` — the gap says "no month recorded"). Scripts, styles, SVG internals, HTML comments, JSON-LD and recognized cookie-consent widgets never reach the text; `<noscript>`, `<template>` and dropdown option text do.
 
+The markdown's sections (`#`, `##`, …) are the page's own h1–h6 tags, and a section runs until the next heading at the same or higher level — so a parent section contains its subsections, and `outline()`'s char count for a parent includes its children's. Site chrome — header, footer, nav — often has no heading of its own, so like any other unheaded text it belongs to the section above it, or to no section at all when nothing precedes it. A locator naming a page's first or last section is the one worth a second look, since that is where chrome lands.
+
+`metadata` and `body` are addressable through `section()` as well, but they are **frames this assembly adds**, not parts of the page: every HTML page has both, and a PDF, video transcript or OCR'd image has neither.
+
 The `title` column is `og:title` → `<title>` → first `<h1>`, stored verbatim — no site-suffix stripping, because no separator heuristic can tell `… | Jersey Jack Pinball` from `Sirmo : Magic Screen`, where the separator joins two halves of one real title.
 
 After an extraction change, run `web_backfill.py` to re-derive `text`/`title` for every cached HTML page from its stored blob (skipping `manual` and other non-`html` text sources, and never blanking a non-empty row).
@@ -231,7 +235,7 @@ $ cache quote https://en.wikipedia.org/wiki/Taito_of_Brazil "Mecatronics"
 - Space Shuttle (nearly identical to Space Shuttle (Williams Electronics), made under the label 'Mecatronics')
 ```
 
-The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name.
+The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name — and on a page whose markup has no headings at all, nothing is labelled.
 
 The label names the **match**, never the widened window around it, so **a hit never leaves the section it names** and any span you lift out of one can carry that hit's locator — `--context` changes how much you see, never where the evidence is said to live. The cost is that a large `--context` gives you less than ±N lines near a section edge; `section()` shows the whole block when that's what you want. The label is also only as good as the page's own markup: a site whose tab labels are real `<h2>`s yields locators like `$7,995` — faithful to the document, and no more wrong than the outline it comes from.
 
