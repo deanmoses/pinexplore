@@ -30,7 +30,7 @@ $ uv run python scripts/web_scrape/web_cache.py search "haggis closed"
 url: https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation
 title: HAGGIS PINBALL IN LIQUIDATION
 last_updated: 2024-07-18 ⬅️ the page's own stated date.  Not the fetch date.
-snippet: … from Damian or [Haggis] Pinball. Today the company [closed] their … ⬅️ `[bracketed]` is a matched search term
+snippet: … from Damian or [Haggis] Pinball. Today the company [closed] their social media … ⬅️ `[bracketed]` is a matched search term
 
 url: https://www.pinballnews.com/site/2020/01/18/2019-review-of-the-year
 title: 2019 REVIEW OF THE YEAR
@@ -45,7 +45,7 @@ $ uv run python scripts/web_scrape/web_cache.py quote \
     https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation \
     "creditors"
 [Welcome to Pinball News – First & Free]
-The appointment of Cathro & Partners as liquidators spells the end of Haggis Pinball, as any remaining assets are sold in an attempt to raise money for the creditors.
+The appointment of Cathro & Partners as liquidators spells the end of Haggis Pinball, as any remaining assets are sold in an attempt to raise money for creditors of the company.
 ```
 
 A **verbatim substring** of the span becomes the `quote` of a cite in a data patch (authored in flippatch), and the `[bracketed]` label becomes its `locator`:
@@ -53,7 +53,7 @@ A **verbatim substring** of the span becomes the `quote` of a cite in a data pat
 ```yaml
 cite:
   ref: https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation
-  quote: "any remaining assets are sold in an attempt to raise money for the creditors"
+  quote: "any remaining assets are sold in an attempt to raise money for creditors of the company"
   locator: in the Welcome to Pinball News – First & Free section
 ```
 
@@ -171,7 +171,7 @@ After an extraction change, run `web_backfill.py` to re-derive `text`/`title` fo
 The `have` command answers "which of these N sources am I already holding, and which still need fetching?":
 
 ```console
-$ cache have --from-file sources.tsv
+$ uv run python scripts/web_scrape/web_cache.py have --from-file sources.tsv
 cached   https://americanpinball.com/houdini/  9324 chars  html  rendered
 cached   https://www.kineticist.com/pinball-machines/eight-ball-fury-2024  5138 chars  html
          ↳ stored as https://www.kineticist.com/games/pinball/eight-ball-fury-2024 (redirected)
@@ -181,24 +181,26 @@ MISSING  https://turnerpinball.com/games/yukon-yeti/
 
 A URL counts as held if it is cached under its normalized form **or** as the `raw_url` of a page that redirected somewhere else — and that second case is why this is a helper rather than a loop you write inline. **8% of the current corpus lives under a different address than the one requested** (a path migration, a canonical redirect), so a hand-rolled `get()` loop calls those missing and sends the campaign off to refetch pages it already has. The alias is matched normalized, like every other lookup here, so a trailing slash or odd host casing in your source list still resolves. It is the **most recent** fetch, though, so a page refetched through its canonical address stops resolving under the old one — at worst one redundant polite refetch.
 
-`--missing` prints just the uncached entries — the **source line verbatim**, query column included, so the fetch that results still records the search intent the campaign wrote down. That output is itself a valid `web_fetch.py --from-file` list, so the miss list feeds straight back into the fetch that fixes it:
+It reads the same `url<TAB>query` TSV `web_fetch.py --from-file` takes, so one source list drives both steps. To fill the gaps, hand that same list to the fetcher — it skips what it already holds, so there is no miss list to pass along:
 
 ```bash
-cache have --from-file sources.tsv --missing > todo.tsv
-uv run python scripts/web_scrape/web_fetch.py --from-file todo.tsv
+uv run python scripts/web_scrape/web_fetch.py --from-file sources.tsv --max-age 99999
 ```
 
-A URL that doesn't parse is reported as `INVALID` and kept out of the miss list, because it was never looked up. One malformed entry never aborts the run — this is a bulk read over a hand-written list, and it must not cost the answer for the other sixty.
+The fetcher skips on **freshness**, not presence — `--max-age` defaults to 30 days, so without a wide window it will also re-fetch anything older than that. `have` ignores age entirely, because a page cached two years ago is still evidence you hold.
 
-The tally goes to stderr and the exit status is non-zero when anything is missing or unparseable, so `have` also works as a precondition in a script. `have()` is a Python function too, returning one `{"asked", "page", "stored_url", "error"}` record per URL in the order asked.
+A URL that doesn't parse is reported as `INVALID` rather than missing, because it was never looked up. One malformed entry never aborts the run — this is a bulk read over a hand-written list, and it must not cost the answer for the other sixty.
+
+The tally goes to stderr and the exit status is non-zero when anything is missing or unparseable, so `have` also works as a precondition in a script. For a programmatic answer use `have()` in Python, which returns one `{"asked", "page", "stored_url", "error"}` record per URL in the order asked — the CLI prints for people, the functions return data, as with every other read here.
 
 ### The escalation ladder
 
 The reads (`scripts/web_scrape/web_cache.py`) are an **escalation ladder** — each rung reads more of a page than the one before, so reach for the next rung only when the previous one wasn't enough. Whole-document text is long-tailed (the median page is ~6K chars, but a comment-heavy page can run 60x that), and the needle-driven reads cost the same however big the page is:
 
 ```bash
-cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # a function: zsh won't
-                                           # word-split a CACHE="…" variable
+cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # shorthand for this
+                                           # block only — and a function, because zsh
+                                           # won't word-split a CACHE="…" variable
 cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, snippet
 cache quote <url> "2024"                   # 2. sentences containing a needle
 cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
@@ -219,7 +221,7 @@ url: https://www.ipdb.org/images/4583/image-3.jpg
 title: Mecatronics Space Shuttle flyer
 type: image
 text_source: manual
-snippet: [MECATRONICS] SPACE SHUTTLE … "O MELHOR FLIPPER JAMAIS FABRICADO …
+snippet: [MECATRONICS] SPACE SHUTTLE SPACE SHUTTLE United States “O MELHOR FLIPPER JAMAIS FABRICADO …
 
 url: https://en.wikipedia.org/wiki/Taito_of_Brazil
 title: Taito of Brazil - Wikipedia
@@ -230,9 +232,10 @@ snippet: … made under the label '[Mecatronics]') - Speed Test …
 `quote` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Cite](#cite)). It labels each hit with the section the span sits in, so **one command produces a whole cite** — the `quote` and the `locator` — instead of quoting first and then hunting for where the words were:
 
 ```console
-$ cache quote https://en.wikipedia.org/wiki/Taito_of_Brazil "Mecatronics"
+$ uv run python scripts/web_scrape/web_cache.py quote \
+    https://en.wikipedia.org/wiki/Taito_of_Brazil "Mecatronics"
 [Solid state electronics]
-- Space Shuttle (nearly identical to Space Shuttle (Williams Electronics), made under the label 'Mecatronics')
+- Space Shuttle (nearly identical to Space Shuttle (Williams Electronics, 1984) made under the label 'Mecatronics')
 ```
 
 The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name — and on a page whose markup has no headings at all, nothing is labelled.

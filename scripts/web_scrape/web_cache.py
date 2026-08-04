@@ -485,16 +485,32 @@ def get_by_raw_url(
     """Most-recently-fetched page whose ``raw_url`` (as-requested, pre-redirect)
     matches. Lets the fetcher freshness-skip a URL that 301s to a canonical
     address — the row is keyed by the post-redirect URL, but raw_url holds what
-    was requested. Exact-string match on the requested form (not normalized)."""
+    was requested.
+
+    Matched on the **normalized** form, like every other lookup here: a source
+    list that spells the old address with a trailing slash or different host
+    casing names the same page, and comparing raw text would send the fetcher
+    back over the network for something already held. That means a scan rather
+    than an indexed equality — normalization happens in Python — but it runs
+    only when a URL missed under its own key, and it reads two columns rather
+    than whole rows so the corpus's text stays on disk.
+    """
     own = con is None
     con = con or connect(read_only=True)
     try:
-        row = con.execute(
-            "SELECT * FROM pages WHERE raw_url = ? "
-            "ORDER BY last_fetched_at DESC LIMIT 1",
-            (raw_url,),
-        ).fetchone()
-        return cast("PageRow", dict(row)) if row else None
+        target = normalize_url(raw_url)
+        for row in con.execute(
+            "SELECT url, raw_url FROM pages WHERE raw_url IS NOT NULL "
+            "ORDER BY last_fetched_at DESC"
+        ):
+            try:
+                if normalize_url(row["raw_url"]) == target:
+                    return get(row["url"], con=con)
+            except ValueError:
+                # A stored address that no longer parses contributes no alias
+                # rather than breaking the lookup.
+                continue
+        return None
     finally:
         if own:
             con.close()
@@ -1148,59 +1164,41 @@ def _cmd_section(url: str, heading: str) -> int:
     return 0
 
 
-def _read_url_list(path: str) -> list[tuple[str, str]]:
-    """``(url, source line)`` pairs from a file. Blank and ``#`` lines skipped.
+def _read_url_list(path: str) -> list[str]:
+    """URLs from a file. Blank and ``#`` lines skipped.
 
-    The same shape ``web_fetch.py --from-file`` reads — its ``url<TAB>query``
-    TSV — so one list drives both: check what you hold, fetch what you don't.
-    The whole line is kept because the query column is the search intent, which
-    ``web_fetch`` logs as provenance; re-emitting a miss as a bare URL would
-    fetch the same page while dropping the record of why it was wanted.
+    Reads the same file ``web_fetch.py --from-file`` takes — its
+    ``url<TAB>query`` TSV — taking the URL column, so one list drives both:
+    check what you hold, then fetch what you don't.
     """
-    pairs: list[tuple[str, str]] = []
+    urls: list[str] = []
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         url = line.partition("\t")[0].strip()
         if url:
-            pairs.append((url, line))
-    return pairs
+            urls.append(url)
+    return urls
 
 
-def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int:
-    # A URL given on the command line has no query column, so it stands as its
-    # own source line.
-    sources: list[tuple[str, str]] = [(u, u) for u in urls]
+def _cmd_have(urls: list[str], from_file: str | None) -> int:
     if from_file:
         try:
-            sources += _read_url_list(from_file)
+            urls = urls + _read_url_list(from_file)
         except OSError as exc:
             # A traceback would bury which path was wrong.
             print(f"cannot read {from_file}: {exc.strerror or exc}", file=sys.stderr)
             return 2
-    if not sources:
+    if not urls:
         print("no URLs given (pass URLs or --from-file)", file=sys.stderr)
         return 2
-    holdings = have([u for u, _ in sources])
+    holdings = have(urls)
     # "No answer" is not "not cached": these entries couldn't be looked up, so
-    # they are called out rather than swept into the miss list, where they
-    # would read as a considered verdict that the page isn't held.
+    # they are counted apart rather than tallied as absent, which would read as
+    # a considered verdict that the page isn't held.
     invalid = [h for h in holdings if h["error"]]
-    missing = [
-        (h, line)
-        for h, (_, line) in zip(holdings, sources, strict=True)
-        if h["page"] is None and not h["error"]
-    ]
-    if missing_only:
-        for _, line in missing:
-            print(line)
-        for h in invalid:
-            print(
-                f"skipping unparseable URL: {h['asked']} ({h['error']})",
-                file=sys.stderr,
-            )
-        return 1 if missing or invalid else 0
+    missing = [h for h in holdings if h["page"] is None and not h["error"]]
     for h in holdings:
         page = h["page"]
         if h["error"]:
@@ -1303,13 +1301,6 @@ def main(argv: list[str] | None = None) -> int:
     p_have.add_argument(
         "--from-file", help="file of URLs, one per line (web_fetch's TSV works too)"
     )
-    p_have.add_argument(
-        "--missing",
-        action="store_true",
-        help="print only the uncached entries, each as its source line with the "
-        "query column intact — feeds web_fetch.py --from-file",
-    )
-
     p_get = sub.add_parser("get", help="full page record (text on stdout)")
     p_get.add_argument("url")
 
@@ -1324,7 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
         case "section":
             return _cmd_section(args.url, args.heading)
         case "have":
-            return _cmd_have(args.urls, args.from_file, args.missing)
+            return _cmd_have(args.urls, args.from_file)
         case "get":
             return _cmd_get(args.url)
     raise AssertionError(f"unhandled command {args.command}")

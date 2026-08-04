@@ -125,6 +125,25 @@ def test_get_by_raw_url_finds_redirect_origin(cache):
     assert wc.get_by_raw_url("http://absent.com", con=cache) is None
 
 
+def test_get_by_raw_url_matches_the_normalized_alias(cache):
+    # The fetcher's freshness skip runs through this, so an exact-string match
+    # would send it back over the network for a page already held whenever a
+    # source list spells the old address a little differently.
+    final = wc.normalize_url("https://site.com/new")
+    _seed(cache, url=final, raw_url="https://site.com/old/path")
+    for spelling in [
+        "https://site.com/old/path/",
+        "https://SITE.com/old/path",
+        "https://site.com:443/old/path",
+        "https://site.com/old/path?utm_source=news",
+    ]:
+        hit = wc.get_by_raw_url(spelling, con=cache)
+        assert hit is not None, spelling
+        assert hit["url"] == final
+    # A genuinely different page still misses.
+    assert wc.get_by_raw_url("https://site.com/other", con=cache) is None
+
+
 # --------------------------------------------------------------------------- #
 # upsert conflict behavior
 # --------------------------------------------------------------------------- #
@@ -934,13 +953,6 @@ def test_cli_have_marks_invalid_apart_from_missing(cache, capsys, tmp_path):
     assert "MISSING  https://absent.example/b" in captured.out
     assert "1/3 cached, 1 unparseable" in captured.err
 
-    # An unparseable URL never reaches the miss list: the fetcher can't take it
-    # either, so emitting it would just turn a bad line into a failed fetch.
-    assert wc.main(["have", "--from-file", str(listing), "--missing"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == "https://absent.example/b\tquery three\n"
-    assert "unparseable URL" in captured.err
-
 
 def test_have_builds_the_alias_index_only_on_a_miss(cache, monkeypatch):
     held = wc.normalize_url("https://held.example/a")
@@ -982,21 +994,22 @@ def test_cli_have_exits_zero_when_everything_is_held(cache, capsys):
     assert "MISSING" not in capsys.readouterr().out
 
 
-def test_cli_have_missing_prints_bare_urls_for_web_fetch(cache, capsys, tmp_path):
+def test_cli_have_reads_web_fetch_s_own_tsv(cache, capsys, tmp_path):
     held = wc.normalize_url("https://held.example/a")
     _seed(cache, url=held, text="body")
-    listing = tmp_path / "urls.txt"
-    # Comments and a TSV query column, exactly as web_fetch --from-file takes.
+    listing = tmp_path / "urls.tsv"
+    # Comments, blanks and a query column, exactly as web_fetch --from-file
+    # takes — so one source list drives both checking and fetching.
     listing.write_text(
         f"# campaign sources\n{held}\thow it works\n\n"
         "https://absent.example/b\twhy it matters\n",
         encoding="utf-8",
     )
-    assert wc.main(["have", "--from-file", str(listing), "--missing"]) == 1
-    # The source line verbatim, so the output is a valid web_fetch --from-file
-    # that still carries the search intent the campaign recorded — a bare URL
-    # would refetch the same page while dropping its provenance.
-    assert capsys.readouterr().out == "https://absent.example/b\twhy it matters\n"
+    assert wc.main(["have", "--from-file", str(listing)]) == 1
+    out = capsys.readouterr().out
+    assert f"cached   {held}" in out
+    assert "MISSING  https://absent.example/b" in out
+    assert "# campaign sources" not in out
 
 
 def test_cli_have_needs_urls(cache, capsys):
