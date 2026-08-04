@@ -38,23 +38,23 @@ last_updated: 2020-01-18
 snippet: … [HAGGIS] PINBALL … may have its roots in Australia …
 ```
 
-Pull the quotable span with its surroundings (`--context 1` widens each hit to a line either side):
+Pull the quotable span, labelled with the section it sits in (`--context 1` widens each hit to a line either side):
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py quote \
     https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation \
-    "ceased trading" --context 1
-# HAGGIS PINBALL IN LIQUIDATION
-Australian pinball manufacturer Haggis Pinball has ceased trading and appointed liquidators.
-The business failed to secure financing to continue its operations.
+    "creditors"
+[Welcome to Pinball News – First & Free]
+The appointment of Cathro & Partners as liquidators spells the end of Haggis Pinball, as any remaining assets are sold in an attempt to raise money for the creditors.
 ```
 
-A **verbatim substring** of it becomes the `quote` of a cite in a data patch (authored in flippatch):
+A **verbatim substring** of the span becomes the `quote` of a cite in a data patch (authored in flippatch), and the `[bracketed]` label becomes its `locator`:
 
 ```yaml
 cite:
   ref: https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation
-  quote: "Haggis Pinball has ceased trading and appointed liquidators."
+  quote: "any remaining assets are sold in an attempt to raise money for the creditors"
+  locator: in the Welcome to Pinball News – First & Free section
 ```
 
 In Flippatch, `make verify-quotes` then confirms the quote against the cached text before the patch ships. Everything below is detail on the three steps:
@@ -162,22 +162,50 @@ The `title` column is `og:title` → `<title>` → first `<h1>`, stored verbatim
 
 After an extraction change, run `web_backfill.py` to re-derive `text`/`title` for every cached HTML page from its stored blob (skipping `manual` and other non-`html` text sources, and never blanking a non-empty row).
 
+### Determining what the cache already holds
+
+Planning a data patch campaign starts with this question: "which of these N sources am I already holding, and which still need fetching?". `have` answers this:
+
+```console
+$ cache have --from-file sources.tsv
+cached   https://americanpinball.com/houdini/  9324 chars  html  rendered
+cached   https://www.kineticist.com/pinball-machines/eight-ball-fury-2024  5138 chars  html
+         ↳ stored as https://www.kineticist.com/games/pinball/eight-ball-fury-2024 (redirected)
+MISSING  https://turnerpinball.com/games/yukon-yeti/
+2/3 cached
+```
+
+A URL counts as held if it is cached under its normalized form **or** as the `raw_url` of a page that redirected somewhere else — and that second case is why this is a helper rather than a loop you write inline. **8% of the current corpus lives under a different address than the one requested** (a path migration, a canonical redirect), so a hand-rolled `get()` loop calls those missing and sends the campaign off to refetch pages it already has. The alias is matched normalized, like every other lookup here, so a trailing slash or odd host casing in your source list still resolves. It is the **most recent** fetch, though, so a page refetched through its canonical address stops resolving under the old one — at worst one redundant polite refetch.
+
+`--missing` prints just the uncached entries — the **source line verbatim**, query column included, so the fetch that results still records the search intent the campaign wrote down. That output is itself a valid `web_fetch.py --from-file` list, so the miss list feeds straight back into the fetch that fixes it:
+
+```bash
+cache have --from-file sources.tsv --missing > todo.tsv
+uv run python scripts/web_scrape/web_fetch.py --from-file todo.tsv
+```
+
+A URL that doesn't parse is reported as `INVALID` and kept out of the miss list, because it was never looked up. One malformed entry never aborts the run — this is a bulk read over a hand-written list, and it must not cost the answer for the other sixty.
+
+The tally goes to stderr and the exit status is non-zero when anything is missing or unparseable, so `have` also works as a precondition in a script. `have()` is a Python function too, returning one `{"asked", "page", "stored_url", "error"}` record per URL in the order asked.
+
 ### The escalation ladder
 
 The reads (`scripts/web_scrape/web_cache.py`) are an **escalation ladder** — each rung reads more of a page than the one before, so reach for the next rung only when the previous one wasn't enough. Whole-document text is long-tailed (the median page is ~6K chars, but a comment-heavy page can run 60x that), and the needle-driven reads cost the same however big the page is:
 
 ```bash
-CACHE="uv run python scripts/web_scrape/web_cache.py"
-$CACHE search "haggis closed"              # 1. FTS5 BM25-ranked: url, title, snippet
-$CACHE quote <url> "2024"                  # 2. sentences containing a needle
-$CACHE quote <url> "2024" --context 3      #    …each hit widened to ±3 lines
-$CACHE outline <url>                       # 3. heading tree + per-section char counts
-$CACHE section <url> "Specifications"      # 4. one section's block, not the page
-$CACHE get <url>                           # 5. full page record — the last resort
+cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # a function: zsh won't
+                                           # word-split a CACHE="…" variable
+cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, snippet
+cache quote <url> "2024"                   # 2. sentences containing a needle
+cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
+cache outline <url>                        # 3. heading tree + per-section char counts
+cache outline <url> --min-chars 20         #    …hiding blocks too small to be content
+cache section <url> "Specifications"       # 4. one section's block, not the page
+cache get <url>                            # 5. full page record — the last resort
                                            #    (text on stdout, row fields on stderr)
 ```
 
-The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly.
+The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section attached (`{"text": …, "heading": …}`); `quote()` stays the plain-span form the gate consumes.
 
 `search` spans **every cached type** — one index over web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its text was derived (`text_source:`), so you know to weigh (and for `ocr`, review) before quoting; web pages are the unlabeled common case:
 
@@ -195,7 +223,23 @@ last_updated: 2026-06-15
 snippet: … made under the label '[Mecatronics]') - Speed Test …
 ```
 
-`quote()` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Cite](#cite)). `outline()` tells you where a long page's weight sits ("intro 2K, machine list 4K, 41 comments 32K") for a couple hundred chars; `section()` then pulls just the block you need, and a quote found that way carries its locator for free (`"in the Specifications section"`). If a heading matches more than once, `section()` returns every matching block — ambiguity surfaces rather than silently picking one.
+`quote` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` (see [Cite](#cite)). It labels each hit with the section the span sits in, so **one command produces a whole cite** — the `quote` and the `locator` — instead of quoting first and then hunting for where the words were:
+
+```console
+$ cache quote https://en.wikipedia.org/wiki/Taito_of_Brazil "Mecatronics"
+[Solid state electronics]
+- Space Shuttle (nearly identical to Space Shuttle (Williams Electronics), made under the label 'Mecatronics')
+```
+
+The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name.
+
+The label names the **match**, never the widened window around it, so **a hit never leaves the section it names** and any span you lift out of one can carry that hit's locator — `--context` changes how much you see, never where the evidence is said to live. The cost is that a large `--context` gives you less than ±N lines near a section edge; `section()` shows the whole block when that's what you want. The label is also only as good as the page's own markup: a site whose tab labels are real `<h2>`s yields locators like `$7,995` — faithful to the document, and no more wrong than the outline it comes from.
+
+`outline()` tells you where a long page's weight sits ("intro 2K, machine list 4K, 41 comments 32K") for a couple hundred chars; `section()` then pulls just the block you need. If a heading matches more than once, `section()` returns every matching block — ambiguity surfaces rather than silently picking one — and `outline()` correspondingly collapses that name to one row carrying `x2` and the summed size.
+
+That collapse is what keeps the map usable on page-builder sites, where the meaningful labels are styled `<div>`s and the real `<h2>`s are UI chrome. A live product page came back with **100 rows, 38 after collapsing** — `RETIRED` twelve times, edition panels repeated once per responsive variant. Repeats collapse only when they sit in the same place in the tree (same ancestors, same level), so a name that recurs under different parents stays several rows. `--min-chars N` trims further by hiding blocks too small to be content (38 → 29 on that page), and says on stderr how many it withheld.
+
+`section` matches a heading **exactly**, and separates the three reasons a name comes back empty instead of letting all three read as "not on this page": a heading that merely contains the name (`did you mean: 100th Anniversary`), a name that is only body text (`not a heading; appears as text in section(s): Additional Features` — the page-builder shape again), or genuine absence, which stays silent.
 
 ### Extracting everything a page knows
 
@@ -253,7 +297,8 @@ ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
 
 scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert,
-                             search() / quote() / outline() / section() / get()
+                             have() / search() / quote() / quote_hits() /
+                             outline() / section() / get()
   web_http.py                transport: GET, content-type gate, wire-safe URLs
   web_video.py               transport: YouTube caption tracks via yt-dlp
   content_types/             one handler per document type (the registry)

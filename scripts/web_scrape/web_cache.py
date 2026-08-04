@@ -26,14 +26,21 @@ Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
     search(term)          FTS5 BM25-ranked pages (url, title, snippet)
     quote(url, needle)    sentence(s) in a page's text containing a needle;
-                          context=N widens each hit to ±N lines
+                          context=N widens each hit to ±N lines.
+                          quote_hits() is the same read with each hit's
+                          enclosing heading, so one call yields a whole cite
     outline(url)          the page's heading tree with per-section char counts
     section(url, heading) one heading's block(s), without the whole page
     get(url)              the full page record — the last resort
 
-The same five reads are also a CLI (``python web_cache.py search|quote|
-outline|section|get``), so pulling a quote from a shell is one command just
-like caching a page is.
+Plus one read that isn't a rung, because it asks about the corpus rather than
+about a page:
+    have(urls)            which of these URLs are already cached — the
+                          planning question, before any of the above
+
+These are also a CLI (``python web_cache.py search|quote|outline|section|
+have|get``), so pulling a quote from a shell is one command just like caching
+a page is.
 """
 
 from __future__ import annotations
@@ -545,46 +552,8 @@ def sentences(text: str | None) -> list[str]:
     return [s.strip() for s in _SENTENCE_SPLIT.split(text or "") if s.strip()]
 
 
-def quote(
-    url: str,
-    needle: str,
-    *,
-    context: int = 0,
-    con: sqlite3.Connection | None = None,
-) -> list[str]:
-    """Text in a page containing ``needle`` (case-insensitive), document order.
-
-    With ``context=0`` (the default): the matching sentences, one per hit — the
-    starting point for a verbatim ``cite.quote`` in a data patch. The author
-    still confirms wording against the stored raw blob before shipping.
-
-    With ``context=N``: each hit widened to ±N surrounding lines, so confirming
-    a span's surroundings rarely needs the whole page. Overlapping windows
-    merge and duplicate matches collapse; results stay in document order — no
-    reordering toward "better-looking" matches, which would conflict with the
-    windows and buy skim-comfort at the cost of a confusing contract.
-    """
-    rec = get(url, con=con)
-    if not rec or not rec.get("text"):
-        return []
-    low = needle.lower()
-    if context <= 0:
-        return [s for s in sentences(rec["text"]) if low in s.lower()]
-    lines = (rec["text"] or "").split("\n")
-    windows: list[tuple[int, int]] = []
-    for i, line in enumerate(lines):
-        if low not in line.lower():
-            continue
-        start, end = max(0, i - context), min(len(lines), i + context + 1)
-        if windows and start <= windows[-1][1]:
-            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
-        else:
-            windows.append((start, end))
-    return ["\n".join(lines[s:e]).strip() for s, e in windows]
-
-
 # --------------------------------------------------------------------------- #
-# Structural reads (outline / section)
+# Document structure, and the reads built on it (quote / outline / section)
 # --------------------------------------------------------------------------- #
 
 # An ATX heading line as the HTML extractor emits them: 1-6 #'s, a space, text.
@@ -613,6 +582,14 @@ class OutlineEntry(TypedDict):
     level: int
     heading: str
     chars: int
+    count: int  # how many blocks this name opens (>1 on a repeated heading)
+
+
+class QuoteHit(TypedDict):
+    """One hit from ``quote_hits()``: a span and the section it sits in."""
+
+    text: str
+    heading: str | None  # enclosing section name, or None above the first heading
 
 
 def _parse_doc(text: str) -> _Doc:
@@ -674,6 +651,157 @@ def _heading_block(doc: _Doc, k: int) -> str:
     return "\n".join(doc.lines[h.line_idx : end]).strip()
 
 
+class _Section(NamedTuple):
+    """The section a line sits in: what to call it, and where it ends."""
+
+    # The opening heading's line index — identity, so two same-named sections
+    # stay distinct. -1 is the frontmatter, -2 the prose above the first heading.
+    id: int
+    name: str | None
+    start: int  # first line of the section (its heading line, when it has one)
+    end: int  # one past its last line
+
+
+def _enclosing_section(doc: _Doc, line_idx: int) -> _Section:
+    """The section ``line_idx`` sits in, and the lines it spans.
+
+    ``name`` is a name ``section()`` accepts, so a hit's locator is also the
+    way to pull its surroundings: the nearest heading at or above the line, or
+    ``"metadata"`` inside the frontmatter. A page whose text opens with prose
+    before its first heading yields None for that prose — there is no heading
+    to name, and ``"body"`` would claim a precision the page does not have (it
+    spans every other section too).
+
+    ``start``/``end`` are the same span ``section()`` would return, so a caller
+    can hold a quote inside the section it is about to be labelled with.
+    """
+    if doc.fm_close is not None and line_idx <= doc.fm_close:
+        # Inside the delimiters, not around them — the same lines
+        # `section("metadata")` returns, so a hit here is contained by the
+        # block it names instead of carrying a stray `---`.
+        return _Section(-1, "metadata", 1, doc.fm_close)
+    # Headings are in ascending line order, so the last one at or above the
+    # line is the first such heading scanning backwards.
+    for k in range(len(doc.headings) - 1, -1, -1):
+        h = doc.headings[k]
+        if h.line_idx <= line_idx:
+            end = next(
+                (h2.line_idx for h2 in doc.headings[k + 1 :] if h2.level <= h.level),
+                len(doc.lines),
+            )
+            return _Section(h.line_idx, h.text, h.line_idx, end)
+    body_start = doc.fm_close + 1 if doc.fm_close is not None else 0
+    first_heading = doc.headings[0].line_idx if doc.headings else len(doc.lines)
+    return _Section(-2, None, body_start, first_heading)
+
+
+def quote_hits(
+    url: str,
+    needle: str,
+    *,
+    context: int = 0,
+    con: sqlite3.Connection | None = None,
+) -> list[QuoteHit]:
+    """``quote()`` with each hit's enclosing heading — a cite in one call.
+
+    A patch cite needs a verbatim ``quote`` **and** a ``locator`` saying where
+    it sits. Plain ``quote()`` answers only the first, which left an author
+    running outline/section afterwards to rediscover a position this read
+    already knew. Each hit carries ``heading``: the nearest heading at or above
+    it (or ``"metadata"`` inside the frontmatter, None above the first
+    heading), ready to become ``locator: in the <x> section`` and to pass
+    straight back to ``section()``.
+
+    The name is the match's own, so it does not move when ``context`` widens
+    the window around it — a locator describes the evidence, not the viewport.
+    A hit never leaves the section it names: padding is clipped to the
+    section's bounds and windows merge only within one, so every word on show
+    is under the heading it is labelled with, and any span you lift out of a
+    hit can carry that hit's locator.
+
+    The heading is only as good as the page's own markup. A page-builder site
+    whose tab labels are real ``<h2>``s yields locators like ``$7,995``;
+    faithful to the document, and no more wrong than the outline it comes from.
+    """
+    rec = get(url, con=con)
+    if not rec or not rec.get("text"):
+        return []
+    doc = _parse_doc(rec["text"] or "")
+    low = needle.lower()
+    if context <= 0:
+        # Per-line, then per-sentence: identical spans to splitting the whole
+        # text at once (_SENTENCE_SPLIT breaks on \n+, so no sentence ever
+        # crosses a line) but each one keeps the line index its heading needs.
+        return [
+            QuoteHit(text=s, heading=_enclosing_section(doc, i).name)
+            for i, line in enumerate(doc.lines)
+            for s in sentences(line)
+            if low in s.lower()
+        ]
+    # Every hit stays inside one section, so its label is true of every word in
+    # it. Two things enforce that, and both are needed:
+    #
+    # Padding is clipped to the section's own bounds. Widening by ±N would
+    # otherwise spill across a heading, and any line of that spill could be
+    # quoted under a name it doesn't belong to. Clipping means a large
+    # `--context` yields less than ±N near a section edge; that is the honest
+    # answer — `section()` shows the whole block when you want it.
+    #
+    # And merging is confined to one section. Windows either side of a heading
+    # can abut exactly, and merged they would carry one name while holding
+    # evidence from two sections — so citing the far match would silently
+    # attribute it to the near one.
+    windows: list[tuple[int, int, int, int]] = []  # start, end, match line, section
+    for i, line in enumerate(doc.lines):
+        if low not in line.lower():
+            continue
+        sec = _enclosing_section(doc, i)
+        start = max(sec.start, i - context)
+        end = min(sec.end, i + context + 1)
+        if windows and start <= windows[-1][1] and sec.id == windows[-1][3]:
+            windows[-1] = (
+                windows[-1][0],
+                max(windows[-1][1], end),
+                windows[-1][2],
+                sec.id,
+            )
+        else:
+            windows.append((start, end, i, sec.id))
+    return [
+        QuoteHit(
+            text="\n".join(doc.lines[s:e]).strip(),
+            heading=_enclosing_section(doc, m).name,
+        )
+        for s, e, m, _ in windows
+    ]
+
+
+def quote(
+    url: str,
+    needle: str,
+    *,
+    context: int = 0,
+    con: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Text in a page containing ``needle`` (case-insensitive), document order.
+
+    With ``context=0`` (the default): the matching sentences, one per hit — the
+    starting point for a verbatim ``cite.quote`` in a data patch. The author
+    still confirms wording against the stored raw blob before shipping.
+
+    With ``context=N``: each hit widened to ±N surrounding lines, so confirming
+    a span's surroundings rarely needs the whole page. Overlapping windows
+    merge and duplicate matches collapse; results stay in document order — no
+    reordering toward "better-looking" matches, which would conflict with the
+    windows and buy skim-comfort at the cost of a confusing contract.
+
+    Just the spans. ``quote_hits()`` is the same read with each hit's enclosing
+    heading attached; this stays the plain-text form because it is what the
+    quote gate consumes — a verbatim span and nothing to strip back off.
+    """
+    return [h["text"] for h in quote_hits(url, needle, context=context, con=con)]
+
+
 def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntry]:
     """The page's heading tree with a per-section char count, document order.
 
@@ -684,6 +812,36 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     and ``body`` (everything after it). Each count is the size of the block
     ``section()`` would return for that name — subsections included, so a
     parent's count contains its children's. Pure read over ``pages.text``.
+
+    A name repeated **in the same place in the tree** — same ancestors, same
+    level — collapses to a single row carrying ``count`` and the summed size,
+    held at its first appearance. Page-builder sites make this the difference
+    between a map and a wall: a real product page came back with 98 headings,
+    35 distinct — ``RETIRED`` twelve times, an edition panel repeated for each
+    responsive variant. Nothing actionable is lost, because ``section()``
+    already answers a repeated name with *every* matching block; a duplicate's
+    position among its identical siblings was never something a caller could
+    act on separately.
+
+    Both halves of that key are load-bearing, though ``section()`` matches on
+    the bare name and ignores them:
+
+    - **The ancestor path**, because the same name under two different parents
+      is two different places. A manufacturer index repeating a ``back to top``
+      link under each maker would otherwise collapse to one row filed under the
+      first maker, asserting the others have none.
+    - **The level**, because a same-named heading one level down is *nested
+      inside* its parent's block. Merging those would count the same chars
+      twice and report a section larger than the page.
+
+    So a name that recurs across parents or levels stays several rows, and it
+    is their counts together that add up to what ``section()`` returns for it.
+
+    A repeat that **opens a subsection of its own** is never collapsed either.
+    The result is a flat list, so a row's parent is whatever heading precedes
+    it at a lower level; folding away a repeated parent would leave its
+    children stranded under whatever happened to be printed last. Keeping that
+    occurrence in place keeps every child under the parent it belongs to.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
@@ -692,13 +850,46 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     entries: list[OutlineEntry] = []
     meta_block, body_block = _metadata_block(doc), _body_block(doc)
     if meta_block is not None:
-        entries.append(OutlineEntry(level=0, heading="metadata", chars=len(meta_block)))
+        entries.append(
+            OutlineEntry(level=0, heading="metadata", chars=len(meta_block), count=1)
+        )
     if body_block is not None:
-        entries.append(OutlineEntry(level=0, heading="body", chars=len(body_block)))
-    entries.extend(
-        OutlineEntry(level=h.level, heading=h.text, chars=len(_heading_block(doc, k)))
-        for k, h in enumerate(doc.headings)
-    )
+        entries.append(
+            OutlineEntry(level=0, heading="body", chars=len(body_block), count=1)
+        )
+    # Collapse repeats of a name in the same place in the tree. Order is first
+    # appearance, so the tree still reads top-down. `stack` is the chain of
+    # still-open ancestors, making the key a full path — see the docstring for
+    # why the path and the level both belong in it.
+    seen: dict[tuple[tuple[tuple[int, str], ...], int, str], int] = {}
+    stack: list[_Heading] = []
+    for k, h in enumerate(doc.headings):
+        while stack and stack[-1].level >= h.level:
+            stack.pop()
+        # Ancestors carry their level, not just their name: two chains can spell
+        # the same names at different levels and still be different nodes.
+        key = (
+            tuple((a.level, a.text.casefold()) for a in stack),
+            h.level,
+            h.text.casefold(),
+        )
+        stack.append(h)
+        chars = len(_heading_block(doc, k))
+        # Descendants follow immediately in document order, so a deeper next
+        # heading is this occurrence's child. Such an occurrence holds its
+        # place; collapsing it would strand that child under whatever row was
+        # printed last.
+        opens_subsection = (
+            k + 1 < len(doc.headings) and doc.headings[k + 1].level > h.level
+        )
+        if key in seen and not opens_subsection:
+            entries[seen[key]]["chars"] += chars
+            entries[seen[key]]["count"] += 1
+            continue
+        seen[key] = len(entries)
+        entries.append(
+            OutlineEntry(level=h.level, heading=h.text, chars=chars, count=1)
+        )
     return entries
 
 
@@ -727,6 +918,108 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
         if h.text.casefold() == target
     )
     return blocks
+
+
+class Holding(TypedDict):
+    """What the cache holds for one requested URL — ``have()``'s answer."""
+
+    asked: RawUrl  # the URL as the caller wrote it
+    page: PageRow | None  # the stored row, or None if nothing is cached
+    stored_url: NormalizedUrl | None  # where it actually lives, when redirected
+    error: str | None  # why it couldn't be looked up at all (unparseable URL)
+
+
+def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding]:
+    """Which of ``urls`` the cache already holds, in the order asked.
+
+    The planning read: before a campaign, the question is which of N sources
+    are already in hand and which still need fetching — content-blind, so
+    ``search()`` can't answer it, and N-at-a-time, so ``get()`` alone means
+    re-writing the same loop each time.
+
+    A URL is held if it is cached under its normalized form **or** as the
+    ``raw_url`` of a page that redirected elsewhere; ``stored_url`` is set in
+    that second case. That fallback is why this belongs in the library: 8% of
+    the current corpus lives under a different address than the one requested
+    (a path migration, a canonical redirect), and a hand-rolled ``get()`` loop
+    reports those as missing — sending a campaign off to refetch pages it
+    already has, and planning around a gap that isn't there.
+
+    The alias is matched **normalized**, not by exact string, so a source list
+    that spells the old address with a trailing slash or different host casing
+    still resolves. Comparing raw text here would reintroduce, on the fallback
+    path, exactly the duplicate-identity problem ``normalize_url`` exists to
+    prevent.
+
+    The fallback is best-effort by construction: ``pages.raw_url`` holds the
+    address of the **most recent** fetch, so refetching a page through its
+    canonical URL (or through a second alias) replaces the first one, and a
+    lookup by the older address goes back to reporting missing. Making that
+    durable would mean a permanent alias table in the system-of-record, which
+    is a large change to buy a planning convenience — and the cost of the gap
+    is one redundant polite refetch, which is what happens without this helper
+    anyway. So this narrows the window rather than closing it.
+
+    A URL that doesn't parse gets a ``Holding`` carrying ``error`` rather than
+    raising: this is a bulk read over a hand-written list, and one malformed
+    line must not cost the answer for the other sixty. Such an entry is not
+    "missing" — missing means *looked up and not found*, and this one could not
+    be looked up at all. Reporting no answer as a negative answer is the
+    distinction worth keeping; callers should keep the two apart.
+
+    That is the only claim ``error`` makes. It is not a verdict on whether the
+    fetcher would accept the URL: an ``ftp://`` address or a host with a space
+    normalizes fine here and is reported plainly as uncached. Judging
+    fetchability is ``web_fetch``'s job, which it already does per-URL, and a
+    second opinion in the store would be one to keep in sync for no gain.
+    """
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        # One pass to index the aliases, rather than a scan per URL. Only the
+        # two key columns: the corpus's text would be megabytes for nothing.
+        # Newest first + setdefault, so when one requested address has
+        # redirected to different destinations over time the alias resolves to
+        # the current one, not to whatever order SQLite happened to return.
+        aliases: dict[NormalizedUrl, NormalizedUrl] = {}
+        for row in con.execute(
+            "SELECT url, raw_url FROM pages WHERE raw_url IS NOT NULL "
+            "ORDER BY last_fetched_at DESC"
+        ):
+            try:
+                aliases.setdefault(normalize_url(row["raw_url"]), row["url"])
+            except ValueError:
+                # A stored address that no longer parses must not take out
+                # every lookup in the batch; it just contributes no alias.
+                continue
+        holdings: list[Holding] = []
+        for asked in urls:
+            try:
+                page = get(asked, con=con)
+                stored_url = None
+                if page is None:
+                    # Not under its own key — but the fetcher may have followed
+                    # a redirect and filed it under the destination.
+                    target = aliases.get(normalize_url(asked))
+                    if target is not None:
+                        page = get(target, con=con)
+                        stored_url = target
+            except ValueError as exc:
+                # An unparseable URL is the caller's line to fix, and reporting
+                # it as "not cached" would be a lie that sends it to the
+                # fetcher. Isolate it: this is a bulk read, and one bad line in
+                # a campaign list must not cost the answer for the other sixty.
+                holdings.append(
+                    Holding(asked=asked, page=None, stored_url=None, error=str(exc))
+                )
+                continue
+            holdings.append(
+                Holding(asked=asked, page=page, stored_url=stored_url, error=None)
+            )
+        return holdings
+    finally:
+        if own:
+            con.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -787,24 +1080,75 @@ def _cmd_search(term: str, limit: int) -> int:
 
 def _cmd_quote(url: str, needle: str, context: int) -> int:
     _require_page(url)
-    matches = quote(url, needle, context=context)
-    if not matches:
+    hits = quote_hits(url, needle, context=context)
+    if not hits:
         print(f"no matches for {needle!r} in {url}", file=sys.stderr)
         return 1
-    print("\n\n".join(matches))
+    # The locator prints on stdout with its span, not on stderr like section's
+    # ambiguity note: a heading belongs to one hit, and the two streams give no
+    # ordering guarantee to pair them by. Nothing is lost — quote's output is a
+    # hit list, never a document, so `get`/`section` remain the pure-text reads.
+    for i, hit in enumerate(hits):
+        if i:
+            print()
+        if hit["heading"]:
+            print(f"[{hit['heading']}]")
+        print(hit["text"])
     return 0
 
 
-def _cmd_outline(url: str) -> int:
+def _cmd_outline(url: str, min_chars: int) -> int:
     _require_page(url)
     entries = outline(url)
     if not entries:
         print(f"no headings in {url}", file=sys.stderr)
         return 1
-    for entry in entries:
+    shown = [e for e in entries if e["chars"] >= min_chars]
+    for entry in shown:
         indent = "  " * entry["level"]
-        print(f"{indent}{entry['heading']}  [{entry['chars']} chars]")
+        repeat = f"  x{entry['count']}" if entry["count"] > 1 else ""
+        print(f"{indent}{entry['heading']}{repeat}  [{entry['chars']} chars]")
+    if len(shown) < len(entries):
+        # Say what was withheld rather than letting a filtered map read as the
+        # whole one.
+        print(
+            f"{len(entries) - len(shown)} headings under {min_chars} chars hidden "
+            f"(--min-chars 0 to show all)",
+            file=sys.stderr,
+        )
     return 0
+
+
+def _section_miss_hint(url: str, heading: str) -> str | None:
+    """Why ``section()`` missed, when the page can tell us — else None.
+
+    A miss has three very different causes, and undifferentiated they all read
+    as "not on this page", each costing a round trip to tell apart: the needle
+    names no heading but *is* part of one, it appears only as body text (a
+    styled div the extractor faithfully kept as prose — the common shape on
+    page-builder sites), or the page genuinely never says it.
+
+    Order matters. ``section()`` matches exactly, so a heading that merely
+    contains the needle is a near miss and must be reported as one; calling it
+    body text would be false.
+    """
+    target = heading.strip().casefold()
+    if not target:
+        # The empty string is inside every heading — hinting on it would recite
+        # the whole outline and say nothing.
+        return None
+    near = [e["heading"] for e in outline(url) if target in e["heading"].casefold()]
+    if near:
+        return (
+            f"headings match exactly, not by substring; did you mean: {', '.join(near)}"
+        )
+    # No heading contains it, so any hit below is necessarily body text.
+    where = dict.fromkeys(
+        h["heading"] for h in quote_hits(url, heading) if h["heading"]
+    )
+    if where:
+        return f"not a heading; appears as text in section(s): {', '.join(where)}"
+    return None
 
 
 def _cmd_section(url: str, heading: str) -> int:
@@ -812,12 +1156,103 @@ def _cmd_section(url: str, heading: str) -> int:
     blocks = section(url, heading)
     if not blocks:
         print(f"no section {heading!r} in {url}", file=sys.stderr)
+        hint = _section_miss_hint(url, heading)
+        if hint:
+            print(hint, file=sys.stderr)
         return 1
     if len(blocks) > 1:
         # The note goes to stderr so stdout stays pure page text.
         print(f"{len(blocks)} sections match {heading!r}", file=sys.stderr)
     print("\n\n".join(blocks))
     return 0
+
+
+def _read_url_list(path: str) -> list[tuple[str, str]]:
+    """``(url, source line)`` pairs from a file. Blank and ``#`` lines skipped.
+
+    Deliberately the same shape ``web_fetch.py --from-file`` reads — its
+    ``url<TAB>query`` TSV — so one list drives both: check what you hold, fetch
+    what you don't. The whole line is kept alongside the URL because the query
+    column is the **search intent**, which ``web_fetch`` logs against the fetch
+    as provenance. Emitting a bare URL for a miss would hand back a list that
+    fetches the same pages while silently dropping the record of why they were
+    wanted.
+    """
+    pairs: list[tuple[str, str]] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        url = line.partition("\t")[0].strip()
+        if url:
+            pairs.append((url, line))
+    return pairs
+
+
+def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int:
+    # (url to check, line to re-emit if it's missing). A URL given on the
+    # command line has no query column, so it stands for itself.
+    sources: list[tuple[str, str]] = [(u, u) for u in urls]
+    if from_file:
+        sources += _read_url_list(from_file)
+    if not sources:
+        print("no URLs given (pass URLs or --from-file)", file=sys.stderr)
+        return 2
+    holdings = have([u for u, _ in sources])
+    # "No answer" is not "not cached": these entries couldn't be looked up, so
+    # they are called out rather than swept into the miss list, where they
+    # would read as a considered verdict that the page isn't held.
+    invalid = [h for h in holdings if h["error"]]
+    missing = [
+        (h, line)
+        for h, (_, line) in zip(holdings, sources, strict=True)
+        if h["page"] is None and not h["error"]
+    ]
+    if missing_only:
+        # The source line verbatim, query column and all — this is meant to be
+        # redirected to a file and handed straight to `web_fetch.py
+        # --from-file`, and the fetch that results should carry the same search
+        # intent the campaign wrote down.
+        for _, line in missing:
+            print(line)
+        for h in invalid:
+            print(
+                f"skipping unparseable URL: {h['asked']} ({h['error']})",
+                file=sys.stderr,
+            )
+        return 1 if missing or invalid else 0
+    for h in holdings:
+        page = h["page"]
+        if h["error"]:
+            print(f"INVALID  {h['asked']}  ({h['error']})")
+            continue
+        if page is None:
+            print(f"MISSING  {h['asked']}")
+            continue
+        # Size in chars, because that is what a read of this page will cost.
+        facts = [f"{len(page['text'] or '')} chars"]
+        label = _TYPE_LABELS.get(page["content_type"] or "", page["content_type"])
+        facts.append(label or "html")
+        if page["text_source"] not in (None, "html"):
+            facts.append(page["text_source"] or "")
+        if page["rendered"]:
+            facts.append("rendered")
+        if page["imported"]:
+            facts.append("imported")
+        print(f"cached   {h['asked']}  {'  '.join(facts)}")
+        if h["stored_url"]:
+            # Say so rather than quietly reporting a hit under another address:
+            # the caller asked about one URL and is being answered about another.
+            print(f"         ↳ stored as {h['stored_url']} (redirected)")
+    # stdout is block-buffered when redirected while stderr is not, so the tally
+    # would otherwise print above the list it is summarizing.
+    sys.stdout.flush()
+    cached = len(holdings) - len(missing) - len(invalid)
+    tally = f"{cached}/{len(holdings)} cached"
+    if invalid:
+        tally += f", {len(invalid)} unparseable"
+    print(tally, file=sys.stderr)
+    return 1 if missing or invalid else 0
 
 
 def _cmd_get(url: str) -> int:
@@ -860,10 +1295,27 @@ def main(argv: list[str] | None = None) -> int:
 
     p_outline = sub.add_parser("outline", help="heading tree with section sizes")
     p_outline.add_argument("url")
+    p_outline.add_argument(
+        "--min-chars",
+        type=int,
+        default=0,
+        help="hide headings whose block is under N chars (UI chrome, mostly)",
+    )
 
     p_section = sub.add_parser("section", help="one heading's block(s)")
     p_section.add_argument("url")
     p_section.add_argument("heading")
+
+    p_have = sub.add_parser("have", help="which of these URLs are already cached")
+    p_have.add_argument("urls", nargs="*", help="URLs to check")
+    p_have.add_argument(
+        "--from-file", help="file of URLs, one per line (web_fetch's TSV works too)"
+    )
+    p_have.add_argument(
+        "--missing",
+        action="store_true",
+        help="print only the uncached URLs, bare — feeds web_fetch.py --from-file",
+    )
 
     p_get = sub.add_parser("get", help="full page record (text on stdout)")
     p_get.add_argument("url")
@@ -875,9 +1327,11 @@ def main(argv: list[str] | None = None) -> int:
         case "quote":
             return _cmd_quote(args.url, args.needle, args.context)
         case "outline":
-            return _cmd_outline(args.url)
+            return _cmd_outline(args.url, args.min_chars)
         case "section":
             return _cmd_section(args.url, args.heading)
+        case "have":
+            return _cmd_have(args.urls, args.from_file, args.missing)
         case "get":
             return _cmd_get(args.url)
     raise AssertionError(f"unhandled command {args.command}")
