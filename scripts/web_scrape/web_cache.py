@@ -30,6 +30,10 @@ previous one wasn't enough):
     outline(url)          the page's heading tree with per-section char counts
     section(url, heading) one heading's block(s), without the whole page
     get(url)              the full page record — the last resort
+
+The same five reads are also a CLI (``python web_cache.py search|quote|
+outline|section|get``), so pulling a quote from a shell is one command just
+like caching a page is.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import hashlib
 import re
 import shutil
 import sqlite3
+import sys
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +85,8 @@ class SearchHit(TypedDict):
     url: NormalizedUrl
     title: str | None
     last_updated: str | None
+    content_type: str | None  # what kind of document the hit is
+    text_source: str | None  # how the hit's text was derived (html|pdf|vtt|ocr|manual)
     snippet: str
 
 
@@ -503,14 +510,14 @@ def search(
 ) -> list[SearchHit]:
     """FTS5 BM25-ranked pages matching ``term`` (AND across whitespace tokens).
 
-    Returns dicts of url, title, last_updated and a text snippet, best match first.
+    Returns ``SearchHit`` dicts, best match first.
     """
     own = con is None
     con = con or connect(read_only=True)
     try:
         rows = con.execute(
             """
-            SELECT p.url, p.title, p.last_updated,
+            SELECT p.url, p.title, p.last_updated, p.content_type, p.text_source,
                    snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet
             FROM pages_fts
             JOIN pages p ON p.rowid = pages_fts.rowid
@@ -720,3 +727,161 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
         if h.text.casefold() == target
     )
     return blocks
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def _require_page(url: str) -> PageRow:
+    """The cached page for ``url``, or a clean CLI exit if there isn't one."""
+    rec = get(url)
+    if rec is None:
+        print(f"no cached page: {url}", file=sys.stderr)
+        raise SystemExit(1)
+    return rec
+
+
+# Friendly type labels for search hits. Web pages are the unlabeled common
+# case; anything else says what kind of document it is. An unmapped non-HTML
+# content type falls back to its raw MIME label rather than passing as web.
+_TYPE_LABELS = {
+    "text/html": None,
+    "application/xhtml+xml": None,
+    "application/pdf": "pdf",
+    "image/jpeg": "image",
+    "image/jpg": "image",
+    "image/png": "image",
+    "text/vtt": "video transcript",
+}
+
+
+def _cmd_search(term: str, limit: int) -> int:
+    hits = search(term, limit=limit)
+    if not hits:
+        print(f"no pages match: {term}", file=sys.stderr)
+        return 1
+    for i, hit in enumerate(hits):
+        if i:
+            print()
+        print(f"url: {hit['url']}")
+        print(f"title: {hit['title'] or '(no title)'}")
+        if hit["last_updated"]:
+            # The page's own stated publish/modified date — not when we fetched.
+            print(f"last_updated: {hit['last_updated']}")
+        content_type = hit["content_type"]
+        type_label = _TYPE_LABELS.get(content_type or "", content_type)
+        if type_label:
+            print(f"type: {type_label}")
+        if hit["text_source"] not in (None, "html"):
+            # Flag hits whose text isn't a web page's own words — a PDF's text
+            # layer, a caption track, OCR or a transcription — so the reader
+            # knows to weigh (and for ocr, review) before quoting.
+            print(f"text_source: {hit['text_source']}")
+        # The snippet quotes the page mid-flow, so it can span stored line
+        # breaks; collapse them for a one-line display. Matches are [bracketed].
+        print(f"snippet: {' '.join(hit['snippet'].split())}")
+    return 0
+
+
+def _cmd_quote(url: str, needle: str, context: int) -> int:
+    _require_page(url)
+    matches = quote(url, needle, context=context)
+    if not matches:
+        print(f"no matches for {needle!r} in {url}", file=sys.stderr)
+        return 1
+    print("\n\n".join(matches))
+    return 0
+
+
+def _cmd_outline(url: str) -> int:
+    _require_page(url)
+    entries = outline(url)
+    if not entries:
+        print(f"no headings in {url}", file=sys.stderr)
+        return 1
+    for entry in entries:
+        indent = "  " * entry["level"]
+        print(f"{indent}{entry['heading']}  [{entry['chars']} chars]")
+    return 0
+
+
+def _cmd_section(url: str, heading: str) -> int:
+    _require_page(url)
+    blocks = section(url, heading)
+    if not blocks:
+        print(f"no section {heading!r} in {url}", file=sys.stderr)
+        return 1
+    if len(blocks) > 1:
+        # The note goes to stderr so stdout stays pure page text.
+        print(f"{len(blocks)} sections match {heading!r}", file=sys.stderr)
+    print("\n\n".join(blocks))
+    return 0
+
+
+def _cmd_get(url: str) -> int:
+    # Row metadata on stderr, text on stdout — so `get <url> > page.md` lands
+    # just the document.
+    rec = _require_page(url)
+    for key, value in rec.items():
+        if key != "text":
+            print(f"{key}: {value}", file=sys.stderr)
+    if rec["text"]:
+        print(rec["text"])
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI over the query helpers — the same escalation ladder, printed.
+
+    The Python API above stays the interface for programmatic use (flippatch's
+    quote gate, multi-step sessions); this is the shell-friendly face of the
+    same five reads, so pulling a quote is one command just like caching a
+    page is.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Query the web evidence cache (see docs/WebCache.md)."
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_search = sub.add_parser("search", help="FTS5 BM25-ranked pages matching a term")
+    p_search.add_argument("term")
+    p_search.add_argument("--limit", type=int, default=20)
+
+    p_quote = sub.add_parser("quote", help="sentences in a page containing a needle")
+    p_quote.add_argument("url")
+    p_quote.add_argument("needle")
+    p_quote.add_argument(
+        "--context", type=int, default=0, help="widen each hit to ±N lines"
+    )
+
+    p_outline = sub.add_parser("outline", help="heading tree with section sizes")
+    p_outline.add_argument("url")
+
+    p_section = sub.add_parser("section", help="one heading's block(s)")
+    p_section.add_argument("url")
+    p_section.add_argument("heading")
+
+    p_get = sub.add_parser("get", help="full page record (text on stdout)")
+    p_get.add_argument("url")
+
+    args = parser.parse_args(argv)
+    match args.command:
+        case "search":
+            return _cmd_search(args.term, args.limit)
+        case "quote":
+            return _cmd_quote(args.url, args.needle, args.context)
+        case "outline":
+            return _cmd_outline(args.url)
+        case "section":
+            return _cmd_section(args.url, args.heading)
+        case "get":
+            return _cmd_get(args.url)
+    raise AssertionError(f"unhandled command {args.command}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

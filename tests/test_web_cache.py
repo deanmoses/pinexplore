@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
+import pytest
 import web_cache as wc
 
 # --------------------------------------------------------------------------- #
@@ -504,3 +505,88 @@ def test_quote_context_windows_merge_in_document_order(cache):
     assert len(windows) >= 2
     joined = "\n---\n".join(windows)
     assert joined.index("Machine List") < joined.index("Second list section.")
+
+
+# --------------------------------------------------------------------------- #
+# CLI — the same five reads as shell commands
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_search_prints_hits_and_quote_prints_matches(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["search", "structured"]) == 0
+    out = capsys.readouterr().out
+    assert url in out
+    assert "Structured Doc" in out
+
+    assert wc.main(["quote", url, "intro line", "--context", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "Intro line one.\nIntro line two." in out
+
+
+def test_cli_outline_indents_by_level(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["outline", url]) == 0
+    lines = capsys.readouterr().out.split("\n")
+    assert any(ln.startswith("metadata  [") for ln in lines)
+    assert any(ln.startswith("  Intro  [") for ln in lines)  # level 1 under body
+
+
+def test_cli_section_notes_ambiguity_on_stderr_only(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["section", url, "machine list"]) == 0
+    captured = capsys.readouterr()
+    assert "Second list section." in captured.out
+    assert "2 sections match" in captured.err
+    assert "sections match" not in captured.out  # stdout stays pure page text
+
+
+def test_cli_get_splits_metadata_to_stderr_text_to_stdout(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["get", url]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("---")  # the stored text, nothing else
+    assert "content_sha:" in captured.err
+    assert "content_sha:" not in captured.out
+
+
+def test_cli_misses_exit_nonzero_with_stderr_message(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["search", "zzznomatch"]) == 1
+    assert "no pages match" in capsys.readouterr().err
+    assert wc.main(["quote", url, "zzznomatch"]) == 1
+    assert "no matches" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="1"):
+        wc.main(["quote", "https://absent.example/x", "needle"])
+    assert "no cached page" in capsys.readouterr().err
+
+
+def test_cli_search_labels_non_html_text_sources(cache, capsys):
+    wc.upsert_page(
+        cache,
+        url=wc.normalize_url("https://ipdb.org/images/1/flyer.jpg"),
+        raw_url="https://ipdb.org/images/1/flyer.jpg",
+        content_sha=wc.content_sha(b"jpeg"),
+        fetched_at=wc.now_iso(),
+        title="Nordamatic flyer",
+        text="NORDAMATIC ANTARES flyer text",
+        content_type="image/jpeg",
+        text_source="ocr",
+    )
+    wc.upsert_page(
+        cache,
+        url=wc.normalize_url("https://a.example/antares"),
+        raw_url="https://a.example/antares",
+        content_sha=wc.content_sha(b"html"),
+        fetched_at=wc.now_iso(),
+        title="Antares page",
+        text="Antares was a Nordamatic machine.",
+        content_type="text/html",
+        text_source="html",
+    )
+    assert wc.main(["search", "antares"]) == 0
+    out = capsys.readouterr().out
+    assert "type: image" in out  # the non-web hit says what it is…
+    assert "text_source: ocr" in out  # …and how its text was derived
+    assert "type:" not in out.split("text_source: ocr")[1]  # web hit unlabeled
+    assert "text_source: html" not in out

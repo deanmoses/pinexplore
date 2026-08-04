@@ -12,7 +12,7 @@ Pinexplore is an exploration and validation tool for pinball catalog data.
 
 It builds a read-only DuckDB database from the catalog plus external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks, cross-source comparisons, and gap analysis.
 
-It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](WebCache.md).
+It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web assets (manufacturer sites, PDFs, video transcripts, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](WebCache.md).
 
 ## Related Repos
 
@@ -120,14 +120,7 @@ The build **fails** if integrity checks don't pass — query `SELECT * FROM _vio
 
 ## Web Evidence Cache
 
-`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages
-(manufacturer sites, forums, Wikipedia, foreign-language press) used as
-attributed evidence for catalog corrections. The system-of-record is a SQLite
-database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored);
-`make explore` materializes it into the `web_pages` / `web_fetches` tables via
-the local-only `03_raw_web.sql` layer. Query it with the `scripts/web_scrape/web_cache.py` helpers
-(`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier,
-needle-driven rungs over whole-page reads). See [WebCache.md](WebCache.md) for the full guide.
+`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_pages` / `web_fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). See [WebCache.md](WebCache.md) for the full guide.
 
 ## Remote Data (Cloudflare R2)
 

@@ -62,6 +62,11 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
     """Re-extract every eligible HTML page; return the tally by outcome."""
     own = con is None
     db = con if con is not None else web_cache.connect()
+    if own:
+        # Like every other writable entry point: create/migrate the schema
+        # before touching it, so a fresh checkout or an older pulled cache
+        # fails on nothing rather than on a missing table or column.
+        web_cache.init_schema(db)
     tally = {
         "rewritten": 0,
         "skipped (manual)": 0,
@@ -73,17 +78,16 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
     try:
         handler = handler_for("text/html")
         assert handler is not None
-        # Every MIME type the HTML handler claims (text/html and
-        # application/xhtml+xml), not a literal — an XHTML row must not be
-        # silently left on the old extraction forever.
-        mimes = sorted(handler.mime_types)
-        placeholders = ", ".join("?" for _ in mimes)
         rows = db.execute(
-            f"SELECT url, content_sha, content_type, text, text_source FROM pages "  # noqa: S608
-            f"WHERE content_type IN ({placeholders}) ORDER BY url",
-            mimes,
+            "SELECT url, content_sha, content_type, text, text_source FROM pages "
+            "ORDER BY url"
         ).fetchall()
         for row in rows:
+            # Every MIME type the HTML handler claims (text/html and
+            # application/xhtml+xml), not a literal — an XHTML row must not be
+            # silently left on the old extraction forever.
+            if row["content_type"] not in handler.mime_types:
+                continue
             source = row["text_source"]
             if source is not None and source != "html":
                 key = (
