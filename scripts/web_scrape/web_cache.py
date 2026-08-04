@@ -706,6 +706,15 @@ def _enclosing_section(doc: _Doc, line_idx: int) -> _Section:
     return _Section(-2, None, body_start, first_heading)
 
 
+class _Window(NamedTuple):
+    """The lines shown for one hit: a match plus its padding, within a section."""
+
+    start: int
+    end: int  # one past its last line
+    match_line: int  # where the heading is taken from, never the window's edges
+    section_id: int  # the _Section it is clipped to; merges never cross it
+
+
 def quote_hits(
     url: str,
     needle: str,
@@ -749,28 +758,24 @@ def quote_hits(
     # in it: unclipped padding spills across a heading, and windows either side
     # of one can abut exactly, so a merged pair would hold evidence from two
     # sections under a single name. Near an edge that yields less than ±N.
-    windows: list[tuple[int, int, int, int]] = []  # start, end, match line, section
+    windows: list[_Window] = []
     for i, line in enumerate(doc.lines):
         if low not in line.lower():
             continue
         sec = _enclosing_section(doc, i)
         start = max(sec.start, i - context)
         end = min(sec.end, i + context + 1)
-        if windows and start <= windows[-1][1] and sec.id == windows[-1][3]:
-            windows[-1] = (
-                windows[-1][0],
-                max(windows[-1][1], end),
-                windows[-1][2],
-                sec.id,
-            )
+        last = windows[-1] if windows else None
+        if last is not None and start <= last.end and sec.id == last.section_id:
+            windows[-1] = last._replace(end=max(last.end, end))
         else:
-            windows.append((start, end, i, sec.id))
+            windows.append(_Window(start, end, i, sec.id))
     return [
         QuoteHit(
-            text="\n".join(doc.lines[s:e]).strip(),
-            heading=_enclosing_section(doc, m).name,
+            text="\n".join(doc.lines[w.start : w.end]).strip(),
+            heading=_enclosing_section(doc, w.match_line).name,
         )
-        for s, e, m, _ in windows
+        for w in windows
     ]
 
 
