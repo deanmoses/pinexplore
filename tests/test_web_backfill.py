@@ -45,7 +45,7 @@ def _seed_blob(body: bytes, ext: str = "html") -> str:
 def _seed_row(
     cache,
     url: str,
-    html: bytes,
+    body: bytes,
     *,
     text: str | None = "old extracted text",
     text_source: str | None = None,
@@ -54,7 +54,7 @@ def _seed_row(
     write_blob: bool = True,
 ) -> str:
     ext = extension_for(content_type) or "html"
-    sha = _seed_blob(html, ext) if write_blob else wc.content_sha(html)
+    sha = _seed_blob(body, ext) if write_blob else wc.content_sha(body)
     url = wc.normalize_url(url)
     wc.upsert_page(
         cache,
@@ -173,6 +173,65 @@ def test_backfill_ignores_types_that_are_not_backfillable(cache):
     tally = web_backfill.backfill(con=cache)
     assert all(count == 0 for count in tally.values())
     assert _row(cache, url)["text"] == "OCR draft"
+
+
+def test_backfill_writes_nothing_when_the_extractor_is_unavailable(
+    cache, make_pdf, monkeypatch
+):
+    # A host without poppler must be able to run the backfill and change
+    # nothing. Not just the text: the title/date come from pypdf, which still
+    # works, and writing them would half-apply an extraction that produced no
+    # result. Distinct from the never-blank guard, which only bites when the
+    # stored text is non-empty — this row's is empty, like a scan's.
+    import web_pdftext
+
+    def _unavailable(_raw: bytes) -> str | None:
+        raise web_pdftext.PdfTextUnavailableError("no poppler on this host")
+
+    monkeypatch.setattr(web_pdftext, "pdf_text", _unavailable)
+    url = _seed_row(
+        cache,
+        "https://a.example/scan.pdf",
+        make_pdf(text="", title="New Title From The Info Dict"),
+        text=None,
+        text_source="pdf",
+        title="the title already stored",
+        content_type="application/pdf",
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 0
+    assert tally["skipped (extractor unavailable)"] == 1
+    row = _row(cache, url)
+    assert row["text"] is None
+    assert row["title"] == "the title already stored"
+
+
+def test_backfill_does_not_apply_the_charset_guard_to_binary_types(
+    cache, make_pdf, monkeypatch
+):
+    # The decode-regression guard exists for a header charset the blob doesn't
+    # carry, and tells the operator to --force refetch — which for a PDF re-runs
+    # the identical extraction. Applied here it could only strand the row, so a
+    # PDF whose text legitimately contains U+FFFD must still be rewritten.
+    # The extractor is stubbed because the subject is the guard's scope, not
+    # poppler's glyph mapping: U+FFFD reaches us either from an unmappable glyph
+    # or from our own errors="replace" decode, and the guard must not fire for
+    # a binary type in any case.
+    import web_pdftext
+
+    monkeypatch.setattr(web_pdftext, "pdf_text", lambda _raw: "unmapped glyph � here")
+    url = _seed_row(
+        cache,
+        "https://a.example/glyphs.pdf",
+        make_pdf(),
+        text="text with no replacement char",
+        text_source="pdf",
+        content_type="application/pdf",
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["skipped (decode regression)"] == 0
+    assert tally["rewritten"] == 1
+    assert "�" in (_row(cache, url)["text"] or "")
 
 
 def test_backfill_never_blanks_nonempty_text(cache, capsys):

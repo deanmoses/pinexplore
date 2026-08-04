@@ -91,9 +91,9 @@ uv run playwright install chromium    # one-time: download the browser binary (~
 
 Flags: `--no-render` (pure stdlib, never render), `--render` (force a render for sites known to be JS-only — pair with `--force` if the page is already cached and fresh), `--thin-chars N`. Rendered blobs are the rendered DOM, not what the server sent — the `rendered` flag keeps a citation's provenance clear — and their `content_sha` is non-deterministic, so a `--force` on a JS page typically writes a new blob each time.
 
-### PDF documents
+### PDFs
 
-PDFs (manuals, flyers, spec sheets, rulesheets, press releases) are first-class evidence, fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the unmodified document, so a citation re-verifies against the exact bytes. Title and `last_updated` come from the PDF's own Info dict via pypdf — `/ModDate`, then `/CreationDate` — a real date or null.
+PDFs are fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the PDF file itself. Title and `last_updated` come from the PDF's own Info dict via pypdf — `/ModDate`, then `/CreationDate` — a real date or null.
 
 The text comes from poppler's **`pdftotext -layout`**, which rebuilds the page as it was printed. That is not a performance choice, it is a correctness one. A PDF has no structure, only glyphs at coordinates, so "the text of this document" is always a reconstruction; reading glyphs in content-stream order (what pypdf does) yields text whose words are all correct and whose _meaning_ is not. On Jersey Jack's Sonic comparison flyer it emitted the heading `SPECIAL EDITION` followed by the **Collector's** Edition bullets, and `COLLECTOR'S EDITION` followed by the **Special** Edition ones — the two editions' feature lists swapped. Every string was verbatim, so a quote gate passes it; only the attribution was wrong, which is the half a catalog correction is made of.
 

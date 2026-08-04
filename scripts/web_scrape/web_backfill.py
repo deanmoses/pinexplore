@@ -31,23 +31,29 @@ its text layer is empty. Re-extracting either would trade reviewed or
 recovered text for that emptiness, so neither is touched here; changing them
 stays a deliberate act through ``web_import.py``.
 
-Two guards earn their place. Never overwrite non-empty text with empty —
-re-running cannot recover from a blanking bug, because the same bug produces
-the same empty result. This also covers the host that lacks a backend
-entirely: a machine without poppler re-extracts every PDF to nothing, and the
-guard is what stops that from emptying the corpus (``unavailable`` is the
-fetch path's version of the same promise). And never overwrite on a decode
-regression: the backfill decodes from the blob alone, without the original
-HTTP header charset (never stored), so re-extracted text containing U+FFFD
-where the stored text had none means the stored text is the only artifact
-that encoded the correct charset — replacing it would be unrecoverable. Such
-rows are skipped and tallied; a ``web_fetch.py --force`` refetch restores the
-header charset and re-extracts properly. Measured, blob-only decoding
-reproduces fetch-time decoding for the whole current corpus — every HTML blob
-either declares a ``<meta>`` charset or is valid UTF-8 — so this guard is
-insurance for the blob that measurement hasn't met yet. It costs nothing on a
-binary type, which resolves its own encoding internally and never consults a
-header charset.
+Three guards earn their place. **A re-extraction that produced no result is
+not written at all** — ``meta.unavailable`` means the extractor's backend is
+missing on this host or it choked on this document, which says nothing about
+the page; the same promise the fetch path makes, so a machine without poppler
+can re-run this safely and change nothing.
+
+**Never overwrite non-empty text with empty** — re-running cannot recover from
+a blanking bug, because the same bug produces the same empty result.
+
+**Never overwrite on a decode regression**, for text types only. The backfill
+decodes from the blob alone, without the original HTTP header charset (never
+stored), so re-extracted text containing U+FFFD where the stored text had none
+means the stored text is the only artifact that encoded the correct charset —
+replacing it would be unrecoverable. Such rows are skipped and tallied; a
+``web_fetch.py --force`` refetch restores the header charset and re-extracts
+properly. Measured, blob-only decoding reproduces fetch-time decoding for the
+whole current corpus — every HTML blob either declares a ``<meta>`` charset or
+is valid UTF-8 — so this guard is insurance for the blob that measurement
+hasn't met yet. It is scoped to types that decode (``decode`` returned a
+string) because both its premise and its remedy are about a header charset: a
+binary type has none, extracts as a pure function of its bytes, and would be
+told to fix the problem by refetching — which would re-run the identical
+extraction and strand the row.
 
 ``title`` is rewritten along with ``text`` — both come from the same
 extractor. ``last_updated`` is left alone: neither htmldate nor the PDF Info
@@ -85,6 +91,7 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
         "skipped (manual)": 0,
         "skipped (other text_source)": 0,
         "skipped (missing blob)": 0,
+        "skipped (extractor unavailable)": 0,
         "skipped (empty re-extraction)": 0,
         "skipped (decode regression)": 0,
     }
@@ -125,6 +132,14 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
             # docstring for why that reproduces fetch-time decoding.
             decoded = handler.decode(raw, None)
             meta = handler.extract(raw, decoded, row["url"])
+            if meta.unavailable:
+                # The extractor produced no *result* — its backend is missing on
+                # this host, or it choked on this document. Not a finding about
+                # the page, so nothing it says is worth writing: not the empty
+                # text, and not the title/date that came from the half of the
+                # extraction that still worked. The handler has already said why.
+                tally["skipped (extractor unavailable)"] += 1
+                continue
             old_text = row["text"] or ""
             new_text = meta.text or ""
             if old_text and not new_text:
@@ -135,7 +150,13 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                     file=sys.stderr,
                 )
                 continue
-            if "�" in new_text and "�" not in old_text:
+            # Text types only. The guard's whole premise is a charset the blob
+            # doesn't carry, and its remedy is a --force refetch that restores
+            # the header — neither of which means anything for a type that
+            # decodes nothing (`decode` returned None) and whose extraction is a
+            # pure function of the bytes. Applied there it could only strand a
+            # row behind advice that cannot work.
+            if decoded is not None and "�" in new_text and "�" not in old_text:
                 tally["skipped (decode regression)"] += 1
                 print(
                     f"WARNING: re-extraction introduced replacement characters "

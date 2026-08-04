@@ -39,6 +39,13 @@ import subprocess
 # with no temp file to leak or collide.
 _ARGV = ("pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
 
+# Ceiling on one document, matching the transport's own 60s. Nothing here should
+# come close — the corpus's heaviest manual is a second — so this is not a tuning
+# knob but a liveness guarantee: a malformed PDF that sends poppler somewhere
+# pathological must not hang a whole batch with no diagnostic. Every other
+# external call in this package is bounded the same way.
+_TIMEOUT_SECONDS = 60
+
 
 class PdfTextUnavailableError(RuntimeError):
     """Text extraction was needed but poppler can't be used *here*.
@@ -65,8 +72,10 @@ class PdfTextFailedError(RuntimeError):
 def _normalize(out: str) -> str | None:
     """poppler's stdout as storable text, or None when it holds nothing.
 
-    Page breaks arrive as form feeds; they become blank lines so the text stays
-    plain and ``sentences()`` splits on them like any other break. Trailing
+    Page breaks arrive as form feeds and become plain line breaks, so the stored
+    text carries no control characters into a quote and ``sentences()`` splits
+    on a page boundary like any other break. (In real output that reads as a
+    blank line, since the page's last line already ended in a newline.) Trailing
     whitespace goes because ``-layout`` right-pads to the widest line on the
     page, which is alignment nobody reads. Leading whitespace **stays** — it is
     the column alignment, the entire reason for using this mode.
@@ -86,7 +95,11 @@ def pdf_text(raw: bytes) -> str | None:
         # interpolation, and the untrusted bytes are piped to stdin, so a
         # document can never contribute an argument.
         proc = subprocess.run(  # noqa: S603
-            _ARGV, input=raw, capture_output=True, check=False
+            _ARGV,
+            input=raw,
+            capture_output=True,
+            check=False,
+            timeout=_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
         raise PdfTextUnavailableError(
@@ -94,6 +107,13 @@ def pdf_text(raw: bytes) -> str | None:
             "(`brew install poppler`, or `apt-get install poppler-utils`). "
             "The blob is still stored; run web_backfill.py once poppler is "
             "installed to fill in the text."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        # A fact about this document, not this host: poppler is installed and
+        # ran, it just never finished on these bytes. Same contract as any other
+        # read failure — no text was produced, which is not "there is no text".
+        raise PdfTextFailedError(
+            f"pdftotext did not finish within {_TIMEOUT_SECONDS}s"
         ) from exc
 
     text = _normalize(proc.stdout.decode("utf-8", errors="replace"))

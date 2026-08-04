@@ -77,6 +77,33 @@ def test_unreadable_document_raises_failed_not_unavailable(monkeypatch):
     assert "trailer dictionary" in str(exc.value)
 
 
+def test_timeout_raises_failed_not_unavailable(monkeypatch):
+    # poppler is installed and ran; it just never finished on these bytes. That
+    # is a fact about the document, and the bound exists so one pathological PDF
+    # can't hang a whole batch with no diagnostic.
+    def _hang(*_args: object, **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd="pdftotext", timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", _hang)
+    with pytest.raises(web_pdftext.PdfTextFailedError) as exc:
+        web_pdftext.pdf_text(b"%PDF-1.4")
+    assert "did not finish" in str(exc.value)
+
+
+def test_the_subprocess_call_is_bounded(monkeypatch):
+    # Guards the bound itself: an unbounded call is indistinguishable from a
+    # bounded one until something hangs in production.
+    seen: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess([], 0, stdout=b"text", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    web_pdftext.pdf_text(b"%PDF-1.4")
+    assert seen["timeout"] == web_pdftext._TIMEOUT_SECONDS
+
+
 def test_recovered_damage_keeps_the_text_poppler_managed_to_read(monkeypatch):
     # poppler reports non-zero for damage it recovered from. Output that exists
     # is evidence the bytes support, so a partly-broken manual keeps the pages
