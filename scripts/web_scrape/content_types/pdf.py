@@ -7,13 +7,10 @@ and pulling text / title / date. Rulesheets, flyers, and press releases come in
 this way. The transport and the fetcher reach this only through the
 ``ContentHandler`` interface — they never mention PDF.
 
-Text and metadata come from **different backends, deliberately**. The words are
-poppler's job (``web_pdftext``), because reading a page as it was printed is
-what keeps a flyer's columns attached to their own headings. The title and date
-are pypdf's, because they are Info-dict fields rather than anything on the page.
-Splitting them also means neither can take the other down: a PDF whose Info dict
-is malformed still yields its full text, and a document poppler chokes on still
-yields the title it declares.
+Words come from poppler (``web_pdftext``); title and date from the Info dict via
+pypdf. Splitting them means neither can take the other down — a malformed Info
+dict still yields full text, and a document poppler chokes on still yields its
+declared title.
 """
 
 from __future__ import annotations
@@ -122,10 +119,10 @@ class PdfHandler(ContentHandler):
     extension = "pdf"
     text_source = "pdf"
     renderable = False
-    # poppler over the stored bytes is deterministic, so the corpus can be moved
-    # to a new extraction wholesale. A host without poppler re-extracts to
-    # nothing and the backfill's never-blank guard leaves those rows alone.
     backfillable = True
+    # Scanned manuals run to tens of megabytes: the cached Stern Transformers
+    # manual cleared the 10MB default by 0.9%, and a 15.5MB quick reference did not.
+    max_response_bytes: int | None = 50 * 1024 * 1024
 
     @override
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:
@@ -135,9 +132,6 @@ class PdfHandler(ContentHandler):
     def thin_warning(
         self, url: str, *, rendered: bool, render_attempted: bool
     ) -> str | None:
-        # The PDF analog of a still-thin render: an image-only/scanned PDF, whose
-        # words need OCR this path doesn't do. Loud, so a 0-quote PDF isn't
-        # silent. A PDF poppler *failed* on doesn't reach here — that reports
-        # unavailable, which keeps the stored text rather than replacing it with
-        # a thin one. Render flags don't apply — a PDF is never rendered.
+        # A scanned PDF, whose words need OCR this path doesn't do. Loud, so a
+        # 0-quote PDF isn't silent. Render flags don't apply; a PDF never renders.
         return f"WARNING: PDF extracted to little/no text (scanned?): {url}"

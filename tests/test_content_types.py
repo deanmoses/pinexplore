@@ -2,7 +2,7 @@
 
 The registry routing (handler_for / sniff / the extractable + sniffable sets),
 plus each handler's per-type behavior: the HTML handler's charset decoding and
-conservative date extraction, the PDF handler's pypdf text/title/date pull, and
+conservative date extraction, the PDF handler's text/title/date pull, and
 the image handler's OCR (the Vision backend itself lives in test_web_ocr).
 """
 
@@ -689,7 +689,7 @@ def test_body_text_none_when_unparseable():
 
 
 # --------------------------------------------------------------------------- #
-# PDF handler — text/title/date from raw PDF bytes (pypdf)
+# PDF handler — text from the poppler backend, title/date from the Info dict
 # --------------------------------------------------------------------------- #
 
 

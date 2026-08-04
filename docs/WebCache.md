@@ -267,7 +267,7 @@ For a long page, do the read in a subagent so only results enter the main sessio
 
 ### Weighing a quote: text_source
 
-Every page row carries a **`text_source`** label saying what turned the bytes into text: `html` (the markdown conversion), `pdf` (pypdf's text layer), `vtt` (a caption track), `ocr` (machine-read pixels), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, OCR is a guess about pixels, captions a guess about audio — so weigh a quote by its label:
+Every page row carries a **`text_source`** label saying what turned the bytes into text: `html` (the markdown conversion), `pdf` (the document's own text layer), `vtt` (a caption track), `ocr` (machine-read pixels), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, OCR is a guess about pixels, captions a guess about audio — so weigh a quote by its label:
 
 ```sql
 SELECT url, title FROM web_pages WHERE text_source = 'ocr';  -- read the picture before quoting

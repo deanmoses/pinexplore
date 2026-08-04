@@ -1,10 +1,8 @@
 """Tests for web_pdftext — the poppler ``pdftotext -layout`` backend.
 
-The pure normalization logic runs everywhere; the actual poppler bridge is
-exercised only where the binary is installed, so the system-dependency glue is
-covered where it can run and skipped where it can't. The two error types are
-tested by stubbing ``subprocess.run``, since neither a missing binary nor a
-damaged document is convenient to arrange for real.
+Normalization is pure and runs everywhere; the poppler bridge is skipped where
+the binary isn't installed. The error paths stub ``subprocess.run``, since
+neither a missing binary nor a hung one is convenient to arrange for real.
 """
 
 from __future__ import annotations
@@ -26,25 +24,20 @@ needs_poppler = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 
 
-def test_normalize_turns_page_breaks_into_blank_lines():
-    # poppler separates pages with a form feed. Left in, it is an invisible
-    # control character sitting in quotable evidence; as a newline it is just
-    # another break for sentences() to split on.
+def test_normalize_turns_page_breaks_into_line_breaks():
+    # Left in, a form feed is an invisible control character inside a quote.
     assert web_pdftext._normalize("page one\fpage two") == "page one\npage two"
 
 
 def test_normalize_keeps_leading_whitespace_and_drops_trailing():
-    # Leading spaces ARE the column layout — the whole reason for -layout — so
-    # they must survive. Trailing spaces are padding to the page's widest line.
+    # Leading spaces are the column layout; trailing are padding to page width.
     out = web_pdftext._normalize("ARCADE      SPECIAL   \n• Black Armor      ")
     assert out == "ARCADE      SPECIAL\n• Black Armor"
 
 
 def test_normalize_keeps_the_first_content_line_indented():
-    # str.strip() on the joined text would eat this indentation along with the
-    # blank lines above it. On Stern's feature matrix the first content line
-    # belongs to the description column, so losing its offset pulls it into the
-    # label column — the silent column shift -layout exists to prevent.
+    # On Stern's feature matrix this line belongs to the description column;
+    # losing its offset pulls it into the label column.
     out = web_pdftext._normalize("\n\n          In Stern Pinball's TRANSFORMERS\n")
     assert out == "          In Stern Pinball's TRANSFORMERS"
 
@@ -54,8 +47,7 @@ def test_normalize_still_drops_blank_lines_at_both_ends():
 
 
 def test_normalize_returns_none_for_whitespace_only_output():
-    # None, never "" — the caller's thin-content warning fires on None, and a
-    # blank-text page must not be stored silently.
+    # None, never "" — the caller's thin-content warning fires on None.
     assert web_pdftext._normalize("   \n\n\f  \n") is None
 
 
@@ -76,8 +68,7 @@ def test_missing_poppler_raises_unavailable_with_install_hint(monkeypatch):
 
 
 def test_unreadable_document_raises_failed_not_unavailable(monkeypatch):
-    # A damaged document must never masquerade as a missing backend: one asks
-    # the operator to look at a file, the other to install software.
+    # One asks the operator to look at a file, the other to install software.
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -91,9 +82,7 @@ def test_unreadable_document_raises_failed_not_unavailable(monkeypatch):
 
 
 def test_timeout_raises_failed_not_unavailable(monkeypatch):
-    # poppler is installed and ran; it just never finished on these bytes. That
-    # is a fact about the document, and the bound exists so one pathological PDF
-    # can't hang a whole batch with no diagnostic.
+    # A hang is a fact about the document, not a missing backend.
     def _hang(*_args: object, **_kwargs: object) -> object:
         raise subprocess.TimeoutExpired(cmd="pdftotext", timeout=60)
 
@@ -104,8 +93,7 @@ def test_timeout_raises_failed_not_unavailable(monkeypatch):
 
 
 def test_the_subprocess_call_is_bounded(monkeypatch):
-    # Guards the bound itself: an unbounded call is indistinguishable from a
-    # bounded one until something hangs in production.
+    # An unbounded call looks identical to a bounded one until something hangs.
     seen: dict[str, object] = {}
 
     def _capture(*_args: object, **kwargs: object) -> object:
@@ -118,9 +106,8 @@ def test_the_subprocess_call_is_bounded(monkeypatch):
 
 
 def test_recovered_damage_keeps_the_text_poppler_managed_to_read(monkeypatch):
-    # poppler reports non-zero for damage it recovered from. Output that exists
-    # is evidence the bytes support, so a partly-broken manual keeps the pages
-    # it could read instead of being thrown away wholesale.
+    # poppler reports non-zero for damage it recovered from; those pages are
+    # still evidence the bytes support.
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -132,9 +119,7 @@ def test_recovered_damage_keeps_the_text_poppler_managed_to_read(monkeypatch):
 
 
 def test_clean_exit_with_no_text_is_a_finding_not_a_failure(monkeypatch):
-    # An image-only (scanned) PDF is read perfectly and correctly yields
-    # nothing. That is a fact about the document, so it returns rather than
-    # raising — the caller stores the blob and warns that it needs OCR.
+    # An image-only PDF is read perfectly and correctly yields nothing.
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -161,6 +146,6 @@ def test_image_only_pdf_yields_none(make_pdf):
 
 
 @needs_poppler
-def test_garbage_bytes_raise_failed(make_pdf):
+def test_garbage_bytes_raise_failed():
     with pytest.raises(web_pdftext.PdfTextFailedError):
         web_pdftext.pdf_text(b"%PDF-1.4 not really a pdf")

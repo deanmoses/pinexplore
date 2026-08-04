@@ -17,20 +17,39 @@ import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import certifi
 
 # Allow `import content_types` whether run as a script or imported (mirrors the
 # sibling-import dance the other web_scrape modules do).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from content_types import SNIFFABLE_CONTENT_TYPES, handler_for, sniff
+from content_types import HANDLERS, SNIFFABLE_CONTENT_TYPES, handler_for, sniff
+
+if TYPE_CHECKING:
+    from content_types.base import ContentHandler
 
 USER_AGENT = (
     "pinexplore-webevidence/1.0 "
     "(+https://github.com/deanmoses/pindata; pinball catalog evidence cache)"
 )
-MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
+# Default cap on the body we'll buffer + extract; a type raises it via
+# ``max_response_bytes``.
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
+
+def _cap(handler: ContentHandler) -> int:
+    """The byte cap for a resolved handler."""
+    return handler.max_response_bytes or MAX_RESPONSE_BYTES
+
+
+# Enough leading bytes to run every signature we know, so the true type is
+# resolved before the body is buffered. Derived from the registry, so a new type
+# with a longer signature widens it automatically.
+_SIGNATURE_BYTES = max(
+    (len(h.signature) for h in HANDLERS if h.signature is not None), default=0
+)
+
 
 # Verify TLS against certifi's CA bundle, not whatever the interpreter happens to
 # trust. `urlopen` with no context uses the latter, which on a stock macOS Python
@@ -57,6 +76,9 @@ class Resp(NamedTuple):
     raw: bytes | None
     text: str | None
     skip: SkipReason | None
+    # The cap that was exceeded, when ``skip`` is 'too-large'. Reported rather
+    # than assumed by the caller, which can't know which type's limit applied.
+    limit: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -101,9 +123,9 @@ def request_url(url: str) -> str:
 def http_get(url: str) -> Resp:
     """GET a URL with our UA, gating on content-type and response size.
 
-    Skips downloading the body for a content type no handler extracts, and caps the
-    read at MAX_RESPONSE_BYTES so a giant response can't be buffered into memory
-    then decoded into garbage. ``final_url`` is the post-redirect URL — the readable
+    Skips downloading the body for a content type no handler extracts, and caps
+    the read at the type's own limit so a giant response can't be buffered into
+    memory then decoded into garbage. ``final_url`` is the post-redirect URL — the readable
     input ``url`` when we landed where we asked, else the redirect target.
     """
     wire_url = request_url(url)
@@ -125,20 +147,23 @@ def http_get(url: str) -> Resp:
         handler = handler_for(content_type)
         if handler is None and content_type not in SNIFFABLE_CONTENT_TYPES:
             return Resp(status, content_type, final_url, None, None, "content-type")
-        raw = resp.read(MAX_RESPONSE_BYTES + 1)
-    if len(raw) > MAX_RESPONSE_BYTES:
-        # An over-cap sniffable type (octet-stream / text/plain) reports too-large
-        # rather than content-type — both skip + log; we can't sniff without reading.
-        return Resp(status, content_type, final_url, None, None, "too-large")
-    # A signature is authoritative: it identifies the type whatever the header
-    # claimed (octet-stream, a wrong text/* label, or nothing). Otherwise a generic
-    # sniffable label that matched no signature is a genuine non-evidence download.
-    sniffed = sniff(raw)
-    if sniffed is not None:
-        handler = sniffed
-        content_type = sniffed.canonical_mime
-    elif handler is None:
-        return Resp(status, content_type, final_url, None, None, "content-type")
+        # Sniff a short prefix before buffering the rest: a signature is
+        # authoritative — it identifies the type whatever the header claimed
+        # (octet-stream, a wrong text/* label, or nothing) — so the header cannot
+        # be trusted to pick the cap, and the cap cannot be picked after the body
+        # is already in memory. A generic label matching no signature is a
+        # genuine non-evidence download, refused here having read a few bytes.
+        prefix = resp.read(_SIGNATURE_BYTES)
+        sniffed = sniff(prefix)
+        if sniffed is not None:
+            handler = sniffed
+            content_type = sniffed.canonical_mime
+        elif handler is None:
+            return Resp(status, content_type, final_url, None, None, "content-type")
+        cap = _cap(handler)
+        raw = prefix + resp.read(max(cap + 1 - len(prefix), 0))
+    if len(raw) > cap:
+        return Resp(status, content_type, final_url, None, None, "too-large", cap)
     # The handler decodes to text (HTML) or returns None for a binary type (a PDF),
     # whose bytes are stored verbatim and whose text the extractor fills in later.
     text = handler.decode(raw, header_charset)

@@ -80,15 +80,15 @@ class ContentHandler:
     # either (that needs OCR, out of scope).
     renderable: bool = False
     # Whether ``web_backfill`` may re-derive this type's text from its stored
-    # blob after an extractor change. True for a type read by a parser whose
-    # output is a pure function of the bytes (HTML, PDF): re-running it is
-    # idempotent, so the corpus can be brought to one extractor unconditionally.
-    # False for a type read by a *recognizer* — OCR over pixels, speech over
-    # audio — whose output tracks a backend that moves under us (Vision ships
-    # with the OS), so a bulk re-run would churn reviewed evidence with no
-    # extractor change to justify it. Those come in through ``web_import.py``,
-    # one reviewed document at a time.
+    # blob. True for a parser, whose output is a pure function of the bytes.
+    # False for a *recognizer* — OCR over pixels, speech over audio — whose
+    # backend moves under us (Vision ships with the OS), so a bulk re-run would
+    # churn reviewed evidence with no extractor change behind it.
     backfillable: bool = False
+    # Largest response body this type may buffer, or None for the transport's
+    # default. "Too big" is a fact about the format: a 15MB scanned manual is an
+    # ordinary document, a 15MB HTML page is a bug.
+    max_response_bytes: int | None = None
 
     def decode(self, raw: bytes, header_charset: str | None) -> str | None:
         """The text the cache stores/extracts from, or None for a binary type.

@@ -10,61 +10,27 @@ selector to get wrong) and there is no ``--dry-run`` (if the output is wrong,
 fix the extractor and run it again; to preview one page, run the extractor on
 its blob).
 
-Scope is the handler's own declaration, ``backfillable`` — HTML and PDF today,
-the types read by a parser whose output is a pure function of the stored bytes.
-A type read by a *recognizer* (OCR over an image) declares False and is never
-swept; see that flag's comment in ``content_types/base.py``.
+Scope is the handler's ``backfillable`` flag — HTML and PDF today; see that
+flag in ``content_types/base.py`` for why a type opts out.
 
-Within that scope the rule is one rule, applied per row: re-extract only what
-this handler's own extractor produced, which is the row whose ``text_source``
-is the handler's own (or ``NULL``, from pages written before the column
-existed — all machine fetches, none carrying an import marker). Rewritten rows
-are stamped with the handler's ``text_source``: for a ``NULL`` row that is not
-the back-filled guess ``init_schema`` refuses to make, because after
-re-extraction it is a fact about the new text by construction.
+Within it, one selection rule: re-extract only what this handler's extractor
+produced — the row whose ``text_source`` is the handler's own, or ``NULL``
+from before that column existed. Rewritten rows are stamped with it, which for
+a ``NULL`` row is a fact about the new text by construction.
 
-Any *other* ``text_source`` is skipped and tallied, and the two that matter
-both sit on documents in scope: ``manual`` is a human transcription (mirroring
-``_resolve_text``'s rule), and ``ocr`` is text a machine read from pixels — a
-scanned PDF whose words were recovered outside this tool, precisely because
-its text layer is empty. Re-extracting either would trade reviewed or
-recovered text for that emptiness, so neither is touched here; changing them
-stays a deliberate act through ``web_import.py``.
+Any other ``text_source`` is skipped and tallied. ``manual`` is a human
+transcription; ``ocr`` is a scanned PDF whose words were recovered elsewhere
+*because* its text layer is empty — re-extracting would trade either for that
+emptiness. Both change only through ``web_import.py``.
 
-Three guards earn their place. **A re-extraction that produced no result is
-not written at all** — ``meta.unavailable`` means the extractor's backend is
-missing on this host or it choked on this document, which says nothing about
-the page; the same promise the fetch path makes, so a machine without poppler
-can re-run this safely and change nothing.
+``title`` follows the text, except on an imported row where it may be a
+person's: ``web_import.py --title`` leaves ``text_source`` as the handler's
+own, so only ``imported`` distinguishes a curated title from an extracted one.
+``last_updated`` is never recomputed — the other field ``--date`` lets a person
+set, and unchanged extractors would only rewrite it to itself.
 
-**Never overwrite non-empty text with empty** — re-running cannot recover from
-a blanking bug, because the same bug produces the same empty result.
-
-**Never overwrite on a decode regression**, for text types only. The backfill
-decodes from the blob alone, without the original HTTP header charset (never
-stored), so re-extracted text containing U+FFFD where the stored text had none
-means the stored text is the only artifact that encoded the correct charset —
-replacing it would be unrecoverable. Such rows are skipped and tallied; a
-``web_fetch.py --force`` refetch restores the header charset and re-extracts
-properly. Measured, blob-only decoding reproduces fetch-time decoding for the
-whole current corpus — every HTML blob either declares a ``<meta>`` charset or
-is valid UTF-8 — so this guard is insurance for the blob that measurement
-hasn't met yet. It is scoped to types that decode (``decode`` returned a
-string) because both its premise and its remedy are about a header charset: a
-binary type has none, extracts as a pure function of its bytes, and would be
-told to fix the problem by refetching — which would re-run the identical
-extraction and strand the row.
-
-``title`` is rewritten along with ``text`` — both come from the same
-extractor — **except on an imported row**, whose title may be a person's:
-``web_import.py --title`` stores a curated one while leaving ``text_source``
-as the handler's own, so only the ``imported`` flag distinguishes it. There
-the stored title stands, which costs nothing when the importer supplied none
-(it is already this extraction, from identical bytes). ``last_updated`` is
-left alone: neither htmldate nor the PDF Info dict changed, so recomputing is
-a no-op — and it is the other field ``web_import.py`` lets a person set. No ``fetches`` row is written — no
-fetch happened. Updates go through a normal SQL ``UPDATE`` on ``pages``, so
-the FTS sync triggers keep the index current.
+No ``fetches`` row is written; no fetch happened. Updates go through a normal
+SQL ``UPDATE`` on ``pages``, so the FTS sync triggers keep the index current.
 """
 
 from __future__ import annotations
@@ -139,10 +105,9 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
             meta = handler.extract(raw, decoded, row["url"])
             if meta.unavailable:
                 # The extractor produced no *result* — its backend is missing on
-                # this host, or it choked on this document. Not a finding about
-                # the page, so nothing it says is worth writing: not the empty
-                # text, and not the title/date that came from the half of the
-                # extraction that still worked. The handler has already said why.
+                # this host, or it choked on this document — which says nothing
+                # about the page. Drops the title/date too, though those come
+                # from the half that still worked: half an extraction is not one.
                 tally["skipped (extractor unavailable)"] += 1
                 continue
             old_text = row["text"] or ""
@@ -155,12 +120,14 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                     file=sys.stderr,
                 )
                 continue
-            # Text types only. The guard's whole premise is a charset the blob
-            # doesn't carry, and its remedy is a --force refetch that restores
-            # the header — neither of which means anything for a type that
-            # decodes nothing (`decode` returned None) and whose extraction is a
-            # pure function of the bytes. Applied there it could only strand a
-            # row behind advice that cannot work.
+            # Re-extraction decodes from the blob alone; the HTTP header charset
+            # is never stored. So U+FFFD appearing where the stored text had none
+            # means that stored text is the only artifact that ever held the
+            # right charset, and a --force refetch is the only way back.
+            #
+            # Text types only: a type that decodes nothing has no header charset
+            # to lose and no refetch that would change its output, so here the
+            # guard could only strand a row behind advice that cannot work.
             if decoded is not None and "�" in new_text and "�" not in old_text:
                 tally["skipped (decode regression)"] += 1
                 print(
@@ -171,14 +138,10 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                     file=sys.stderr,
                 )
                 continue
-            # An imported row's title may be a person's, so it is never
-            # rewritten. `web_import.py --title` stores a curated title while
-            # leaving text_source as the handler's own (only --text-file moves
-            # it to `manual`), so text_source cannot tell the two apart —
-            # `imported` can. Keeping the stored value is safe either way: where
-            # the importer supplied no --title, it already *is* this extraction,
-            # since identical bytes extract identically. Same reasoning
-            # web_fetch's _resolve_text applies to a manual row.
+            # `--title` stores a curated title while leaving text_source as the
+            # handler's own, so only `imported` separates a person's title from an
+            # extracted one. Safe when none was supplied: identical bytes extract
+            # identically, so the stored value already is this extraction.
             title = row["title"] if row["imported"] else meta.title
             db.execute(
                 "UPDATE pages SET text = ?, title = ?, text_source = ? WHERE url = ?",

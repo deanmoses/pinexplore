@@ -6,13 +6,10 @@ from __future__ import annotations
 
 import ssl
 import urllib.request
-from typing import TYPE_CHECKING
 
+import pytest
 import web_http
-
-if TYPE_CHECKING:
-    import pytest
-
+from content_types.pdf import PdfHandler
 
 # --------------------------------------------------------------------------- #
 # request_url — wire-safe encoding of a readable normalized URL
@@ -86,15 +83,26 @@ class _FakeResp:
         self._body = body
         self._url = url
         self._may_read = may_read
+        self._pos = 0
+        # Every read length asked for, so a test can assert how much of an
+        # oversized body was buffered before it was refused.
+        self.reads: list[int] = []
 
     def geturl(self) -> str:
         return self._url
 
-    def read(self, _n: int = -1) -> bytes:
+    def read(self, n: int = -1) -> bytes:
         # A skipped (non-extractable) type must decline the body unread; reading
         # here means http_get downloaded something it should have skipped.
         assert self._may_read, "http_get read a body it should have skipped"
-        return self._body
+        self.reads.append(n)
+        # Honour n like a real stream: a stub that always returns everything
+        # cannot tell a bounded read from an unbounded one.
+        chunk = (
+            self._body[self._pos :] if n < 0 else self._body[self._pos : self._pos + n]
+        )
+        self._pos += len(chunk)
+        return chunk
 
     def __enter__(self) -> _FakeResp:
         return self
@@ -111,7 +119,9 @@ def _stub_urlopen(
     status: int = 200,
     charset: str | None = None,
     may_read: bool = True,
-) -> None:
+) -> list[_FakeResp]:
+    """Patch urlopen; return the list responses are appended to as they're made."""
+
     def _open(
         req: urllib.request.Request,
         timeout: float | None = None,
@@ -123,7 +133,7 @@ def _stub_urlopen(
         assert context is not None
         assert context.verify_mode is ssl.CERT_REQUIRED
         # Echo the requested wire URL as geturl() → no redirect.
-        return _FakeResp(
+        resp = _FakeResp(
             status=status,
             content_type=content_type,
             body=body,
@@ -131,8 +141,12 @@ def _stub_urlopen(
             charset=charset,
             may_read=may_read,
         )
+        made.append(resp)
+        return resp
 
+    made: list[_FakeResp] = []
     monkeypatch.setattr(urllib.request, "urlopen", _open)
+    return made
 
 
 PDF_BYTES = b"%PDF-1.4\n%fake minimal pdf bytes\n"
@@ -229,3 +243,105 @@ def test_http_get_html_still_decoded(monkeypatch):
     assert resp.content_type == "text/html"
     assert resp.text == "<html>café</html>"
     assert resp.skip is None
+
+
+# --------------------------------------------------------------------------- #
+# Response-size cap — per type, because "too big" is a fact about the format
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def small_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the caps so the branches are reachable without 50MB of test data."""
+    monkeypatch.setattr(web_http, "MAX_RESPONSE_BYTES", 100)
+    monkeypatch.setattr(PdfHandler, "max_response_bytes", 400)
+
+
+def test_oversized_html_is_skipped(small_caps, monkeypatch):
+    _stub_urlopen(monkeypatch, content_type="text/html", body=b"x" * 101)
+    assert web_http.http_get("https://x.com/p").skip == "too-large"
+
+
+def test_a_pdf_over_the_default_cap_is_kept(small_caps, monkeypatch):
+    # The point of the per-type cap: a manual that dwarfs any sane HTML page is
+    # an ordinary document. American Pinball's GTF quick reference is 15.5MB.
+    body = PDF_BYTES + b"x" * 300
+    _stub_urlopen(monkeypatch, content_type="application/pdf", body=body)
+    resp = web_http.http_get("https://x.com/manual.pdf")
+    assert resp.skip is None
+    assert resp.raw == body
+
+
+def test_a_pdf_over_its_own_cap_is_still_skipped(small_caps, monkeypatch):
+    _stub_urlopen(
+        monkeypatch, content_type="application/pdf", body=PDF_BYTES + b"x" * 500
+    )
+    assert web_http.http_get("https://x.com/huge.pdf").skip == "too-large"
+
+
+def test_an_octet_stream_pdf_gets_the_pdf_cap(small_caps, monkeypatch):
+    # The type isn't known until the bytes are sniffed, so the read has to allow
+    # the widest cap or a mislabeled PDF would be judged by the default.
+    body = PDF_BYTES + b"x" * 300
+    _stub_urlopen(monkeypatch, content_type="application/octet-stream", body=body)
+    resp = web_http.http_get("https://x.com/blob")
+    assert resp.skip is None
+    assert resp.content_type == "application/pdf"
+
+
+@pytest.mark.parametrize("label", ["text/html", "image/jpeg", "application/pdf"])
+def test_a_large_pdf_is_kept_however_it_is_labelled(small_caps, monkeypatch, label):
+    # A signature outranks the header, so the read ceiling can't come from the
+    # header either: a mislabelled PDF must not be cut to the wrong type's limit
+    # before its bytes can be sniffed.
+    body = PDF_BYTES + b"x" * 300
+    _stub_urlopen(monkeypatch, content_type=label, body=body)
+    resp = web_http.http_get("https://x.com/doc")
+    assert resp.skip is None
+    assert resp.content_type == "application/pdf"
+
+
+def test_an_oversized_body_is_not_buffered_to_the_widest_cap(small_caps, monkeypatch):
+    # Resolving the type from a short prefix is what keeps the per-type cap a
+    # resource guard: a big HTML page must not be pulled into memory under the
+    # PDF allowance just because some other type is permitted that much.
+    made = _stub_urlopen(monkeypatch, content_type="text/html", body=b"x" * 5000)
+    assert web_http.http_get("https://x.com/p").skip == "too-large"
+    # HTML's cap is 100 here: one byte past it proves too-large, plus the sniff
+    # prefix. Reading to the PDF allowance instead would buffer 401.
+    assert made[0]._pos <= 101 + web_http._SIGNATURE_BYTES, made[0]._pos
+
+
+def test_an_unsniffable_binary_is_refused_after_a_few_bytes(small_caps, monkeypatch):
+    # A ZIP served as octet-stream matches no signature, so it is refused on its
+    # prefix rather than downloaded in full and thrown away.
+    made = _stub_urlopen(
+        monkeypatch,
+        content_type="application/octet-stream",
+        body=b"PK\x03\x04" + b"x" * 5000,
+    )
+    assert web_http.http_get("https://x.com/blob").skip == "content-type"
+    assert made[0]._pos <= 16, made[0]._pos
+
+
+def test_too_large_reports_the_cap_it_hit(small_caps, monkeypatch):
+    # The caller can't know which type's limit applied, so the response says.
+    _stub_urlopen(monkeypatch, content_type="text/html", body=b"x" * 101)
+    assert web_http.http_get("https://x.com/p").limit == 100
+
+
+def test_sniffing_down_to_a_narrower_type_re_applies_its_cap(small_caps, monkeypatch):
+    # An image served as octet-stream is read under the widest cap but judged by
+    # its own — otherwise mislabeling a body would buy it the PDF's headroom.
+    _stub_urlopen(
+        monkeypatch,
+        content_type="application/octet-stream",
+        body=b"\xff\xd8\xff\xe0" + b"x" * 300,
+    )
+    assert web_http.http_get("https://x.com/blob").skip == "too-large"
+
+
+def test_pdfs_are_configured_larger_than_everything_else():
+    # Locks the policy itself, not just the mechanism the tests above shrink.
+    assert PdfHandler.max_response_bytes == 50 * 1024 * 1024
+    assert PdfHandler.max_response_bytes > web_http.MAX_RESPONSE_BYTES

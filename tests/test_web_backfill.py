@@ -120,8 +120,6 @@ def test_backfill_skips_foreign_text_sources(cache):
 
 @needs_poppler
 def test_backfill_rewrites_pdf_rows(cache, make_pdf):
-    # PDFs are swept alongside HTML: both are read by a parser whose output is a
-    # pure function of the stored bytes, which is what `backfillable` marks.
     url = _seed_row(
         cache,
         "https://a.example/flyer.pdf",
@@ -139,10 +137,8 @@ def test_backfill_rewrites_pdf_rows(cache, make_pdf):
 
 @needs_poppler
 def test_backfill_leaves_ocr_text_on_a_pdf_row_alone(cache, make_pdf):
-    # The load-bearing case: a scanned PDF whose words were recovered by OCR
-    # outside this tool. Its text layer is empty *by definition* — that is why
-    # it was OCR'd — so re-extracting would trade recovered evidence for
-    # nothing. Guarded by text_source, not by content type.
+    # A scan is OCR'd precisely because its text layer is empty, so re-extracting
+    # would trade recovered evidence for nothing.
     url = _seed_row(
         cache,
         "https://a.example/scan.pdf",
@@ -159,9 +155,7 @@ def test_backfill_leaves_ocr_text_on_a_pdf_row_alone(cache, make_pdf):
 
 
 def test_backfill_ignores_types_that_are_not_backfillable(cache):
-    # An image's text comes from a recognizer that moves under us (Vision ships
-    # with the OS), so it is never swept in bulk — no extractor change here
-    # justifies churning it.
+    # Images declare backfillable=False, so no PDF extractor change churns them.
     url = _seed_row(
         cache,
         "https://a.example/flyer.jpg",
@@ -176,10 +170,8 @@ def test_backfill_ignores_types_that_are_not_backfillable(cache):
 
 
 def test_backfill_keeps_a_curated_title_on_an_imported_html_row(cache):
-    # `web_import.py --title` stores a person's title but leaves text_source as
-    # the handler's own — only --text-file moves it to `manual`. So text_source
-    # cannot protect it and `imported` must: re-extracting the text is still
-    # wanted, replacing the title with the document's own is not.
+    # `--title` leaves text_source as the handler's own, so text_source can't
+    # protect a curated title and `imported` must. The text still refreshes.
     url = _seed_row(cache, "https://a.example/imported", PAGE, text_source="html")
     cache.execute(
         "UPDATE pages SET title = ?, imported = 1 WHERE url = ?",
@@ -194,9 +186,8 @@ def test_backfill_keeps_a_curated_title_on_an_imported_html_row(cache):
 
 @needs_poppler
 def test_backfill_keeps_a_curated_title_on_an_imported_pdf_row(cache, make_pdf):
-    # Same contract for PDFs, where the document's own title is often worse than
-    # useless: Stern's feature matrix declares the internal codename "CHEDDAR
-    # Matrix" in its Info dict.
+    # A PDF's declared title is often worse than useless: Stern's feature matrix
+    # carries the internal codename "CHEDDAR Matrix" in its Info dict.
     url = _seed_row(
         cache,
         "https://a.example/matrix.pdf",
@@ -215,8 +206,7 @@ def test_backfill_keeps_a_curated_title_on_an_imported_pdf_row(cache, make_pdf):
 
 
 def test_backfill_rewrites_the_title_on_a_fetched_row(cache):
-    # The flip side, so the guard above can't quietly freeze every title: a
-    # machine-fetched row's title is the extractor's and follows it.
+    # The flip side, so the guard above can't quietly freeze every title.
     url = _seed_row(cache, "https://a.example/fetched", PAGE, text_source="html")
     web_backfill.backfill(con=cache)
     assert _row(cache, url)["title"] == "New Title"
@@ -225,11 +215,9 @@ def test_backfill_rewrites_the_title_on_a_fetched_row(cache):
 def test_backfill_writes_nothing_when_the_extractor_is_unavailable(
     cache, make_pdf, monkeypatch
 ):
-    # A host without poppler must be able to run the backfill and change
-    # nothing. Not just the text: the title/date come from pypdf, which still
-    # works, and writing them would half-apply an extraction that produced no
-    # result. Distinct from the never-blank guard, which only bites when the
-    # stored text is non-empty — this row's is empty, like a scan's.
+    # A poppler-less host must change nothing. The never-blank guard doesn't
+    # cover this: the stored text is already empty, like a scan's. Title/date
+    # come from pypdf and still resolve, but half an extraction is not one.
     import web_pdftext
 
     def _unavailable(_raw: bytes) -> str | None:
@@ -256,14 +244,9 @@ def test_backfill_writes_nothing_when_the_extractor_is_unavailable(
 def test_backfill_does_not_apply_the_charset_guard_to_binary_types(
     cache, make_pdf, monkeypatch
 ):
-    # The decode-regression guard exists for a header charset the blob doesn't
-    # carry, and tells the operator to --force refetch — which for a PDF re-runs
-    # the identical extraction. Applied here it could only strand the row, so a
-    # PDF whose text legitimately contains U+FFFD must still be rewritten.
-    # The extractor is stubbed because the subject is the guard's scope, not
-    # poppler's glyph mapping: U+FFFD reaches us either from an unmappable glyph
-    # or from our own errors="replace" decode, and the guard must not fire for
-    # a binary type in any case.
+    # A PDF has no header charset to lose and no refetch that would change its
+    # output, so the guard could only strand the row. Stubbed because the subject
+    # is the guard's scope, not how U+FFFD got there.
     import web_pdftext
 
     monkeypatch.setattr(web_pdftext, "pdf_text", lambda _raw: "unmapped glyph � here")

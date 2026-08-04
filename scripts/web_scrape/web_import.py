@@ -32,9 +32,8 @@ Text is mandatory: a page with no text is dropped from flippatch's
 ``evidence_pages`` and can't be indexed or quoted, so importing one would be a
 no-op dressed as evidence. Supply it with ``--text-file`` (recorded as
 ``text_source='manual'``, or what ``--text-source`` declares) or let the file's
-own handler extract it — OCR for an image, pypdf for a PDF, the markdown
-conversion for saved HTML. A **scanned PDF** is the case that needs the override: its handler
-reads a text layer that isn't there, so its words have to come from OCR run
+own handler extract it. A **scanned PDF** is the case that needs the override:
+it has no text layer for its handler to read, so its words have to come from OCR run
 outside this tool, and ``--text-source ocr`` keeps ``manual`` meaning what it
 says — a person is answerable for those words. For an image, prefer
 reviewing the OCR draft (``--dry-run``) against the picture and importing the
@@ -194,8 +193,8 @@ def import_one(
     ``text`` is supplied text and always wins over what the file's handler
     extracts; it lands on ``text_source='manual'`` unless ``text_source`` says
     which machine read it instead. That override exists for the document a
-    handler cannot read at all — a scanned PDF routes to pypdf, which finds no
-    text layer, so OCR run outside this tool is the only way to give it words,
+    handler cannot read at all — a scanned PDF has no text layer, so OCR run
+    outside this tool is the only way to give it words,
     and calling that a transcription would put a person's name on a machine's
     reading. ``title``/``date`` likewise override extracted values — for an
     image both are otherwise null, since OCR'd words are not a title and an

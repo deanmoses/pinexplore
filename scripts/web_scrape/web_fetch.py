@@ -26,8 +26,8 @@ it, ``--render`` forces it, ``--thin-chars`` tunes the threshold.
 Each document type is a handler in ``content_types`` (one file per type): it
 claims its content types, recognizes itself from a magic-byte signature, and owns
 how its body is decoded, extracted, stored, and warned about. PDFs (rulesheets,
-flyers, press releases), for instance, are stored as raw ``.pdf`` blobs and parsed
-with pypdf — no charset decode, no render. A new type is a new file there, not a
+flyers, press releases), for instance, are stored as raw ``.pdf`` blobs — no
+charset decode, no render. A new type is a new file there, not a
 branch through this module.
 """
 
@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
 import web_video
 from content_types import ContentHandler, ExtractedMeta, handler_for
-from web_http import MAX_RESPONSE_BYTES, http_get
+from web_http import http_get
 from web_render import (
     THIN_TEXT_CHARS,
     BrowserUnavailableError,
@@ -274,7 +274,7 @@ def fetch_one(
         why = (
             f"unsupported content-type {resp.content_type}"
             if resp.skip == "content-type"
-            else f"response > {MAX_RESPONSE_BYTES // (1024 * 1024)}MB"
+            else f"response > {(resp.limit or 0) // (1024 * 1024)}MB"
         )
         print(f"skip ({why}): {url}", file=sys.stderr)
         web_cache.append_fetch(

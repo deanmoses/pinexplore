@@ -204,7 +204,7 @@ def test_declared_text_source_needs_text_to_describe(cache, jpeg):
 
 def test_imported_pdf_keeps_its_handler_text_source(cache, tmp_path, make_pdf):
     # A hand-downloaded PDF (403 to the fetcher, fine in a browser) still gets
-    # its text from pypdf; only the *provenance of the bytes* differs.
+    # its text from the PDF handler; only the *provenance of the bytes* differs.
     path = tmp_path / "flyer.pdf"
     path.write_bytes(make_pdf(title="Spec Sheet", moddate="D:20240115093000Z"))
     _run(cache, path, url="https://www.ipdb.org/files/4583/spec.pdf")
