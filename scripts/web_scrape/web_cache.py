@@ -26,9 +26,9 @@ Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
     search(term)          FTS5 BM25-ranked pages (url, title, snippet)
     quote(url, needle)    sentence(s) in a page's text containing a needle;
-                          context=N widens each hit to ±N lines.
-                          quote_hits() is the same read with each hit's
-                          enclosing heading, so one call yields a whole cite
+                          context=N widens each hit by ±N lines, clipped to
+                          its section. quote_hits() is the same read with each
+                          hit's enclosing heading, so one call yields a cite
     outline(url)          the page's heading tree with per-section char counts
     section(url, heading) one heading's block(s), without the whole page
     get(url)              the full page record — the last resort
@@ -568,6 +568,17 @@ class _Heading(NamedTuple):
     text: str  # without the # prefix
 
 
+# One step toward a heading: its ATX level and casefolded text. The level is
+# part of the step's identity because a same-named heading one level down is a
+# different place — nested inside its parent's block, not a repeat of it.
+type _TreeStep = tuple[int, str]
+
+# A heading's place in the document tree: each still-open ancestor in order,
+# then the heading itself. Two headings share a path exactly when they are the
+# same place, which is the only time ``outline()`` may collapse them to one row.
+type _TreePath = tuple[_TreeStep, ...]
+
+
 class _Doc(NamedTuple):
     """A page's text parsed for navigation: frontmatter span + headings."""
 
@@ -705,19 +716,15 @@ def quote_hits(
     """``quote()`` with each hit's enclosing heading — a cite in one call.
 
     A patch cite needs a verbatim ``quote`` **and** a ``locator`` saying where
-    it sits. Plain ``quote()`` answers only the first, which left an author
-    running outline/section afterwards to rediscover a position this read
-    already knew. Each hit carries ``heading``: the nearest heading at or above
-    it (or ``"metadata"`` inside the frontmatter, None above the first
-    heading), ready to become ``locator: in the <x> section`` and to pass
-    straight back to ``section()``.
+    it sits, and this answers both at once. Each hit carries ``heading``: the
+    nearest heading at or above it (or ``"metadata"`` inside the frontmatter,
+    None above the first heading), ready to become ``locator: in the <x>
+    section`` and to pass straight back to ``section()``.
 
-    The name is the match's own, so it does not move when ``context`` widens
-    the window around it — a locator describes the evidence, not the viewport.
-    A hit never leaves the section it names: padding is clipped to the
-    section's bounds and windows merge only within one, so every word on show
-    is under the heading it is labelled with, and any span you lift out of a
-    hit can carry that hit's locator.
+    A hit never leaves the section it names — the name is the match's own, and
+    padding clips to the section's bounds — so ``context`` changes how much you
+    see without changing where the evidence is said to live, and any span
+    lifted out of a hit can carry that hit's locator.
 
     The heading is only as good as the page's own markup. A page-builder site
     whose tab labels are real ``<h2>``s yields locators like ``$7,995``;
@@ -738,19 +745,10 @@ def quote_hits(
             for s in sentences(line)
             if low in s.lower()
         ]
-    # Every hit stays inside one section, so its label is true of every word in
-    # it. Two things enforce that, and both are needed:
-    #
-    # Padding is clipped to the section's own bounds. Widening by ±N would
-    # otherwise spill across a heading, and any line of that spill could be
-    # quoted under a name it doesn't belong to. Clipping means a large
-    # `--context` yields less than ±N near a section edge; that is the honest
-    # answer — `section()` shows the whole block when you want it.
-    #
-    # And merging is confined to one section. Windows either side of a heading
-    # can abut exactly, and merged they would carry one name while holding
-    # evidence from two sections — so citing the far match would silently
-    # attribute it to the near one.
+    # Both the clip and the section check keep a hit's label true of every word
+    # in it: unclipped padding spills across a heading, and windows either side
+    # of one can abut exactly, so a merged pair would hold evidence from two
+    # sections under a single name. Near an edge that yields less than ±N.
     windows: list[tuple[int, int, int, int]] = []  # start, end, match line, section
     for i, line in enumerate(doc.lines):
         if low not in line.lower():
@@ -814,34 +812,25 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     parent's count contains its children's. Pure read over ``pages.text``.
 
     A name repeated **in the same place in the tree** — same ancestors, same
-    level — collapses to a single row carrying ``count`` and the summed size,
-    held at its first appearance. Page-builder sites make this the difference
+    level — collapses to one row carrying ``count`` and the summed size, held
+    at its first appearance. Page-builder sites make this the difference
     between a map and a wall: a real product page came back with 98 headings,
-    35 distinct — ``RETIRED`` twelve times, an edition panel repeated for each
-    responsive variant. Nothing actionable is lost, because ``section()``
-    already answers a repeated name with *every* matching block; a duplicate's
-    position among its identical siblings was never something a caller could
-    act on separately.
+    35 distinct. Nothing actionable is lost, since ``section()`` answers a
+    repeated name with every matching block anyway.
 
-    Both halves of that key are load-bearing, though ``section()`` matches on
-    the bare name and ignores them:
+    Two things narrow that collapse, and each prevents a specific lie:
 
-    - **The ancestor path**, because the same name under two different parents
-      is two different places. A manufacturer index repeating a ``back to top``
-      link under each maker would otherwise collapse to one row filed under the
-      first maker, asserting the others have none.
-    - **The level**, because a same-named heading one level down is *nested
-      inside* its parent's block. Merging those would count the same chars
-      twice and report a section larger than the page.
+    - **Rows collapse on their whole ``_TreePath``**, not on the bare name, so
+      a name in two places stays two rows. A manufacturer index repeating
+      ``back to top`` under each maker would otherwise file them all under the
+      first, asserting the rest have none.
+    - **A repeat that opens a subsection** is never collapsed. The list is
+      flat, so a row's parent is whatever precedes it at a lower level, and
+      folding away a repeated parent strands its children under whatever
+      printed last.
 
-    So a name that recurs across parents or levels stays several rows, and it
-    is their counts together that add up to what ``section()`` returns for it.
-
-    A repeat that **opens a subsection of its own** is never collapsed either.
-    The result is a flat list, so a row's parent is whatever heading precedes
-    it at a lower level; folding away a repeated parent would leave its
-    children stranded under whatever happened to be printed last. Keeping that
-    occurrence in place keeps every child under the parent it belongs to.
+    So a name recurring across places stays several rows, and their counts
+    together add up to what ``section()`` returns for it.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
@@ -857,36 +846,27 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
         entries.append(
             OutlineEntry(level=0, heading="body", chars=len(body_block), count=1)
         )
-    # Collapse repeats of a name in the same place in the tree. Order is first
-    # appearance, so the tree still reads top-down. `stack` is the chain of
-    # still-open ancestors, making the key a full path — see the docstring for
-    # why the path and the level both belong in it.
-    seen: dict[tuple[tuple[tuple[int, str], ...], int, str], int] = {}
+    # Collapse repeats of a name in the same place in the tree, held at first
+    # appearance so the tree still reads top-down. Popping the closed ancestors
+    # first leaves `stack` as this heading's own path, which is the key.
+    seen: dict[_TreePath, int] = {}
     stack: list[_Heading] = []
     for k, h in enumerate(doc.headings):
         while stack and stack[-1].level >= h.level:
             stack.pop()
-        # Ancestors carry their level, not just their name: two chains can spell
-        # the same names at different levels and still be different nodes.
-        key = (
-            tuple((a.level, a.text.casefold()) for a in stack),
-            h.level,
-            h.text.casefold(),
-        )
         stack.append(h)
+        path: _TreePath = tuple((a.level, a.text.casefold()) for a in stack)
         chars = len(_heading_block(doc, k))
-        # Descendants follow immediately in document order, so a deeper next
-        # heading is this occurrence's child. Such an occurrence holds its
-        # place; collapsing it would strand that child under whatever row was
-        # printed last.
+        # A deeper next heading is this occurrence's child; collapsing such an
+        # occurrence would strand that child under whatever row printed last.
         opens_subsection = (
             k + 1 < len(doc.headings) and doc.headings[k + 1].level > h.level
         )
-        if key in seen and not opens_subsection:
-            entries[seen[key]]["chars"] += chars
-            entries[seen[key]]["count"] += 1
+        if path in seen and not opens_subsection:
+            entries[seen[path]]["chars"] += chars
+            entries[seen[path]]["count"] += 1
             continue
-        seen[key] = len(entries)
+        seen[path] = len(entries)
         entries.append(
             OutlineEntry(level=h.level, heading=h.text, chars=chars, count=1)
         )
@@ -962,48 +942,30 @@ def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding
     re-writing the same loop each time.
 
     A URL is held if it is cached under its normalized form **or** as the
-    ``raw_url`` of a page that redirected elsewhere; ``stored_url`` is set in
-    that second case. That fallback is why this belongs in the library: 8% of
-    the current corpus lives under a different address than the one requested
-    (a path migration, a canonical redirect), and a hand-rolled ``get()`` loop
-    reports those as missing — sending a campaign off to refetch pages it
-    already has, and planning around a gap that isn't there.
+    ``raw_url`` of a page that redirected elsewhere, in which case
+    ``stored_url`` says where it landed. That fallback is why this belongs in
+    the library: 8% of the current corpus lives under a different address than
+    the one requested, and a plain ``get()`` loop calls all of those missing.
+    Aliases match normalized, like every other lookup here.
 
-    The alias is matched **normalized**, not by exact string, so a source list
-    that spells the old address with a trailing slash or different host casing
-    still resolves. Comparing raw text here would reintroduce, on the fallback
-    path, exactly the duplicate-identity problem ``normalize_url`` exists to
-    prevent.
+    It is best-effort, though: ``raw_url`` holds the **most recent** fetch's
+    address, so refetching through the canonical URL replaces the alias and the
+    old address reports missing again. Closing that would take a permanent
+    alias table in the system-of-record, which is a lot to buy a planning
+    convenience when the cost of the gap is one redundant polite refetch.
 
-    The fallback is best-effort by construction: ``pages.raw_url`` holds the
-    address of the **most recent** fetch, so refetching a page through its
-    canonical URL (or through a second alias) replaces the first one, and a
-    lookup by the older address goes back to reporting missing. Making that
-    durable would mean a permanent alias table in the system-of-record, which
-    is a large change to buy a planning convenience — and the cost of the gap
-    is one redundant polite refetch, which is what happens without this helper
-    anyway. So this narrows the window rather than closing it.
-
-    A URL that doesn't parse gets a ``Holding`` carrying ``error`` rather than
-    raising: this is a bulk read over a hand-written list, and one malformed
-    line must not cost the answer for the other sixty. Such an entry is not
-    "missing" — missing means *looked up and not found*, and this one could not
-    be looked up at all. Reporting no answer as a negative answer is the
-    distinction worth keeping; callers should keep the two apart.
-
-    That is the only claim ``error`` makes. It is not a verdict on whether the
-    fetcher would accept the URL: an ``ftp://`` address or a host with a space
-    normalizes fine here and is reported plainly as uncached. Judging
-    fetchability is ``web_fetch``'s job, which it already does per-URL, and a
-    second opinion in the store would be one to keep in sync for no gain.
+    A URL that doesn't parse gets a ``Holding`` carrying ``error`` instead of
+    raising. That is not the same as missing — missing means looked up and not
+    found, and this one could not be looked up at all — so callers should keep
+    the two apart. It says nothing about whether the fetcher would accept the
+    URL; that is ``web_fetch``'s call and it makes it per URL.
     """
     own = con is None
     con = con or connect(read_only=True)
     try:
-        # Built on the first URL that isn't cached under its own key, not up
-        # front: the index costs a scan of every redirected page, and a list
-        # that is entirely in hand — the "am I ready to plan" case — never
-        # needs it. None means "not built yet", which {} cannot say.
+        # None, not {}: the index costs a scan of every redirected page, so it
+        # waits for the first miss and a list that is entirely in hand never
+        # pays for it.
         aliases: dict[NormalizedUrl, NormalizedUrl] | None = None
         holdings: list[Holding] = []
         for asked in urls:
@@ -1011,23 +973,18 @@ def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding
                 page = get(asked, con=con)
                 stored_url = None
                 if page is None:
-                    # Not under its own key — but the fetcher may have followed
-                    # a redirect and filed it under the destination.
                     if aliases is None:
                         aliases = _alias_index(con)
                     target = aliases.get(normalize_url(asked))
                     if target is not None:
                         page = get(target, con=con)
-                        # Only claim a stored address when it actually resolved,
-                        # so a Holding never carries a location for a page it
-                        # is simultaneously reporting as absent.
+                        # Never report a location for a page also being called
+                        # absent.
                         if page is not None:
                             stored_url = target
             except ValueError as exc:
-                # An unparseable URL is the caller's line to fix, and reporting
-                # it as "not cached" would be a lie that sends it to the
-                # fetcher. Isolate it: this is a bulk read, and one bad line in
-                # a campaign list must not cost the answer for the other sixty.
+                # One bad line in a campaign list must not cost the answer for
+                # the other sixty.
                 holdings.append(
                     Holding(asked=asked, page=None, stored_url=None, error=str(exc))
                 )
@@ -1189,13 +1146,11 @@ def _cmd_section(url: str, heading: str) -> int:
 def _read_url_list(path: str) -> list[tuple[str, str]]:
     """``(url, source line)`` pairs from a file. Blank and ``#`` lines skipped.
 
-    Deliberately the same shape ``web_fetch.py --from-file`` reads — its
-    ``url<TAB>query`` TSV — so one list drives both: check what you hold, fetch
-    what you don't. The whole line is kept alongside the URL because the query
-    column is the **search intent**, which ``web_fetch`` logs against the fetch
-    as provenance. Emitting a bare URL for a miss would hand back a list that
-    fetches the same pages while silently dropping the record of why they were
-    wanted.
+    The same shape ``web_fetch.py --from-file`` reads — its ``url<TAB>query``
+    TSV — so one list drives both: check what you hold, fetch what you don't.
+    The whole line is kept because the query column is the search intent, which
+    ``web_fetch`` logs as provenance; re-emitting a miss as a bare URL would
+    fetch the same page while dropping the record of why it was wanted.
     """
     pairs: list[tuple[str, str]] = []
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
@@ -1209,15 +1164,14 @@ def _read_url_list(path: str) -> list[tuple[str, str]]:
 
 
 def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int:
-    # (url to check, line to re-emit if it's missing). A URL given on the
-    # command line has no query column, so it stands for itself.
+    # A URL given on the command line has no query column, so it stands as its
+    # own source line.
     sources: list[tuple[str, str]] = [(u, u) for u in urls]
     if from_file:
         try:
             sources += _read_url_list(from_file)
         except OSError as exc:
-            # A mistyped path is the likeliest way to call this wrong, and a
-            # traceback buries which path it was.
+            # A traceback would bury which path was wrong.
             print(f"cannot read {from_file}: {exc.strerror or exc}", file=sys.stderr)
             return 2
     if not sources:
@@ -1234,10 +1188,6 @@ def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int
         if h["page"] is None and not h["error"]
     ]
     if missing_only:
-        # The source line verbatim, query column and all — this is meant to be
-        # redirected to a file and handed straight to `web_fetch.py
-        # --from-file`, and the fetch that results should carry the same search
-        # intent the campaign wrote down.
         for _, line in missing:
             print(line)
         for h in invalid:
@@ -1317,11 +1267,17 @@ def main(argv: list[str] | None = None) -> int:
     p_search.add_argument("term")
     p_search.add_argument("--limit", type=int, default=20)
 
-    p_quote = sub.add_parser("quote", help="sentences in a page containing a needle")
+    p_quote = sub.add_parser(
+        "quote", help="sentences containing a needle, each labelled with its section"
+    )
     p_quote.add_argument("url")
     p_quote.add_argument("needle")
     p_quote.add_argument(
-        "--context", type=int, default=0, help="widen each hit to ±N lines"
+        "--context",
+        type=int,
+        default=0,
+        help="widen each hit by ±N lines, clipped to its section "
+        "(hits that then overlap merge)",
     )
 
     p_outline = sub.add_parser("outline", help="heading tree with section sizes")
@@ -1345,7 +1301,8 @@ def main(argv: list[str] | None = None) -> int:
     p_have.add_argument(
         "--missing",
         action="store_true",
-        help="print only the uncached URLs, bare — feeds web_fetch.py --from-file",
+        help="print only the uncached entries, each as its source line with the "
+        "query column intact — feeds web_fetch.py --from-file",
     )
 
     p_get = sub.add_parser("get", help="full page record (text on stdout)")
