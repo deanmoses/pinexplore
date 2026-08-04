@@ -929,6 +929,30 @@ class Holding(TypedDict):
     error: str | None  # why it couldn't be looked up at all (unparseable URL)
 
 
+def _alias_index(con: sqlite3.Connection) -> dict[NormalizedUrl, NormalizedUrl]:
+    """Map each redirected page's requested address to where it was filed.
+
+    One pass over the redirected rows rather than a scan per lookup, and only
+    the two key columns — selecting whole rows would pull the corpus's text
+    into memory for nothing. Newest first plus ``setdefault``, so when one
+    requested address has redirected to different destinations over time the
+    alias resolves to the current one rather than to whichever row SQLite
+    happened to return first.
+    """
+    index: dict[NormalizedUrl, NormalizedUrl] = {}
+    for row in con.execute(
+        "SELECT url, raw_url FROM pages WHERE raw_url IS NOT NULL "
+        "ORDER BY last_fetched_at DESC"
+    ):
+        try:
+            index.setdefault(normalize_url(row["raw_url"]), row["url"])
+        except ValueError:
+            # A stored address that no longer parses must not take out every
+            # lookup in the batch; it just contributes no alias.
+            continue
+    return index
+
+
 def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding]:
     """Which of ``urls`` the cache already holds, in the order asked.
 
@@ -976,22 +1000,11 @@ def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding
     own = con is None
     con = con or connect(read_only=True)
     try:
-        # One pass to index the aliases, rather than a scan per URL. Only the
-        # two key columns: the corpus's text would be megabytes for nothing.
-        # Newest first + setdefault, so when one requested address has
-        # redirected to different destinations over time the alias resolves to
-        # the current one, not to whatever order SQLite happened to return.
-        aliases: dict[NormalizedUrl, NormalizedUrl] = {}
-        for row in con.execute(
-            "SELECT url, raw_url FROM pages WHERE raw_url IS NOT NULL "
-            "ORDER BY last_fetched_at DESC"
-        ):
-            try:
-                aliases.setdefault(normalize_url(row["raw_url"]), row["url"])
-            except ValueError:
-                # A stored address that no longer parses must not take out
-                # every lookup in the batch; it just contributes no alias.
-                continue
+        # Built on the first URL that isn't cached under its own key, not up
+        # front: the index costs a scan of every redirected page, and a list
+        # that is entirely in hand — the "am I ready to plan" case — never
+        # needs it. None means "not built yet", which {} cannot say.
+        aliases: dict[NormalizedUrl, NormalizedUrl] | None = None
         holdings: list[Holding] = []
         for asked in urls:
             try:
@@ -1000,10 +1013,16 @@ def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding
                 if page is None:
                     # Not under its own key — but the fetcher may have followed
                     # a redirect and filed it under the destination.
+                    if aliases is None:
+                        aliases = _alias_index(con)
                     target = aliases.get(normalize_url(asked))
                     if target is not None:
                         page = get(target, con=con)
-                        stored_url = target
+                        # Only claim a stored address when it actually resolved,
+                        # so a Holding never carries a location for a page it
+                        # is simultaneously reporting as absent.
+                        if page is not None:
+                            stored_url = target
             except ValueError as exc:
                 # An unparseable URL is the caller's line to fix, and reporting
                 # it as "not cached" would be a lie that sends it to the
@@ -1194,7 +1213,13 @@ def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int
     # command line has no query column, so it stands for itself.
     sources: list[tuple[str, str]] = [(u, u) for u in urls]
     if from_file:
-        sources += _read_url_list(from_file)
+        try:
+            sources += _read_url_list(from_file)
+        except OSError as exc:
+            # A mistyped path is the likeliest way to call this wrong, and a
+            # traceback buries which path it was.
+            print(f"cannot read {from_file}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
     if not sources:
         print("no URLs given (pass URLs or --from-file)", file=sys.stderr)
         return 2
@@ -1231,8 +1256,14 @@ def _cmd_have(urls: list[str], from_file: str | None, missing_only: bool) -> int
             continue
         # Size in chars, because that is what a read of this page will cost.
         facts = [f"{len(page['text'] or '')} chars"]
-        label = _TYPE_LABELS.get(page["content_type"] or "", page["content_type"])
-        facts.append(label or "html")
+        content_type = page["content_type"]
+        if content_type is None:
+            # The column is nullable, and "html" is the wrong guess to print
+            # for a row that never recorded one — say what is known instead.
+            facts.append("type unrecorded")
+        else:
+            label = _TYPE_LABELS.get(content_type, content_type)
+            facts.append(label or "html")
         if page["text_source"] not in (None, "html"):
             facts.append(page["text_source"] or "")
         if page["rendered"]:

@@ -942,6 +942,21 @@ def test_cli_have_marks_invalid_apart_from_missing(cache, capsys, tmp_path):
     assert "unparseable URL" in captured.err
 
 
+def test_have_builds_the_alias_index_only_on_a_miss(cache, monkeypatch):
+    held = wc.normalize_url("https://held.example/a")
+    _seed(cache, url=held, text="body")
+
+    def explode(_con):
+        raise AssertionError("alias index built when nothing missed")
+
+    monkeypatch.setattr(wc, "_alias_index", explode)
+    # Every URL found under its own key, so the redirect fallback is never
+    # consulted — and its scan of every redirected page is not paid for. That
+    # scan grows with the corpus; this call should not.
+    assert wc.have([held], con=cache)[0]["page"] is not None
+    assert wc.have([], con=cache) == []
+
+
 def test_have_reports_no_stored_url_for_a_direct_hit(cache):
     url = wc.normalize_url("https://direct.example/a")
     _seed(cache, url=url, text="body")
@@ -987,6 +1002,27 @@ def test_cli_have_missing_prints_bare_urls_for_web_fetch(cache, capsys, tmp_path
 def test_cli_have_needs_urls(cache, capsys):
     assert wc.main(["have"]) == 2
     assert "no URLs given" in capsys.readouterr().err
+
+
+def test_cli_have_reports_an_unreadable_list_cleanly(cache, capsys, tmp_path):
+    assert wc.main(["have", "--from-file", str(tmp_path / "typo.tsv")]) == 2
+    err = capsys.readouterr().err
+    # A mistyped path is the likeliest way to call this wrong; the message has
+    # to name the path rather than bury it in a traceback.
+    assert "cannot read" in err
+    assert "typo.tsv" in err
+
+
+def test_cli_have_does_not_guess_a_type_it_never_recorded(cache, capsys):
+    url = wc.normalize_url("https://legacy.example/a")
+    # content_type is nullable and _seed never sets it — a row from before the
+    # column was populated. Printing "html" there would assert something the
+    # row does not say.
+    _seed(cache, url=url, text="body")
+    assert wc.main(["have", url]) == 0
+    out = capsys.readouterr().out
+    assert "type unrecorded" in out
+    assert "html" not in out
 
 
 def test_cli_get_splits_metadata_to_stderr_text_to_stdout(cache, capsys):
