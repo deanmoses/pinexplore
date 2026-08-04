@@ -164,7 +164,7 @@ After an extraction change, run `web_backfill.py` to re-derive `text`/`title` fo
 
 ### Determining what the cache already holds
 
-Planning a data patch campaign starts with this question: "which of these N sources am I already holding, and which still need fetching?". `have` answers this:
+The `have` command answers "which of these N sources am I already holding, and which still need fetching?":
 
 ```console
 $ cache have --from-file sources.tsv
