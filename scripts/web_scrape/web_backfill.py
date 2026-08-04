@@ -56,8 +56,13 @@ told to fix the problem by refetching — which would re-run the identical
 extraction and strand the row.
 
 ``title`` is rewritten along with ``text`` — both come from the same
-extractor. ``last_updated`` is left alone: neither htmldate nor the PDF Info
-dict changed, so recomputing is a no-op. No ``fetches`` row is written — no
+extractor — **except on an imported row**, whose title may be a person's:
+``web_import.py --title`` stores a curated one while leaving ``text_source``
+as the handler's own, so only the ``imported`` flag distinguishes it. There
+the stored title stands, which costs nothing when the importer supplied none
+(it is already this extraction, from identical bytes). ``last_updated`` is
+left alone: neither htmldate nor the PDF Info dict changed, so recomputing is
+a no-op — and it is the other field ``web_import.py`` lets a person set. No ``fetches`` row is written — no
 fetch happened. Updates go through a normal SQL ``UPDATE`` on ``pages``, so
 the FTS sync triggers keep the index current.
 """
@@ -97,8 +102,8 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
     }
     try:
         rows = db.execute(
-            "SELECT url, content_sha, content_type, text, text_source FROM pages "
-            "ORDER BY url"
+            "SELECT url, content_sha, content_type, text, text_source, title, "
+            "imported FROM pages ORDER BY url"
         ).fetchall()
         for row in rows:
             # Routed by handler, never by a MIME literal: the HTML handler
@@ -166,9 +171,18 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                     file=sys.stderr,
                 )
                 continue
+            # An imported row's title may be a person's, so it is never
+            # rewritten. `web_import.py --title` stores a curated title while
+            # leaving text_source as the handler's own (only --text-file moves
+            # it to `manual`), so text_source cannot tell the two apart —
+            # `imported` can. Keeping the stored value is safe either way: where
+            # the importer supplied no --title, it already *is* this extraction,
+            # since identical bytes extract identically. Same reasoning
+            # web_fetch's _resolve_text applies to a manual row.
+            title = row["title"] if row["imported"] else meta.title
             db.execute(
                 "UPDATE pages SET text = ?, title = ?, text_source = ? WHERE url = ?",
-                (meta.text, meta.title, handler.text_source, row["url"]),
+                (meta.text, title, handler.text_source, row["url"]),
             )
             tally["rewritten"] += 1
         db.commit()

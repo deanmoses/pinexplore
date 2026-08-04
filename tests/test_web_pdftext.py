@@ -40,6 +40,19 @@ def test_normalize_keeps_leading_whitespace_and_drops_trailing():
     assert out == "ARCADE      SPECIAL\n• Black Armor"
 
 
+def test_normalize_keeps_the_first_content_line_indented():
+    # str.strip() on the joined text would eat this indentation along with the
+    # blank lines above it. On Stern's feature matrix the first content line
+    # belongs to the description column, so losing its offset pulls it into the
+    # label column — the silent column shift -layout exists to prevent.
+    out = web_pdftext._normalize("\n\n          In Stern Pinball's TRANSFORMERS\n")
+    assert out == "          In Stern Pinball's TRANSFORMERS"
+
+
+def test_normalize_still_drops_blank_lines_at_both_ends():
+    assert web_pdftext._normalize("\n\f\nreal text\n\n\f") == "real text"
+
+
 def test_normalize_returns_none_for_whitespace_only_output():
     # None, never "" — the caller's thin-content warning fires on None, and a
     # blank-text page must not be stored silently.

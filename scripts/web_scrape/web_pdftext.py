@@ -79,9 +79,21 @@ def _normalize(out: str) -> str | None:
     whitespace goes because ``-layout`` right-pads to the widest line on the
     page, which is alignment nobody reads. Leading whitespace **stays** — it is
     the column alignment, the entire reason for using this mode.
+
+    That last promise is why the ends are trimmed by *line* and not by
+    ``str.strip()``: stripping the joined text eats the indentation of the first
+    content line along with the blank lines above it. Measured over the corpus
+    that hit five of seven PDFs, up to 36 columns — including Stern's feature
+    matrix, whose first line belongs to the description column and would have
+    been pulled left into the label column. One line, but exactly the kind of
+    silent column shift ``-layout`` is here to prevent.
     """
     lines = [line.rstrip() for line in out.replace("\f", "\n").splitlines()]
-    return "\n".join(lines).strip() or None
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) or None
 
 
 def pdf_text(raw: bytes) -> str | None:

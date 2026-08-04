@@ -175,6 +175,53 @@ def test_backfill_ignores_types_that_are_not_backfillable(cache):
     assert _row(cache, url)["text"] == "OCR draft"
 
 
+def test_backfill_keeps_a_curated_title_on_an_imported_html_row(cache):
+    # `web_import.py --title` stores a person's title but leaves text_source as
+    # the handler's own — only --text-file moves it to `manual`. So text_source
+    # cannot protect it and `imported` must: re-extracting the text is still
+    # wanted, replacing the title with the document's own is not.
+    url = _seed_row(cache, "https://a.example/imported", PAGE, text_source="html")
+    cache.execute(
+        "UPDATE pages SET title = ?, imported = 1 WHERE url = ?",
+        ("A Curated Title", url),
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 1
+    row = _row(cache, url)
+    assert row["title"] == "A Curated Title"  # not the blob's <title>
+    assert "1510 Webster Street" in (row["text"] or "")  # text still refreshed
+
+
+@needs_poppler
+def test_backfill_keeps_a_curated_title_on_an_imported_pdf_row(cache, make_pdf):
+    # Same contract for PDFs, where the document's own title is often worse than
+    # useless: Stern's feature matrix declares the internal codename "CHEDDAR
+    # Matrix" in its Info dict.
+    url = _seed_row(
+        cache,
+        "https://a.example/matrix.pdf",
+        make_pdf(text="Feature matrix", title="CHEDDAR Matrix"),
+        text_source="pdf",
+        content_type="application/pdf",
+    )
+    cache.execute(
+        "UPDATE pages SET title = ?, imported = 1 WHERE url = ?",
+        ("Transformers MTMTE Feature Matrix (Stern, 2026)", url),
+    )
+    web_backfill.backfill(con=cache)
+    row = _row(cache, url)
+    assert row["title"] == "Transformers MTMTE Feature Matrix (Stern, 2026)"
+    assert row["text"] == "Feature matrix"
+
+
+def test_backfill_rewrites_the_title_on_a_fetched_row(cache):
+    # The flip side, so the guard above can't quietly freeze every title: a
+    # machine-fetched row's title is the extractor's and follows it.
+    url = _seed_row(cache, "https://a.example/fetched", PAGE, text_source="html")
+    web_backfill.backfill(con=cache)
+    assert _row(cache, url)["title"] == "New Title"
+
+
 def test_backfill_writes_nothing_when_the_extractor_is_unavailable(
     cache, make_pdf, monkeypatch
 ):
