@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
 import web_video
 from content_types import ContentHandler, ExtractedMeta, handler_for
-from web_http import http_get
+from web_http import Resp, http_get
 from web_render import (
     THIN_TEXT_CHARS,
     BrowserUnavailableError,
@@ -187,6 +187,26 @@ def _resolve_text(
 # --------------------------------------------------------------------------- #
 
 
+def _too_large_reason(resp: Resp) -> str:
+    """Why a response was refused for size, and what to do about it.
+
+    Says whose cap it was, since limits are per content type and a bare number
+    doesn't identify which one applied, and names the attribute that changes it
+    — an operator meeting this needs to decide whether the document belongs in
+    the cache, not to go looking for where the number lives.
+    """
+    cap_mb = (resp.limit or 0) / (1024 * 1024)
+    size = (
+        f"{resp.declared_size / (1024 * 1024):.1f}MB response"
+        if resp.declared_size is not None
+        else "response"
+    )
+    return (
+        f"{size} over the {cap_mb:g}MB cap for {resp.content_type} — raise "
+        f"max_response_bytes on its handler in content_types/ to cache it"
+    )
+
+
 def fetch_one(
     con: sqlite3.Connection,
     raw_url: str,
@@ -274,7 +294,7 @@ def fetch_one(
         why = (
             f"unsupported content-type {resp.content_type}"
             if resp.skip == "content-type"
-            else f"response > {(resp.limit or 0) // (1024 * 1024)}MB"
+            else _too_large_reason(resp)
         )
         print(f"skip ({why}): {url}", file=sys.stderr)
         web_cache.append_fetch(

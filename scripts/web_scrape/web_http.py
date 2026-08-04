@@ -79,6 +79,12 @@ class Resp(NamedTuple):
     # The cap that was exceeded, when ``skip`` is 'too-large'. Reported rather
     # than assumed by the caller, which can't know which type's limit applied.
     limit: int | None = None
+    # The body size the server declared, when it declared one. The read stops at
+    # the cap, so this is the only way to say *how far* over a response is —
+    # which is what decides whether the cap should move. Trustworthy here
+    # because we never ask for a content encoding, so it counts the same bytes
+    # we would have stored.
+    declared_size: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -161,9 +167,11 @@ def http_get(url: str) -> Resp:
         elif handler is None:
             return Resp(status, content_type, final_url, None, None, "content-type")
         cap = _cap(handler)
+        declared = resp.headers.get("Content-Length")
         raw = prefix + resp.read(max(cap + 1 - len(prefix), 0))
     if len(raw) > cap:
-        return Resp(status, content_type, final_url, None, None, "too-large", cap)
+        size = int(declared) if declared is not None and declared.isdigit() else None
+        return Resp(status, content_type, final_url, None, None, "too-large", cap, size)
     # The handler decodes to text (HTML) or returns None for a binary type (a PDF),
     # whose bytes are stored verbatim and whose text the extractor fills in later.
     text = handler.decode(raw, header_charset)

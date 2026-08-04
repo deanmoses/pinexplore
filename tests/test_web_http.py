@@ -54,15 +54,23 @@ def test_request_url_idna_encodes_non_ascii_host():
 
 
 class _FakeHeaders:
-    def __init__(self, content_type: str, charset: str | None) -> None:
+    def __init__(
+        self, content_type: str, charset: str | None, body_len: int | None = None
+    ) -> None:
         self._ct = content_type
         self._cs = charset
+        self._len = body_len
 
     def get_content_type(self) -> str:
         return self._ct
 
     def get_content_charset(self) -> str | None:
         return self._cs
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        if name.lower() == "content-length" and self._len is not None:
+            return str(self._len)
+        return default
 
 
 class _FakeResp:
@@ -79,7 +87,7 @@ class _FakeResp:
         may_read: bool,
     ) -> None:
         self.status = status
-        self.headers = _FakeHeaders(content_type, charset)
+        self.headers = _FakeHeaders(content_type, charset, len(body))
         self._body = body
         self._url = url
         self._may_read = may_read
@@ -322,6 +330,12 @@ def test_an_unsniffable_binary_is_refused_after_a_few_bytes(small_caps, monkeypa
     )
     assert web_http.http_get("https://x.com/blob").skip == "content-type"
     assert made[0]._pos <= 16, made[0]._pos
+
+
+def test_too_large_reports_the_declared_size(small_caps, monkeypatch):
+    # The read stops at the cap, so the body itself can't say how far over it is.
+    _stub_urlopen(monkeypatch, content_type="text/html", body=b"x" * 5000)
+    assert web_http.http_get("https://x.com/p").declared_size == 5000
 
 
 def test_too_large_reports_the_cap_it_hit(small_caps, monkeypatch):

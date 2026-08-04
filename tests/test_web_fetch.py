@@ -797,3 +797,48 @@ def test_thin_fat_meta_page_escalates_to_render(cache, monkeypatch):
     _stub_render(monkeypatch, body=RICH_HTML)
     _run(cache, url, browser=object())
     assert _page(cache, url)["rendered"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# The too-large message — self-contained, because nobody reads the docs first
+# --------------------------------------------------------------------------- #
+
+
+def _too_large(content_type: str, limit: int, declared: int | None) -> str:
+    return web_fetch._too_large_reason(
+        web_http.Resp(
+            200,
+            content_type,
+            "https://x.com/d",
+            None,
+            None,
+            "too-large",
+            limit,
+            declared,
+        )
+    )
+
+
+def test_too_large_names_the_type_whose_cap_applied():
+    # A bare "> 50MB" doesn't identify which limit that is now that they differ
+    # per type, and the number alone isn't something to act on.
+    msg = _too_large("application/pdf", 50 * 1024 * 1024, 62 * 1024 * 1024)
+    assert "50MB cap for application/pdf" in msg
+    assert "max_response_bytes" in msg
+
+
+def test_too_large_reports_how_far_over_it_is():
+    # 51MB and 500MB call for different decisions; the read stops at the cap, so
+    # the declared length is the only thing that can tell them apart.
+    assert "62.0MB response" in _too_large(
+        "application/pdf", 50 * 1024 * 1024, 62 * 1024 * 1024
+    )
+
+
+def test_too_large_stays_readable_when_no_length_was_declared():
+    msg = _too_large("application/pdf", 50 * 1024 * 1024, None)
+    assert msg.startswith("response over the 50MB cap")
+
+
+def test_too_large_reports_each_types_own_cap():
+    assert "10MB cap for text/html" in _too_large("text/html", 10 * 1024 * 1024, None)
