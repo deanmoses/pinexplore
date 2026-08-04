@@ -52,6 +52,7 @@ mothballed; see [PindataScripts.md](PindataScripts.md).
 - Python 3
 - [uv](https://docs.astral.sh/uv/) (manages the venv and `duckdb` Python package)
 - Node.js (for `npx prettier` and `npx markdownlint-cli2` in pre-commit hooks)
+- [poppler](https://poppler.freedesktop.org/) (`brew install poppler`) — `pdftotext` reads the web cache's PDF evidence. Without it PDFs still cache, but extract no text until poppler is installed and `web_backfill.py` is re-run.
 
 ## Querying the Database
 

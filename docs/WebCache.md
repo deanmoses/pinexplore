@@ -93,7 +93,18 @@ Flags: `--no-render` (pure stdlib, never render), `--render` (force a render for
 
 ### PDF documents
 
-PDFs (rulesheets, flyers, press releases) are first-class evidence, fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent, text and title via pypdf, `last_updated` from the PDF's own `/ModDate` (then `/CreationDate`) — a real date or null. The blob is the unmodified document, so a citation re-verifies against the exact bytes. A scanned/image-only PDF extracts to no text (there is no OCR on this path) and prints a loud warning; see `--text-source` under [Import](#import-when-fetching-fails).
+PDFs (manuals, flyers, spec sheets, rulesheets, press releases) are first-class evidence, fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the unmodified document, so a citation re-verifies against the exact bytes. Title and `last_updated` come from the PDF's own Info dict via pypdf — `/ModDate`, then `/CreationDate` — a real date or null.
+
+The text comes from poppler's **`pdftotext -layout`**, which rebuilds the page as it was printed. That is not a performance choice, it is a correctness one. A PDF has no structure, only glyphs at coordinates, so "the text of this document" is always a reconstruction; reading glyphs in content-stream order (what pypdf does) yields text whose words are all correct and whose _meaning_ is not. On Jersey Jack's Sonic comparison flyer it emitted the heading `SPECIAL EDITION` followed by the **Collector's** Edition bullets, and `COLLECTOR'S EDITION` followed by the **Special** Edition ones — the two editions' feature lists swapped. Every string was verbatim, so a quote gate passes it; only the attribution was wrong, which is the half a catalog correction is made of.
+
+Two things to know before quoting a PDF:
+
+- **`-layout` pads with spaces to hold columns apart**, so one line can carry text from two columns at once. That is what makes the flyer readable, but a quote lifted blindly across a gutter can splice unrelated columns into one sentence. Read the line, not just the match.
+- **Marks that are not text stay invisible.** Stern's per-model feature matrices draw their Pro/Premium/LE checkmarks as vector art, not glyphs, so no text extractor recovers them — the features all survive, the column they belong to does not. Treat an extracted feature matrix as a list of features the _game family_ has, and go to the rendered page for which model gets what.
+
+This needs poppler installed (`brew install poppler`). It is the one system binary the cache requires; a host without it stores the blob, extracts nothing, and prints how to fix it — then `web_backfill.py` fills the text in once poppler is there, so a missing binary never blanks text another host already stored.
+
+A scanned/image-only PDF has no text layer at all and extracts to nothing here, with a loud warning. Its words need OCR, which this path does not do; see `--text-source` under [Import](#import-when-fetching-fails).
 
 ### Images (OCR)
 
@@ -164,7 +175,7 @@ The markdown's sections (`#`, `##`, …) are the page's own h1–h6 tags, and a 
 
 The `title` column is `og:title` → `<title>` → first `<h1>`, stored verbatim — no site-suffix stripping, because no separator heuristic can tell `… | Jersey Jack Pinball` from `Sirmo : Magic Screen`, where the separator joins two halves of one real title.
 
-After an extraction change, run `web_backfill.py` to re-derive `text`/`title` for every cached HTML page from its stored blob (skipping `manual` and other non-`html` text sources, and never blanking a non-empty row).
+After an extraction change, run `web_backfill.py` to re-derive `text`/`title` for every cached HTML page and PDF from its stored blob, so the corpus reflects one extractor instead of splitting into before and after. It skips any row whose `text_source` isn't the one that handler produces — `manual` transcriptions and `ocr` text (including the OCR'd scanned PDFs, whose empty text layer is exactly why they were OCR'd) — and never blanks a non-empty row. Images and video transcripts are never swept: their text comes from a recognizer that moves under us, not a parser, so a bulk re-run would churn reviewed evidence with no extractor change to justify it.
 
 ### Determining what the cache already holds
 
@@ -310,10 +321,11 @@ scripts/web_scrape/
   web_video.py               transport: YouTube caption tracks via yt-dlp
   content_types/             one handler per document type (the registry)
   web_ocr.py                 OCR backend for images (macOS Vision)
+  web_pdftext.py             PDF text backend (poppler pdftotext -layout)
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
   web_import.py              CLI: file a hand-obtained file as evidence
-  web_backfill.py            CLI: re-extract all cached HTML from stored blobs
+  web_backfill.py            CLI: re-extract all cached HTML + PDFs from stored blobs
 
 sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches

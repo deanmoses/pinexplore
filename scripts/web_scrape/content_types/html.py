@@ -572,6 +572,9 @@ class HtmlHandler(ContentHandler):
     extension = "html"
     text_source = "html"
     renderable = True
+    # Markdown conversion is a pure function of the blob; re-running it is how the
+    # corpus stays on one extractor.
+    backfillable = True
 
     @override
     def decode(self, raw: bytes, header_charset: str | None) -> str | None:

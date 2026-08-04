@@ -722,17 +722,57 @@ def test_extract_pdf_no_metadata_yields_none_title_and_date(make_pdf):
     assert "Hello PDF evidence" in (meta.text or "")
 
 
-def test_extract_pdf_malformed_returns_empty_not_raises():
-    # A broken/garbage PDF must not crash a batch: empty meta, no exception, so the
-    # blob is still stored and the caller's thin-content warning fires.
-    assert _extract_pdf(b"%PDF-1.4 not really a pdf") == ct.ExtractedMeta(
-        None, None, None
-    )
+def test_extract_pdf_malformed_reports_unavailable_not_raises():
+    # A broken/garbage PDF must not crash a batch — but "we couldn't read it" is
+    # not "it has no text", so it reports unavailable rather than an empty
+    # result. That is what stops a failed re-read from blanking text the
+    # byte-identical blob once supported.
+    meta = _extract_pdf(b"%PDF-1.4 not really a pdf")
+    assert meta.text is None
+    assert meta.unavailable is True
 
 
 def test_extract_pdf_scanned_image_only_has_no_text(make_pdf):
-    # An image-only PDF (here: empty content) extracts to nothing — text is None.
-    assert _extract_pdf(make_pdf(text="")).text is None
+    # An image-only PDF (here: empty content) really does have no text layer.
+    # Unlike the malformed case above this is a *finding*: unavailable stays
+    # False, so the row is written and the thin-content warning surfaces it.
+    meta = _extract_pdf(make_pdf(text=""))
+    assert meta.text is None
+    assert meta.unavailable is False
+
+
+def test_extract_pdf_keeps_metadata_when_the_text_backend_is_missing(
+    make_pdf, monkeypatch
+):
+    # Text and metadata come from different backends precisely so one can't take
+    # the other down: with poppler absent the document still declares its title.
+    import web_pdftext
+
+    def _unavailable(_raw: bytes) -> str | None:
+        raise web_pdftext.PdfTextUnavailableError("no poppler here")
+
+    monkeypatch.setattr(web_pdftext, "pdf_text", _unavailable)
+    meta = _extract_pdf(
+        make_pdf(title="Sonic Compare Flyer", moddate="D:20260529000000Z")
+    )
+    assert meta.title == "Sonic Compare Flyer"
+    assert meta.last_updated == "2026-05-29"
+    assert meta.text is None
+    assert meta.unavailable is True
+
+
+def test_extract_pdf_keeps_text_when_the_info_dict_is_unreadable(monkeypatch):
+    # The other direction: a PDF whose metadata pypdf chokes on still yields its
+    # full text, instead of one malformed Info field costing the whole document.
+    import content_types.pdf as pdf_mod
+    import web_pdftext
+
+    monkeypatch.setattr(pdf_mod, "_pdf_meta", lambda _raw: (None, None))
+    monkeypatch.setattr(web_pdftext, "pdf_text", lambda _raw: "9 Stand-Up Targets")
+    meta = _extract_pdf(b"%PDF-1.4 whatever")
+    assert meta.text == "9 Stand-Up Targets"
+    assert meta.title is None
+    assert meta.unavailable is False
 
 
 # --------------------------------------------------------------------------- #

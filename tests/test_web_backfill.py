@@ -1,15 +1,25 @@
-"""Tests for web_backfill — re-extraction of cached HTML from stored blobs.
+"""Tests for web_backfill — re-extraction of cached documents from stored blobs.
 
 All offline: rows and blobs are seeded into the tmp cache, then the backfill
 runs against that connection. What matters here is the *selection contract*
 (which rows a re-extraction may touch) and the guards, not the extraction
-itself — that is test_content_types' job.
+itself — that is test_content_types' job. The PDF cases need poppler, since a
+selection contract that never runs the extractor proves nothing about it.
 """
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
 import web_backfill
 import web_cache as wc
+from content_types import extension_for
+
+needs_poppler = pytest.mark.skipif(
+    shutil.which("pdftotext") is None,
+    reason="poppler's pdftotext is not installed on this host",
+)
 
 
 def _row(cache, url: str) -> wc.PageRow:
@@ -19,12 +29,16 @@ def _row(cache, url: str) -> wc.PageRow:
     return row
 
 
-def _seed_blob(html: bytes) -> str:
-    """Write an HTML blob into the tmp raw dir; return its content sha."""
-    sha = wc.content_sha(html)
-    path = wc.blob_path(sha, ext="html")
+def _seed_blob(body: bytes, ext: str = "html") -> str:
+    """Write a blob into the tmp raw dir under its type's extension; return its sha.
+
+    The extension is not cosmetic: the backfill re-opens a blob by the extension
+    its content type declares, so a PDF seeded as ``.html`` reads as missing.
+    """
+    sha = wc.content_sha(body)
+    path = wc.blob_path(sha, ext=ext)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(html)
+    path.write_bytes(body)
     return sha
 
 
@@ -39,7 +53,8 @@ def _seed_row(
     title: str | None = "old title",
     write_blob: bool = True,
 ) -> str:
-    sha = _seed_blob(html) if write_blob else wc.content_sha(html)
+    ext = extension_for(content_type) or "html"
+    sha = _seed_blob(html, ext) if write_blob else wc.content_sha(html)
     url = wc.normalize_url(url)
     wc.upsert_page(
         cache,
@@ -103,18 +118,61 @@ def test_backfill_skips_foreign_text_sources(cache):
     assert ocr["text_source"] == "ocr"
 
 
-def test_backfill_ignores_non_html_rows(cache):
+@needs_poppler
+def test_backfill_rewrites_pdf_rows(cache, make_pdf):
+    # PDFs are swept alongside HTML: both are read by a parser whose output is a
+    # pure function of the stored bytes, which is what `backfillable` marks.
     url = _seed_row(
         cache,
-        "https://a.example/doc.pdf",
-        b"%PDF-1.4 junk",
-        text="pdf text layer",
+        "https://a.example/flyer.pdf",
+        make_pdf(text="9 Stand-Up Targets", title="Flyer"),
+        text="text from the old extractor",
         text_source="pdf",
         content_type="application/pdf",
     )
     tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 1
+    row = _row(cache, url)
+    assert row["text"] == "9 Stand-Up Targets"
+    assert row["text_source"] == "pdf"
+
+
+@needs_poppler
+def test_backfill_leaves_ocr_text_on_a_pdf_row_alone(cache, make_pdf):
+    # The load-bearing case: a scanned PDF whose words were recovered by OCR
+    # outside this tool. Its text layer is empty *by definition* — that is why
+    # it was OCR'd — so re-extracting would trade recovered evidence for
+    # nothing. Guarded by text_source, not by content type.
+    url = _seed_row(
+        cache,
+        "https://a.example/scan.pdf",
+        make_pdf(text=""),
+        text="OCR'd from the scan by hand",
+        text_source="ocr",
+        content_type="application/pdf",
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["skipped (other text_source)"] == 1
+    row = _row(cache, url)
+    assert row["text"] == "OCR'd from the scan by hand"
+    assert row["text_source"] == "ocr"
+
+
+def test_backfill_ignores_types_that_are_not_backfillable(cache):
+    # An image's text comes from a recognizer that moves under us (Vision ships
+    # with the OS), so it is never swept in bulk — no extractor change here
+    # justifies churning it.
+    url = _seed_row(
+        cache,
+        "https://a.example/flyer.jpg",
+        b"\xff\xd8\xff junk",
+        text="OCR draft",
+        text_source="ocr",
+        content_type="image/jpeg",
+    )
+    tally = web_backfill.backfill(con=cache)
     assert all(count == 0 for count in tally.values())
-    assert _row(cache, url)["text"] == "pdf text layer"
+    assert _row(cache, url)["text"] == "OCR draft"
 
 
 def test_backfill_never_blanks_nonempty_text(cache, capsys):
