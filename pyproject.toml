@@ -5,13 +5,17 @@ description = "DuckDB-based exploration and validation tool for pinball catalog 
 requires-python = ">=3.14"
 dependencies = [
     "boto3>=1.42.72",
+    "certifi>=2025.1.31",
     "charset-normalizer>=3.4.0",
     "duckdb>=1.5.0",
     "htmldate>=1.10.0",
+    "lxml>=6.0.0",
+    # Exact pin: the HTML extractor passes every markdownify option explicitly.
+    # To bump, re-verify that enumeration against the new DefaultOptions surface.
+    "markdownify==1.2.3",
     "playwright>=1.49.0",
     "matplotlib>=3.10.8",
     "seaborn>=0.13.2",
-    "trafilatura>=2.1.0",
     "pypdf>=6.13.3",
     "yt-dlp>=2026.7.4",
     # Image OCR (web_ocr) via the macOS Vision framework — no system binary and
@@ -26,6 +30,7 @@ dev = [
     "mypy>=1.18.2",
     "ruff>=0.14.6",
     "boto3-stubs[s3]>=1.42.72",
+    "lxml-stubs>=0.5.1",
 ]
 
 [tool.pytest.ini_options]
@@ -141,8 +146,6 @@ check_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = [
-    "trafilatura",
-    "trafilatura.*",
     "htmldate",
     "slugify",
     "playwright.*",

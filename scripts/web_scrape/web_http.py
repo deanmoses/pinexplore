@@ -37,8 +37,7 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # cap the body we'll buffer + extract
 # lacks intermediates plenty of real sites serve: americanpinball.com failed with
 # "self-signed certificate in certificate chain" while curl fetched it fine. That
 # failure is indistinguishable from a dead site at the call site, so a page the
-# author can see in a browser silently becomes uncitable. certifi ships with
-# trafilatura, so this adds no dependency.
+# author can see in a browser silently becomes uncitable.
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 

@@ -36,9 +36,11 @@ def is_thin(text: str | None, thin_chars: int = THIN_TEXT_CHARS) -> bool:
     """True when extracted text is missing or below the thin threshold.
 
     The symptom of a client-rendered (JS-only) page: the plain GET returns a
-    skeleton that trafilatura extracts to near-nothing. This is the trigger for
+    skeleton whose extracted body is near-nothing. This is the trigger for
     the headless-render fallback, and — when no render rescues it — the signal
-    that turns a silent ``[200] (new)`` into a loud warning.
+    that turns a silent ``[200] (new)`` into a loud warning. For HTML the
+    caller measures the body-only text, never the assembled metadata+body (see
+    ``web_fetch._thin_probe``).
     """
     return text is None or len(text.strip()) < thin_chars
 

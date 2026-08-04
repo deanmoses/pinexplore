@@ -32,8 +32,8 @@ Text is mandatory: a page with no text is dropped from flippatch's
 ``evidence_pages`` and can't be indexed or quoted, so importing one would be a
 no-op dressed as evidence. Supply it with ``--text-file`` (recorded as
 ``text_source='manual'``, or what ``--text-source`` declares) or let the file's
-own handler extract it — OCR for an image, pypdf for a PDF, trafilatura for
-saved HTML. A **scanned PDF** is the case that needs the override: its handler
+own handler extract it — OCR for an image, pypdf for a PDF, the markdown
+conversion for saved HTML. A **scanned PDF** is the case that needs the override: its handler
 reads a text layer that isn't there, so its words have to come from OCR run
 outside this tool, and ``--text-source ocr`` keeps ``manual`` meaning what it
 says — a person is answerable for those words. For an image, prefer

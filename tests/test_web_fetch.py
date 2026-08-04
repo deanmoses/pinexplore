@@ -332,7 +332,8 @@ def test_render_failure_falls_back_to_plain_result(cache, monkeypatch):
     _run(cache, url, browser=object())
     row = _page(cache, url)
     assert not row["rendered"]  # kept the plain (thin) result
-    assert (row["text"] or "").strip() == "hi"
+    # The plain result's body text survives, after the (empty) frontmatter.
+    assert (row["text"] or "").endswith("---\n\nhi")
     # The failed render is still audited (None status, rendered=1), then the plain
     # fetch (200, rendered=0) — fetches logs every fetch.
     assert _rendered(cache) == [1, 0]
@@ -764,3 +765,35 @@ def test_video_fetch_without_a_prior_row_uses_the_video_metadata(cache, monkeypa
     assert row["last_updated"] == "2024-03-01"
     assert row["text_source"] == "vtt"
     assert "shipped in 1986" in (row["text"] or "")
+
+
+# --------------------------------------------------------------------------- #
+# Thin detection measures the body, never the assembled metadata+body
+# --------------------------------------------------------------------------- #
+
+# A JS shell with rich og: metadata: the assembled text is fat (>200 chars of
+# head tags) while the body is an empty mount point. Exactly the page whose
+# thinness the metadata block must not mask.
+FAT_META_THIN_BODY = (
+    "<html><head><title>Fat Meta</title>"
+    '<meta property="og:description" content="'
+    + "A very rich page description crawlers get instead of content. " * 8
+    + '"></head><body><div id="root"></div></body></html>'
+).encode()
+
+
+def test_thin_detection_ignores_fat_metadata_block(cache, monkeypatch, capsys):
+    url = "https://spa.example/x"
+    _stub_get(monkeypatch, body=FAT_META_THIN_BODY)
+    _run(cache, url)  # no browser: a thin page warns instead of rendering
+    row = _page(cache, url)
+    assert len(row["text"] or "") > web_render.THIN_TEXT_CHARS  # fat on paper
+    assert "thin content, likely JS-only" in capsys.readouterr().err
+
+
+def test_thin_fat_meta_page_escalates_to_render(cache, monkeypatch):
+    url = "https://spa.example/y"
+    _stub_get(monkeypatch, body=FAT_META_THIN_BODY)
+    _stub_render(monkeypatch, body=RICH_HTML)
+    _run(cache, url, browser=object())
+    assert _page(cache, url)["rendered"] == 1

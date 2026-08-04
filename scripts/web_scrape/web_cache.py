@@ -16,10 +16,20 @@ Layout (all under ingest_sources/web/, R2-backed and gitignored):
                         The extension is derived from a row's content_type, not
                         stored — see content_types.extension_for / blob_path
 
-Query helpers:
-    search(term)        FTS5 BM25-ranked pages (url, title, snippet)
-    quote(url, needle)  sentence(s) in a page's text containing a needle
-    get(url)            the full page record
+The raw blobs exist for re-extraction — re-deriving pages.text when the
+extraction changes (web_backfill.py) and testing new extractions against real
+pages without re-hitting any source. That is their only job: nothing resolves
+a historical sha, and citations verify against pages.text, not blobs. They
+live on disk rather than in SQLite to keep the DB lean and the FTS index fast.
+
+Query helpers (an escalation ladder — reach for the next rung only when the
+previous one wasn't enough):
+    search(term)          FTS5 BM25-ranked pages (url, title, snippet)
+    quote(url, needle)    sentence(s) in a page's text containing a needle;
+                          context=N widens each hit to ±N lines
+    outline(url)          the page's heading tree with per-section char counts
+    section(url, heading) one heading's block(s), without the whole page
+    get(url)              the full page record — the last resort
 """
 
 from __future__ import annotations
@@ -31,7 +41,7 @@ import sqlite3
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WEB_DIR = REPO_ROOT / "ingest_sources" / "web"
@@ -526,14 +536,185 @@ def sentences(text: str | None) -> list[str]:
     return [s.strip() for s in _SENTENCE_SPLIT.split(text or "") if s.strip()]
 
 
-def quote(url: str, needle: str, con: sqlite3.Connection | None = None) -> list[str]:
-    """Sentences in a page's extracted text containing ``needle`` (case-insensitive).
+def quote(
+    url: str,
+    needle: str,
+    *,
+    context: int = 0,
+    con: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Text in a page containing ``needle`` (case-insensitive), document order.
 
-    The starting point for a verbatim ``note:`` quote in a data patch. The
-    author still confirms wording against the stored raw blob before shipping.
+    With ``context=0`` (the default): the matching sentences, one per hit — the
+    starting point for a verbatim ``cite.quote`` in a data patch. The author
+    still confirms wording against the stored raw blob before shipping.
+
+    With ``context=N``: each hit widened to ±N surrounding lines, so confirming
+    a span's surroundings rarely needs the whole page. Overlapping windows
+    merge and duplicate matches collapse; results stay in document order — no
+    reordering toward "better-looking" matches, which would conflict with the
+    windows and buy skim-comfort at the cost of a confusing contract.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
     low = needle.lower()
-    return [s for s in sentences(rec["text"]) if low in s.lower()]
+    if context <= 0:
+        return [s for s in sentences(rec["text"]) if low in s.lower()]
+    lines = (rec["text"] or "").split("\n")
+    windows: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        if low not in line.lower():
+            continue
+        start, end = max(0, i - context), min(len(lines), i + context + 1)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    return ["\n".join(lines[s:e]).strip() for s, e in windows]
+
+
+# --------------------------------------------------------------------------- #
+# Structural reads (outline / section)
+# --------------------------------------------------------------------------- #
+
+# An ATX heading line as the HTML extractor emits them: 1-6 #'s, a space, text.
+_ATX_HEADING = re.compile(r"^(#{1,6}) (.+)$")
+
+
+class _Heading(NamedTuple):
+    """One heading line in a page's stored markdown."""
+
+    line_idx: int
+    level: int  # 1-6, the ATX level
+    text: str  # without the # prefix
+
+
+class _Doc(NamedTuple):
+    """A page's text parsed for navigation: frontmatter span + headings."""
+
+    lines: list[str]
+    fm_close: int | None  # line index of the closing --- delimiter, or None
+    headings: list[_Heading]
+
+
+class OutlineEntry(TypedDict):
+    """One row of ``outline()``: a heading and the size of its section."""
+
+    level: int
+    heading: str
+    chars: int
+
+
+def _parse_doc(text: str) -> _Doc:
+    """Parse stored text into its frontmatter span and heading list.
+
+    The HTML extractor assembles ``text`` as YAML-style frontmatter (``---`` on
+    line 1, ``key: value`` lines, a closing ``---``) followed by the page as
+    markdown. Recognition is positional: the frontmatter exists only when line
+    1 is ``---``, and the next ``---`` line closes it — frontmatter holds only
+    ``key: value`` lines, so the first such line is always ours, never a
+    thematic break from the page. Headings are ATX lines outside the
+    frontmatter and outside code fences. A literal paragraph starting with
+    ``#`` and a space can still misparse — accepted: these helpers are
+    navigation aids, and a misparse costs a slightly-off outline, never a
+    wrong quote (verification and FTS read no structure).
+    """
+    lines = text.split("\n")
+    fm_close: int | None = None
+    if lines and lines[0] == "---":
+        fm_close = next((i for i, ln in enumerate(lines) if i and ln == "---"), None)
+    start = fm_close + 1 if fm_close is not None else 0
+    headings: list[_Heading] = []
+    in_fence = False
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _ATX_HEADING.match(line)
+        if match:
+            headings.append(_Heading(i, len(match.group(1)), match.group(2).strip()))
+    return _Doc(lines, fm_close, headings)
+
+
+def _metadata_block(doc: _Doc) -> str | None:
+    """The frontmatter's ``key: value`` lines (no delimiters), or None."""
+    if doc.fm_close is None:
+        return None
+    return "\n".join(doc.lines[1 : doc.fm_close]).strip()
+
+
+def _body_block(doc: _Doc) -> str | None:
+    """Everything after the frontmatter, or None when there is none."""
+    if doc.fm_close is None:
+        return None
+    return "\n".join(doc.lines[doc.fm_close + 1 :]).strip()
+
+
+def _heading_block(doc: _Doc, k: int) -> str:
+    """The block ``doc.headings[k]`` opens: its line through the line before
+    the next heading at the same or a higher (smaller-number) level."""
+    h = doc.headings[k]
+    end = next(
+        (h2.line_idx for h2 in doc.headings[k + 1 :] if h2.level <= h.level),
+        len(doc.lines),
+    )
+    return "\n".join(doc.lines[h.line_idx : end]).strip()
+
+
+def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntry]:
+    """The page's heading tree with a per-section char count, document order.
+
+    A few hundred chars that say where a long page's weight sits ("intro 2K,
+    machine list 4K, 41 comments 32K"), so a session can pull one section with
+    ``section()`` instead of reading the whole text. On an assembled page the
+    tree is led by two level-0 pseudo-sections, ``metadata`` (the frontmatter)
+    and ``body`` (everything after it). Each count is the size of the block
+    ``section()`` would return for that name — subsections included, so a
+    parent's count contains its children's. Pure read over ``pages.text``.
+    """
+    rec = get(url, con=con)
+    if not rec or not rec.get("text"):
+        return []
+    doc = _parse_doc(rec["text"] or "")
+    entries: list[OutlineEntry] = []
+    meta_block, body_block = _metadata_block(doc), _body_block(doc)
+    if meta_block is not None:
+        entries.append(OutlineEntry(level=0, heading="metadata", chars=len(meta_block)))
+    if body_block is not None:
+        entries.append(OutlineEntry(level=0, heading="body", chars=len(body_block)))
+    entries.extend(
+        OutlineEntry(level=h.level, heading=h.text, chars=len(_heading_block(doc, k)))
+        for k, h in enumerate(doc.headings)
+    )
+    return entries
+
+
+def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> list[str]:
+    """The block(s) under a heading: from its line to the next heading at the
+    same or a higher level, heading line included — so a session that navigated
+    here can cite "in the <heading> section" for free. Case-insensitive exact
+    match on the heading text; if it matches more than once, every matching
+    block is returned — ambiguity should surface, not silently pick one. On an
+    assembled page two pseudo-sections are addressable too: ``"metadata"`` (the
+    frontmatter's ``key: value`` lines) and ``"body"`` (everything after it)."""
+    rec = get(url, con=con)
+    if not rec or not rec.get("text"):
+        return []
+    doc = _parse_doc(rec["text"] or "")
+    target = heading.strip().casefold()
+    blocks: list[str] = []
+    pseudo = {"metadata": _metadata_block, "body": _body_block}.get(target)
+    if pseudo is not None:
+        block = pseudo(doc)
+        if block is not None:
+            blocks.append(block)
+    blocks.extend(
+        _heading_block(doc, k)
+        for k, h in enumerate(doc.headings)
+        if h.text.casefold() == target
+    )
+    return blocks

@@ -33,6 +33,14 @@ class ExtractedMeta(NamedTuple):
     # and should overwrite a stale row, while "we learned nothing this time" must
     # never blank text already extracted from the very same bytes.
     unavailable: bool = False
+    # The document-body portion of ``text``, for thin detection only. The HTML
+    # handler assembles ``text`` as metadata block + body, and a JS-only page
+    # ships rich ``og:`` tags precisely because crawlers don't run JS — so the
+    # assembled text reads fat where the page is empty. Thin checks must measure
+    # this field when it is not None (an empty string is a real, thin body, not
+    # a missing one); None means "measure ``text``", which every other handler
+    # leaves as is.
+    body_text: str | None = None
 
 
 class ContentHandler:

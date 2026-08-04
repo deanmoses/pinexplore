@@ -372,3 +372,135 @@ def test_imported_defaults_to_null_when_omitted(cache):
     url = wc.normalize_url("https://fetched.example/x")
     _seed(cache, url=url)  # _seed never passes imported
     assert _page(cache, url)["imported"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Structural reads: outline() / section() / quote(context=)
+# --------------------------------------------------------------------------- #
+
+# An assembled page the way the HTML extractor emits one, with the traps the
+# helpers must survive: a page's own "## body" heading (colliding with the
+# body pseudo-section's name), a duplicated heading, and a heading-shaped
+# line inside a code fence.
+STRUCTURED_TEXT = """---
+title: Structured Doc
+og:description: A test document.
+---
+
+# Intro
+
+Intro line one.
+Intro line two.
+
+## Machine List
+
+- Cavalier
+- Wizard
+
+### Sub List
+
+deep item
+
+## body
+
+This page's own h2 named body.
+
+```
+# fake heading inside a fence
+```
+
+## Machine List
+
+Second list section."""
+
+
+def _seed_structured(cache) -> str:
+    url = wc.normalize_url("https://structured.example/doc")
+    _seed(cache, url=url, title="Structured Doc", text=STRUCTURED_TEXT)
+    return url
+
+
+def test_outline_headings_levels_and_counts(cache):
+    url = _seed_structured(cache)
+    entries = wc.outline(url, con=cache)
+    assert [(e["level"], e["heading"]) for e in entries] == [
+        (0, "metadata"),
+        (0, "body"),
+        (1, "Intro"),
+        (2, "Machine List"),
+        (3, "Sub List"),
+        (2, "body"),
+        (2, "Machine List"),
+    ]
+    # A fence-hidden heading is not a heading.
+    assert all("fake" not in e["heading"] for e in entries)
+    # Each count is the size of the block section() returns for that heading.
+    intro = next(e for e in entries if e["heading"] == "Intro")
+    assert intro["chars"] > len("# Intro\nIntro line one.")
+    # The body pseudo-section spans everything after the frontmatter — here
+    # exactly the # Intro block, since Intro is the document's only h1.
+    body_entry = entries[1]
+    assert body_entry["chars"] >= intro["chars"]
+
+
+def test_outline_without_frontmatter_is_plain_headings(cache):
+    url = wc.normalize_url("https://plain.example/doc")
+    _seed(cache, url=url, text="prose\n\n## Section A\n\ncontent")
+    assert wc.outline(url, con=cache) == [
+        {"level": 2, "heading": "Section A", "chars": len("## Section A\n\ncontent")}
+    ]
+
+
+def test_section_returns_block_until_same_or_higher_heading(cache):
+    url = _seed_structured(cache)
+    blocks = wc.section(url, "machine list", con=cache)  # case-insensitive
+    # Duplicate headings: every matching block returned, document order.
+    assert len(blocks) == 2
+    # The first block leads with its heading line and includes its subsection,
+    # stopping at the page's own "## body" (same level).
+    assert blocks[0].startswith("## Machine List")
+    assert "### Sub List" in blocks[0]
+    assert "deep item" in blocks[0]
+    assert "own h2 named body" not in blocks[0]
+    assert blocks[1] == "## Machine List\n\nSecond list section."
+
+
+def test_section_body_pseudo_spans_whole_document_body(cache):
+    url = _seed_structured(cache)
+    blocks = wc.section(url, "body", con=cache)
+    # Two blocks: the body pseudo-section (everything after the frontmatter)
+    # and the page's own h2 named "body" — ambiguity surfaces rather than
+    # silently picking one.
+    assert len(blocks) == 2
+    body_block = blocks[0]
+    assert body_block.startswith("# Intro")  # no marker line, just the body
+    assert "Second list section." in body_block  # spans to EOF
+    own_h2_block = blocks[1]
+    assert own_h2_block.startswith("## body")
+    assert "own h2 named body" in own_h2_block
+    assert "Second list section." not in own_h2_block  # closed by ## Machine List
+
+
+def test_section_metadata_is_frontmatter_lines_without_delimiters(cache):
+    url = _seed_structured(cache)
+    blocks = wc.section(url, "metadata", con=cache)
+    assert len(blocks) == 1
+    assert blocks[0] == "title: Structured Doc\nog:description: A test document."
+
+
+def test_quote_context_zero_matches_sentence_behavior(cache):
+    url = _seed_structured(cache)
+    assert wc.quote(url, "Intro line one", con=cache) == ["Intro line one."]
+
+
+def test_quote_context_windows_merge_in_document_order(cache):
+    url = _seed_structured(cache)
+    # Two adjacent matching lines with ±1 context overlap: one merged window.
+    windows = wc.quote(url, "intro line", context=1, con=cache)
+    assert len(windows) == 1
+    assert "Intro line one.\nIntro line two." in windows[0]
+    # Distant matches stay separate windows, in document order.
+    windows = wc.quote(url, "list", context=1, con=cache)
+    assert len(windows) >= 2
+    joined = "\n---\n".join(windows)
+    assert joined.index("Machine List") < joined.index("Second list section.")

@@ -304,10 +304,9 @@ def test_extract_date_is_most_recent_real_date():
 
 def test_extract_keeps_image_caption_lists_without_image_markers():
     # Some evidence pages (tilt.it maker pages) are a thin caption list beside
-    # a photo gallery — the page's only body text. Plain trafilatura prunes the
-    # link/image-dense block as boilerplate and keeps only the comments; we
-    # extract with images enabled so those paragraphs survive, then strip the
-    # ![alt](url) markers so the evidence text stays prose.
+    # a photo gallery — the page's only body text. Those paragraphs survive the
+    # whole-document conversion, and the convert_img override emits alt text
+    # alone, so no ![alt](url) markers land in the evidence text.
     gallery = "".join(
         f'<a href="http://x/g/{i}.jpg"><img src="http://x/g/t{i}.jpg" alt="www.x"/></a>'
         for i in range(6)
@@ -324,10 +323,10 @@ def test_extract_keeps_image_caption_lists_without_image_markers():
 
 
 def test_extract_skips_googleoff_blocks():
-    # A page whose real content is thin (a short machine list) while a
-    # googleoff-delimited cookie-consent block is by far the largest text on
-    # the page — trafilatura would otherwise pick the banner as main content
-    # (seen on tilt.it maker pages using the WP Cookie Law Info plugin).
+    # A googleoff-delimited cookie-consent block beside a short machine list
+    # (seen on tilt.it maker pages using the WP Cookie Law Info plugin). This
+    # page is caught twice over — the googleoff regex and the consent-container
+    # match both apply; the unclassed-googleoff test below isolates the regex.
     banner = (
         "<!--googleoff: all-->"
         '<div id="cookie-law-info-bar" data-nosnippet="true">'
@@ -346,6 +345,325 @@ def test_extract_skips_googleoff_blocks():
     text = _extract_html(html).text or ""
     assert "Jungle Life" in text
     assert "uses cookies" not in text
+
+
+# --------------------------------------------------------------------------- #
+# HTML handler — whole-document markdown conversion
+# --------------------------------------------------------------------------- #
+
+
+def test_assembled_text_is_frontmatter_then_wellformed_markdown():
+    html = (
+        "<html><head><title>T</title></head><body>"
+        "<h1>Top</h1><p>x</p><h3>Deep</h3><p>y</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    lines = text.split("\n")
+    # YAML-style frontmatter: --- on line 1, key lines, a closing ---.
+    assert lines[0] == "---"
+    assert lines[1] == "title: T"
+    assert "---" in lines[1:]
+    # Page headings keep their source ATX levels — an <h1> is #, not demoted —
+    # and nothing above them outranks them: the document is well-formed markdown.
+    assert "# Top" in lines
+    assert "### Deep" in lines
+
+
+def test_frontmatter_delimiters_present_even_without_metadata():
+    # The shape is positional and constant, so parsers need no fallback case.
+    text = _extract_html("<html><body><p>Only prose.</p></body></html>").text or ""
+    lines = text.split("\n")
+    assert lines[0] == "---"
+    assert lines[1] == "---"
+    assert "Only prose." in text
+
+
+def test_footer_and_comment_text_present():
+    # The motivating cases: a footer street address and page comments are
+    # exactly what a main-content extractor discards and this pipeline keeps.
+    html = (
+        "<html><body><article><p>Article.</p></article>"
+        '<div id="comments"><p>The machine list is wrong; Nordamatic made 12.</p></div>'
+        "<footer><p>Multimorphic, Inc. 2109 Couch Dr, McKinney</p></footer>"
+        "</body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "2109 Couch Dr" in text
+    assert "Nordamatic made 12" in text
+
+
+def test_no_inline_markers_in_output():
+    html = (
+        "<html><body><p>A <b>bold</b> and <strong>strong</strong> and "
+        '<i>italic</i> and <em>em</em> claim with <a href="http://x/">a link</a>.'
+        "</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "A bold and strong and italic and em claim with a link." in text
+    assert "**" not in text
+    assert "](" not in text
+
+
+def test_image_alt_with_brackets_and_parens_survives():
+    # The case the old ![alt](url) post-processing regex missed completely.
+    html = '<html><body><p><img alt="a ] bracket" src="http://x/y_(1).png"></p></body></html>'
+    text = _extract_html(html).text or ""
+    assert "a ] bracket" in text
+    assert "y_(1).png" not in text
+
+
+def test_table_without_thead_promotes_first_row_no_phantom_header():
+    html = (
+        "<html><body><table>"
+        "<tr><td>nombre</td><td>año</td><td>mes</td><td>tipo</td><td>JUG.</td></tr>"
+        "<tr><td>Cavalier</td><td>1979</td><td></td><td>Electromecánica</td><td>4</td></tr>"
+        "</table></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "| nombre | año | mes | tipo | JUG. |" in text
+    # The real first row is the header — no phantom empty header row above it.
+    assert "|  |  |" not in text
+    # Empty cells keep their pipes: the gap says "no month recorded".
+    assert "| Cavalier | 1979 |  | Electromecánica | 4 |" in text
+
+
+def test_select_noscript_template_text_present():
+    html = (
+        "<html><body>"
+        "<select><option>Alben (19)</option><option>CIDELSA (7)</option></select>"
+        "<noscript>Enable JS for maps.</noscript>"
+        "<template><p>Template prose.</p></template>"
+        "</body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Alben (19)" in text
+    assert "CIDELSA (7)" in text
+    assert "Enable JS for maps." in text
+    assert "Template prose." in text
+
+
+def test_minified_html_does_not_fuse_blocks():
+    # Zero source whitespace, the layout of an optimizer/SSR page. Without the
+    # block-container converters, adjacent blocks fuse into unquotable run-ons
+    # ("Multimorphic, Inc.2109 Couch Dr").
+    html = (
+        "<html><body>"
+        "<footer><div>Multimorphic, Inc.</div><div>2109 Couch Dr</div></footer>"
+        "<dl><dt>Players</dt><dd>4</dd><dt>Year</dt><dd>1979</dd></dl>"
+        "<select><option>Alben (19)</option><option>Allied (1)</option></select>"
+        "<p><span>in</span><span>line</span> spans stay fused</p>"
+        "</body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Multimorphic, Inc." in text
+    assert "2109 Couch Dr" in text
+    assert "Inc.2109" not in text
+    assert "Players4" not in text
+    assert "Alben (19)Allied" not in text
+    # Inline elements fusing IS faithful — a browser renders "inline" too.
+    assert "inline spans stay fused" in text
+
+
+def test_repeated_adjacent_lines_survive():
+    # No dedup step: a line repeated twice in a row appears twice.
+    html = "<html><body><p>Alice Goes to Wonderland</p><p>Alice Goes to Wonderland</p></body></html>"
+    text = _extract_html(html).text or ""
+    assert text.count("Alice Goes to Wonderland") == 2
+
+
+def test_pre_and_nested_list_indentation_survive_trailing_strip():
+    html = (
+        "<html><body>"
+        "<pre>def f():\n    return x</pre>"
+        "<ul><li>outer<ul><li>inner item</li></ul></li></ul>"
+        "<p>break<br>here</p>"
+        "</body></html>"
+    )
+    text = _extract_html(html).text or ""
+    # <pre> indentation intact (no global whitespace collapse)...
+    assert "    return x" in text
+    # ...nested list still nested under its parent bullet...
+    assert "- outer" in text
+    nested = next(ln for ln in text.split("\n") if "inner item" in ln)
+    assert nested != nested.lstrip(), "nested bullet lost its indentation"
+    # ...but trailing whitespace (incl. two-space <br> markers) is stripped.
+    assert not any(ln != ln.rstrip() for ln in text.split("\n"))
+    assert "break\nhere" in text
+
+
+def test_exclusion_matrix_nothing_nontextual_leaks():
+    # Built with the real configured options (bs4_options="lxml",
+    # table_infer_header=True, the convert_img subclass) — the whole matrix of
+    # non-text sources, none of which may reach the stored text.
+    html = """<html><head><title>Matrix</title>
+<style>.CSSJUNK { color: red; }</style>
+<script type="application/ld+json">{"@type":"Organization","name":"LDJUNK"}</script>
+</head><body>
+<p style="COLORJUNK" onclick="CLICKJUNK()" data-x="DATAJUNK">Visible prose.</p>
+<script>var SCRIPTJUNK = 1;</script>
+<svg><title>SVGTITLEJUNK</title><desc>SVGDESCJUNK</desc><text>SVGTEXTJUNK</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg"><text>NSSVGJUNK</text></svg>
+<noscript><style>.NOSCRIPTCSSJUNK{}</style>Enable JS please.</noscript>
+<template><script>var TEMPLATESCRIPTJUNK;</script><p>Template prose.</p></template>
+<!-- COMMENTJUNK -->
+<canvas>CANVASJUNK</canvas>
+<iframe>IFRAMEJUNK</iframe>
+<pre><code>  fenced code sample</code></pre>
+</body></html>"""
+    text = _extract_html(html).text or ""
+    for junk in (
+        "CSSJUNK",
+        "LDJUNK",
+        "COLORJUNK",
+        "CLICKJUNK",
+        "DATAJUNK",
+        "SCRIPTJUNK",
+        "SVGTITLEJUNK",
+        "SVGDESCJUNK",
+        "SVGTEXTJUNK",
+        "NSSVGJUNK",
+        "NOSCRIPTCSSJUNK",
+        "TEMPLATESCRIPTJUNK",
+        "COMMENTJUNK",
+        "CANVASJUNK",
+        "IFRAMEJUNK",
+    ):
+        assert junk not in text, f"{junk} leaked into extracted text"
+    assert "Visible prose." in text
+    assert "Enable JS please." in text
+    assert "Template prose." in text
+    assert "fenced code sample" in text
+
+
+def test_consent_widget_stripped_token_match_only():
+    # The consent container goes; the sticky-header beside it — whose class
+    # merely *contains* "cky" — survives, because matching is on class tokens
+    # and id prefixes, never raw substrings.
+    html = (
+        "<html><body>"
+        '<div class="sticky-header">Real Site Nav</div>'
+        '<div class="cky-consent-container"><p>We use cookies. Accept Reject</p></div>'
+        "<p>Real content.</p>"
+        "</body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Real Site Nav" in text
+    assert "Real content." in text
+    assert "We use cookies" not in text
+
+
+def test_unclassed_googleoff_block_removed():
+    # The googleoff regex on its own — the block carries no consent-platform
+    # class, so only the page's own machine-readable marker removes it.
+    html = (
+        "<html><body><p>Keep me.</p>"
+        "<!--googleoff: index--><div><p>UNMARKEDJUNK</p></div><!--googleon: index-->"
+        "<p>And me.</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "Keep me." in text
+    assert "And me." in text
+    assert "UNMARKEDJUNK" not in text
+
+
+# --------------------------------------------------------------------------- #
+# HTML handler — head metadata block, title chain, body_text
+# --------------------------------------------------------------------------- #
+
+
+def test_meta_dedup_prefers_most_general_key():
+    html = (
+        "<html><head>"
+        '<meta property="og:description" content="One description.">'
+        '<meta name="description" content="One description.">'
+        '<meta name="twitter:description" content="One description.">'
+        "</head><body><p>x</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "description: One description." in text
+    assert "og:description:" not in text
+    assert "twitter:description:" not in text
+
+
+def test_meta_differing_values_all_emitted():
+    html = (
+        "<html><head>"
+        '<meta name="description" content="Short one.">'
+        '<meta property="og:description" content="A longer, different one.">'
+        "</head><body><p>x</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert "description: Short one." in text
+    assert "og:description: A longer, different one." in text
+
+
+def test_meta_excluded_keys_do_not_appear():
+    html = (
+        "<html><head>"
+        '<meta name="viewport" content="width=device-width">'
+        '<meta name="generator" content="WordPress 6.4">'
+        '<meta name="robots" content="index, follow">'
+        '<meta property="og:image" content="http://x/img.png">'
+        "</head><body><p>x</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    for junk in ("viewport", "WordPress", "robots", "img.png"):
+        assert junk not in text
+
+
+def test_title_prefers_og_title():
+    html = (
+        "<html><head><title>Tag Title</title>"
+        '<meta property="og:title" content="OG Title"></head>'
+        "<body><p>x</p></body></html>"
+    )
+    assert _extract_html(html).title == "OG Title"
+
+
+def test_title_falls_back_to_title_tag_verbatim_with_suffix():
+    # No suffix stripping — the tag is stored intact.
+    html = (
+        "<html><head><title>Wizard Pinball Machine | Pinside Game Archive</title>"
+        "</head><body><p>x</p></body></html>"
+    )
+    assert _extract_html(html).title == "Wizard Pinball Machine | Pinside Game Archive"
+
+
+def test_title_falls_back_to_first_h1():
+    html = "<html><body><h1>Company Information</h1><p>x</p></body></html>"
+    assert _extract_html(html).title == "Company Information"
+
+
+def test_title_string_appears_exactly_once_in_text():
+    # The body-subtree rule: <title> lives in the metadata block only, never
+    # duplicated into the body by converting the whole document.
+    html = (
+        "<html><head><title>UNIQUETITLETOKEN</title></head>"
+        "<body><p>Body prose.</p></body></html>"
+    )
+    text = _extract_html(html).text or ""
+    assert text.count("UNIQUETITLETOKEN") == 1
+
+
+def test_body_text_is_body_only_and_empty_for_js_shell():
+    # A JS-only page ships rich og: tags precisely because crawlers don't run
+    # JS — so the assembled text is fat while the body is empty. body_text is
+    # the thin-detection probe and must measure the body alone.
+    html = (
+        "<html><head><title>Fat Meta</title>"
+        '<meta property="og:description" content="'
+        + "A very rich page description. " * 20
+        + '"></head><body><div id="root"></div></body></html>'
+    )
+    meta = _extract_html(html)
+    assert meta.body_text == ""
+    assert len(meta.text or "") > 200
+
+
+def test_body_text_none_when_unparseable():
+    meta = _extract_html("")
+    assert meta.text is None
+    assert meta.body_text is None
 
 
 # --------------------------------------------------------------------------- #

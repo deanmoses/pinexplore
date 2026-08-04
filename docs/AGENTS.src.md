@@ -137,7 +137,8 @@ attributed evidence for catalog corrections. The system-of-record is a SQLite
 database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored);
 `make explore` materializes it into the `web_pages` / `web_fetches` tables via
 the local-only `03_raw_web.sql` layer. Query it with the `scripts/web_scrape/web_cache.py` helpers
-(`search`, `quote`, `get`). See [WebCache.md](WebCache.md) for the full guide.
+(`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier,
+needle-driven rungs over whole-page reads). See [WebCache.md](WebCache.md) for the full guide.
 
 ## Remote Data (Cloudflare R2)
 

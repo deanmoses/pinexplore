@@ -88,6 +88,20 @@ def _rate_limit(domain: Domain) -> None:
     _last_request[domain] = time.monotonic()
 
 
+def _thin_probe(meta: ExtractedMeta) -> str | None:
+    """The text thinness is judged on.
+
+    The HTML handler fills ``body_text`` with the document body alone, and that
+    is what must be measured: a JS-only page ships rich ``og:`` tags precisely
+    because crawlers don't run JS, so the assembled ``text`` (metadata block +
+    body) reads fat where the page is empty. ``is None`` — not truthiness — an
+    empty-string body is a real, thin answer that must not fall through to the
+    fat metadata block. Every other handler leaves ``body_text`` None and is
+    measured on ``text``, unchanged.
+    """
+    return meta.body_text if meta.body_text is not None else meta.text
+
+
 # --------------------------------------------------------------------------- #
 # Which text a refetch stores
 # --------------------------------------------------------------------------- #
@@ -151,6 +165,10 @@ def _resolve_text(
                 ),
                 text=existing["text"],
                 unavailable=False,
+                # The fresh extraction's body was just discarded with the rest
+                # of it; None makes the thin check measure the stored text —
+                # what the row actually holds — instead of text it doesn't.
+                body_text=None,
             ),
             existing["text_source"],
         )
@@ -296,7 +314,7 @@ def fetch_one(
     if (
         browser is not None
         and handler.renderable
-        and (force_render or is_thin(meta.text, thin_chars))
+        and (force_render or is_thin(_thin_probe(meta), thin_chars))
     ):
         render_attempted = True
         # The render is a second hit to the domain (document + sub-resources), so
@@ -377,7 +395,7 @@ def fetch_one(
     # phrases its type's warning (a scanned PDF vs a JS-only page) given whether a
     # render was tried, and returns None to stay quiet (a render attempted+failed —
     # render already logged why).
-    if is_thin(meta.text, thin_chars):
+    if is_thin(_thin_probe(meta), thin_chars):
         warning = handler.thin_warning(
             url, rendered=rendered, render_attempted=render_attempted
         )
@@ -486,7 +504,7 @@ def _fetch_video_one(
     track = video.caption_note or "captions"
     title = video.title or "(no title)"
     print(f"fetched [{track}] ({state}): {url}\n    {title}")
-    if is_thin(meta.text, THIN_TEXT_CHARS):
+    if is_thin(_thin_probe(meta), THIN_TEXT_CHARS):
         warning = handler.thin_warning(url, rendered=False, render_attempted=False)
         if warning is not None:
             print(warning, file=sys.stderr)
