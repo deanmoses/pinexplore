@@ -1064,9 +1064,9 @@ def test_cli_search_prints_hits_and_quote_prints_matches(cache, capsys):
 
 
 def test_cli_quote_pdf_prints_pages_and_blob_path(cache, capsys):
-    # The render handoff: everything Read(<blob>, pages=N) needs. The blob is
-    # a property of the page, printed once above the hits; the page numbers
-    # genuinely vary per hit, so they ride each one.
+    # The render handoff: everything Read(<blob>, pages=N) needs. The blob is a
+    # fact about the page, so it goes to stderr once; the page numbers genuinely
+    # vary per hit, so they ride each one on stdout.
     url = wc.normalize_url("https://pdf.example/manual.pdf")
     sha = _seed(
         cache,
@@ -1076,22 +1076,22 @@ def test_cli_quote_pdf_prints_pages_and_blob_path(cache, capsys):
         text_source="pdf",
     )
     assert wc.main(["quote", url, "needle"]) == 0
-    assert capsys.readouterr().out == (
-        f"blob: {wc.blob_path(sha, 'pdf')}\n"
-        "\n"
+    captured = capsys.readouterr()
+    assert captured.out == (
         "alpha needle intro\n"
         "pdf document pages: 1\n"
         "\n"
         "needle closer\n"
         "pdf document pages: 2\n"
     )
+    assert captured.err == f"blob: {wc.blob_path(sha, 'pdf')}\n"
 
 
 def test_cli_quote_ocr_pdf_prints_path_and_pages_unavailable(cache, capsys):
     # OCR text has no markers, but the blob is a PDF and renders fine — the
     # row whose text most needs the go-look-at-the-page step. Silence about
     # pages would read as "one page"; like the blob, it is a fact about the
-    # page and prints once.
+    # page and prints once, on stderr.
     url = wc.normalize_url("https://pdf.example/scan.pdf")
     sha = _seed(
         cache,
@@ -1101,11 +1101,10 @@ def test_cli_quote_ocr_pdf_prints_path_and_pages_unavailable(cache, capsys):
         text_source="ocr",
     )
     assert wc.main(["quote", url, "scanned manual"]) == 0
-    assert capsys.readouterr().out == (
-        f"blob: {wc.blob_path(sha, 'pdf')}\n"
-        "pdf document pages: unavailable\n"
-        "\n"
-        "ocr text of a scanned manual\n"
+    captured = capsys.readouterr()
+    assert captured.out == "ocr text of a scanned manual\n"
+    assert captured.err == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\npdf document pages: unavailable\n"
     )
 
 
@@ -1120,11 +1119,10 @@ def test_cli_quote_pdf_without_markers_says_pages_unavailable(cache, capsys):
         text_source="pdf",
     )
     assert wc.main(["quote", url, "extraction"]) == 0
-    assert capsys.readouterr().out == (
-        f"blob: {wc.blob_path(sha, 'pdf')}\n"
-        "pdf document pages: unavailable\n"
-        "\n"
-        "pre-marker extraction text\n"
+    captured = capsys.readouterr()
+    assert captured.out == "pre-marker extraction text\n"
+    assert captured.err == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\npdf document pages: unavailable\n"
     )
 
 
@@ -1140,9 +1138,65 @@ def test_cli_quote_ocr_image_prints_path_without_page_noise(cache, capsys):
         text_source="ocr",
     )
     assert wc.main(["quote", url, "flyer text"]) == 0
-    assert capsys.readouterr().out == (
-        f"blob: {wc.blob_path(sha, 'jpg')}\n\nflyer text via ocr\n"
+    captured = capsys.readouterr()
+    assert captured.out == "flyer text via ocr\n"
+    assert captured.err == f"blob: {wc.blob_path(sha, 'jpg')}\n"
+
+
+def test_cli_quote_miss_on_a_pdf_still_prints_the_blob_path(cache, capsys):
+    # "no matches" alone would read as absence when the needle may simply be
+    # artwork on a sheet nobody has looked at.
+    url = wc.normalize_url("https://pdf.example/manual.pdf")
+    sha = _seed(
+        cache,
+        url=url,
+        text="alpha intro\n\f\ncloser\n\f",
+        content_type="application/pdf",
+        text_source="pdf",
     )
+    assert wc.main(["quote", url, "upper magnet"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"no matches for 'upper magnet' in {url}\nblob: {wc.blob_path(sha, 'pdf')}\n"
+    )
+
+
+def test_cli_quote_on_a_text_less_pdf_says_nothing_can_match(cache, capsys):
+    # A row with no text can't match anything, and saying so beats a bare "no
+    # matches" that reads as the document not saying it.
+    url = wc.normalize_url("https://pdf.example/quick-reference.pdf")
+    sha = _seed(
+        cache,
+        url=url,
+        text=None,
+        content_type="application/pdf",
+        text_source="pdf",
+    )
+    assert wc.main(["quote", url, "magnet"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"blob: {wc.blob_path(sha, 'pdf')}" in captured.err
+    assert "no stored text" in captured.err
+    # But it claims neither cause. An image-only document and an extraction
+    # that was unavailable on the fetching host both land here, and the row
+    # records neither, so naming one would assert what nothing checked.
+    assert "image-only, or extraction may have been unavailable" in captured.err
+    # No markers either, but saying so would be the duller way of saying the
+    # line above — the two never both fire.
+    assert "pdf document pages: unavailable" not in captured.err
+
+
+def test_cli_quote_on_a_text_less_html_row_names_no_causes(cache, capsys):
+    # A page with no blob line gets the bare form: "image-only" is nonsense
+    # about HTML, and "read the blob" would point at a path never printed.
+    url = wc.normalize_url("https://html.example/empty")
+    _seed(cache, url=url, text=None, content_type="text/html", text_source="html")
+    assert wc.main(["quote", url, "anything"]) == 1
+    captured = capsys.readouterr()
+    assert "no stored text, so no needle can match it\n" in captured.err
+    assert "image-only" not in captured.err
+    assert "blob:" not in captured.err
 
 
 def test_cli_quote_html_output_is_unchanged(cache, capsys):

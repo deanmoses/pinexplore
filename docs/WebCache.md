@@ -101,10 +101,12 @@ PDFs with a text layer are extracted to text — searchable and quotable like an
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py quote <manual-url> "Bottom Pop Bumper"
+blob: /…/pinexplore/ingest_sources/web/raw/9a83…0721.pdf ⬅️ stderr: a fact about the page
 Bottom Pop Bumper
 pdf document pages: 27
-blob: /…/pinexplore/ingest_sources/web/raw/9a83…0721.pdf
 ```
+
+Facts about the **page** go to stderr — the blob path, and `pdf document pages: unavailable` on a row whose text predates the page markers — so stdout is the hit list and nothing else. Facts about a **hit** ride that hit on stdout, since they vary per hit and the two streams give no ordering guarantee to pair them by: a redirected `quote` holds each span with its `[section]` label and page line, not bare text.
 
 Looking at the text is usually not enough. For example:
 
@@ -116,7 +118,11 @@ For these, look at the page visually. Claude Code can render a single page strai
 
 A hit whose `--context` window spans multiple pages lists every page the shown text touches (`pdf document pages: 26, 27`).
 
-A scanned or image-only PDF has no text layer: the blob caches, no text is extracted, and the fetch warns. We don't OCR PDFs yet.
+**A miss on a PDF is not evidence of absence.** Only the document's own text layer is searchable, and a word drawn as artwork — a table cell, a diagram callout, a label baked into a figure — was never in it. Such a needle returns `no matches`, indistinguishable from a document that genuinely never says it. So `quote` prints the blob path on a miss too: the miss is when the go-look-at-the-page step matters most.
+
+Captions and table titles are usually real text even when their contents aren't, which makes them the reliable way in. In the Galactic Tank Force manual, `Table 3-18 Coil Positions` is text and every coil name under it is artwork — quote the caption, take its page, render the sheet. `UPPER MAGNET` and `KNOCKER`, printed on that same page, cannot be found any other way.
+
+A scanned or image-only PDF has no text layer at all: the blob caches, no text is extracted, and the fetch warns. We don't OCR PDFs yet. A row holding no text quotes as `no stored text, so no needle can match it` rather than a bare `no matches` — but it stops there, because the row cannot say whether the document is image-only or whether extraction was merely unavailable on the host that fetched it (a missing poppler, a document poppler couldn't read). Only the fetch's own warning drew that line. Read the blob to find out which.
 
 ### Images
 

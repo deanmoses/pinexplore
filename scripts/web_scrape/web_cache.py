@@ -1357,43 +1357,73 @@ def _cmd_search(term: str, limit: int) -> int:
     return 0
 
 
-def _cmd_quote(url: str, needle: str, context: int) -> int:
-    rec = _require_page(url)
-    hits = quote_hits(url, needle, context=context)
-    if not hits:
-        print(f"no matches for {needle!r} in {url}", file=sys.stderr)
-        return 1
-    # The render handoff: a PDF hit's payoff step is Read(<blob>, pages=N), so
-    # print what that call needs. The two lines are gated independently —
-    # independent facts. The blob path prints when the row has a blob worth
-    # looking at (a property of the content type, not the extraction method: a
-    # PDF with a reviewed manual transcription renders as well as one poppler
-    # read; an OCR'd image displays too). The page line is keyed on the
-    # content type alone — an OCR'd JPEG has a renderable blob but telling
-    # someone their JPEG has no PDF pages is noise.
+def _quote_row_facts(rec: PageRow) -> list[str]:
+    """What a quote reader needs to know about the *page*, hit or miss.
+
+    The render handoff: a PDF hit's payoff step is Read(<blob>, pages=N), so
+    say what that call needs — on a miss too, where the needle may be printed
+    on the sheet as artwork the text layer never held.
+
+    The blob path prints when the row has a blob worth looking at (a property
+    of the content type, not the extraction method: a PDF with a reviewed
+    manual transcription renders as well as one poppler read; an OCR'd image
+    displays too). The page line is keyed on the content type alone — an OCR'd
+    JPEG has a renderable blob but telling someone their JPEG has no PDF pages
+    is noise — and exists because silence would read as "one page" when this
+    row may be a 103-page manual whose text predates the page markers.
+
+    A row with no text at all says so *instead* of the page line: no text
+    means no markers, so the page line would be the duller way of saying the
+    same thing. What it must not say is which of the two no-text cases this
+    is. The extractor keeps them apart — an image-only document is a finding,
+    an extraction that was unavailable is no opinion (see ``web_pdftext``'s
+    error pair) — but only the first fetch's warning did, and the row records
+    neither. Both still mean nothing here can match, which is the part worth
+    saying rather than leaving as a bare "no matches". It names the two causes
+    only when a blob line went out above it: those causes belong to documents
+    that are pictures, and nothing else can act on "read the blob" anyway.
+    """
+    facts: list[str] = []
     content_type = rec["content_type"]
-    header: list[str] = []
-    if content_type == "application/pdf" or rec["text_source"] == "ocr":
+    is_pdf = content_type == "application/pdf"
+    blob_shown = False
+    if is_pdf or rec["text_source"] == "ocr":
         # Function-level import: content_types pulls lxml and markdownify in,
         # which every other path through this module never needs.
         from content_types import extension_for
 
         ext = extension_for(content_type) if content_type is not None else None
         if ext is not None:
-            header.append(f"blob: {blob_path(rec['content_sha'], ext)}")
-    if (
-        content_type == "application/pdf"
-        and hits[0]["pdf_document_page_numbers"] is None
+            facts.append(f"blob: {blob_path(rec['content_sha'], ext)}")
+            blob_shown = True
+    text = rec["text"] or ""
+    if not text.strip():
+        facts.append(
+            "no stored text, so no needle can match it — the document may be "
+            "image-only, or extraction may have been unavailable when it was "
+            "fetched; read the blob to find out which"
+            if blob_shown
+            else "no stored text, so no needle can match it"
+        )
+    elif (
+        is_pdf
+        and not _parse_doc(text, assembled=rec["text_source"] == "html").page_starts
     ):
-        # Row-level like the blob (a document has markers or it doesn't), and
-        # silence would read as "one page" when this row may be a 103-page
-        # manual whose text predates the page markers.
-        header.append("pdf document pages: unavailable")
-    if header:
-        # Once, above the hits: these are facts about the page, not the hit —
-        # unlike the page numbers below, which genuinely vary per hit.
-        print("\n".join(header))
-        print()
+        facts.append("pdf document pages: unavailable")
+    return facts
+
+
+def _cmd_quote(url: str, needle: str, context: int) -> int:
+    rec = _require_page(url)
+    hits = quote_hits(url, needle, context=context)
+    if not hits:
+        print(f"no matches for {needle!r} in {url}", file=sys.stderr)
+    # Row facts to stderr, hit facts to stdout — the split `get` makes, so
+    # stdout is the hit list and nothing else.
+    for line in _quote_row_facts(rec):
+        print(line, file=sys.stderr)
+    if not hits:
+        return 1
     # The locator prints on stdout with its span, not on stderr like section's
     # ambiguity note: a heading belongs to one hit, and the two streams give no
     # ordering guarantee to pair them by. Nothing is lost — quote's output is a
