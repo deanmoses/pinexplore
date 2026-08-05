@@ -1670,7 +1670,9 @@ def test_cli_outline_says_nothing_was_filtered_at_min_chars_zero(cache, capsys):
     # there is nothing withheld to report.
     url = _seed_paged(cache)
     assert wc.main(["outline", url, "--min-chars", "0"]) == 0
-    assert capsys.readouterr().err == ""
+    err = capsys.readouterr().err
+    assert "ignored" not in err
+    assert "hidden" not in err
 
 
 def test_cli_outline_on_a_pdf_without_page_markers_names_what_it_lacks(cache, capsys):
@@ -1738,3 +1740,93 @@ def test_cli_section_miss_on_a_page_map_does_not_recite_the_map(cache, capsys):
     err = capsys.readouterr().err
     assert "did you mean" not in err
     assert "page 1" not in err
+
+
+# --------------------------------------------------------------------------- #
+# The blob path: every entry point that reports page-level facts prints it
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_outline_prints_the_blob_path_on_stderr(cache, capsys):
+    url = _seed_paged(cache)
+    sha = _page(cache, url)["content_sha"]
+    assert wc.main(["outline", url]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == f"blob: {wc.blob_path(sha, 'pdf')}\n"
+    assert "blob:" not in captured.out  # the map itself stays clean
+
+
+def test_cli_outline_prints_the_blob_path_even_with_nothing_to_map(cache, capsys):
+    # The path must precede the giving-up message, not replace it.
+    url = wc.normalize_url("https://paged.example/scan-only.pdf")
+    sha = _seed(cache, url=url, text=None, content_type="application/pdf")
+    assert wc.main(["outline", url]) == 1
+    err = capsys.readouterr().err
+    assert f"blob: {wc.blob_path(sha, 'pdf')}" in err
+    assert "no stored text" in err
+
+
+def test_cli_outline_does_not_offer_a_blob_for_an_html_page(cache, capsys):
+    # The stored markdown is the better read of an HTML blob.
+    url = _seed_structured(cache)
+    assert wc.main(["outline", url]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_get_prints_the_blob_path_after_the_stored_columns(cache, capsys):
+    url = _seed_paged(cache)
+    sha = _page(cache, url)["content_sha"]
+    assert wc.main(["get", url]) == 0
+    captured = capsys.readouterr()
+    lines = captured.err.rstrip("\n").split("\n")
+    assert lines[-1] == f"blob: {wc.blob_path(sha, 'pdf')}"
+    assert any(ln.startswith("content_sha: ") for ln in lines)
+    assert "blob:" not in captured.out  # `get > page.md` still lands the text
+
+
+def test_cli_get_prints_a_blob_path_for_every_type_not_just_renderable_ones(
+    cache, capsys
+):
+    url = wc.normalize_url("https://plain.example/article")
+    sha = _seed(
+        cache, url=url, text="body", content_type="text/html", text_source="html"
+    )
+    assert wc.main(["get", url]) == 0
+    assert f"blob: {wc.blob_path(sha, 'html')}" in capsys.readouterr().err
+
+
+def test_cli_get_omits_the_blob_line_when_the_type_maps_to_no_extension(cache, capsys):
+    # Without an extension there is no `raw/<sha>.<ext>` to name, and a guess
+    # would point at a file that isn't there.
+    url = wc.normalize_url("https://odd.example/thing")
+    _seed(cache, url=url, text="body", content_type="application/x-unknown")
+    assert wc.main(["get", url]) == 0
+    err = capsys.readouterr().err
+    assert "blob:" not in err
+    assert "content_sha: " in err
+
+
+def test_cli_section_prints_the_blob_path_with_the_sheet(cache, capsys):
+    url = _seed_paged(cache)
+    sha = _page(cache, url)["content_sha"]
+    assert wc.main(["section", url, "page 3"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == f"blob: {wc.blob_path(sha, 'pdf')}\n"
+    assert captured.out.startswith("third sheet")  # stdout stays pure page text
+
+
+def test_cli_section_blank_page_hint_says_where_the_sheet_is(cache, capsys):
+    # The hint's claim that the sheet may still hold ink is only actionable
+    # with the path beside it.
+    url = _seed_paged(cache)
+    sha = _page(cache, url)["content_sha"]
+    assert wc.main(["section", url, "page 2"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"blob: {wc.blob_path(sha, 'pdf')}\n")
+    assert "no extracted text" in err
+
+
+def test_cli_section_on_html_offers_no_blob_path(cache, capsys):
+    url = _seed_structured(cache)
+    assert wc.main(["section", url, "Intro"]) == 0
+    assert capsys.readouterr().err == ""

@@ -238,11 +238,14 @@ cache quote <url> "2024"                   # 2. text containing a needle (matchi
 cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
 cache outline <url>                        # 3. heading tree + per-section char counts
 cache outline <url> --min-chars 20         #    …hiding blocks too small to be content
-cache outline <pdf-url>                    #    …one row per PDF sheet
+cache outline <pdf-url>                    #    …one row per PDF sheet, and the
+                                           #    blob path on stderr
 cache section <url> "Specifications"       # 4. one section's block, not the page
-cache section <pdf-url> "page 41"          #    …on a PDF, one sheet's text
+cache section <pdf-url> "page 41"          #    …on a PDF, one sheet's text, and
+                                           #    the blob path on stderr
 cache get <url>                            # 5. full page record — the last resort
-                                           #    (text on stdout, row fields on stderr)
+                                           #    (text on stdout, row fields and the
+                                           #     blob path on stderr)
 ```
 
 The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section and PDF pages attached (`{"text": …, "heading": …, "pdf_document_page_numbers": …}`); `quote()` stays the plain-span form the gate consumes. Matching collapses whitespace runs, straightens smart quotes, and ignores case — so a phrase spanning a stored line break is still found — while the returned text is always the stored lines verbatim, which is why every hit still verifies.

@@ -1443,6 +1443,38 @@ def _cmd_search(term: str, limit: int) -> int:
     return 0
 
 
+def _blob_line(rec: PageRow) -> str | None:
+    """``blob: <path>`` for a row, or None when its type maps to no extension.
+
+    Assembled here because a row carries only ``content_sha``, and reaching the
+    file from that also takes the ``raw/<sha>.<ext>`` layout and the
+    content-type-to-extension mapping.
+    """
+    # Function-level: the handler registry is needed nowhere else here, and
+    # web_cache's readers import it for sqlite-backed reads alone.
+    from content_types import extension_for
+
+    content_type = rec["content_type"]
+    ext = extension_for(content_type) if content_type is not None else None
+    if ext is None:
+        return None
+    return f"blob: {blob_path(rec['content_sha'], ext)}"
+
+
+def _render_handoff_line(rec: PageRow) -> str | None:
+    """``_blob_line``, for the commands that name a sheet to render.
+
+    Qualifying is a property of the content type, not of the extraction method:
+    a PDF with a reviewed manual transcription renders as well as one poppler
+    read, and an OCR'd image displays too. An HTML blob is left out because the
+    stored markdown is the better read of it — ``get`` calls ``_blob_line``
+    directly, a full-record dump withholding nothing.
+    """
+    if rec["content_type"] == "application/pdf" or rec["text_source"] == "ocr":
+        return _blob_line(rec)
+    return None
+
+
 def _quote_row_facts(rec: PageRow) -> list[str]:
     """What a quote reader needs to know about the *page*, hit or miss.
 
@@ -1470,18 +1502,11 @@ def _quote_row_facts(rec: PageRow) -> list[str]:
     that are pictures, and nothing else can act on "read the blob" anyway.
     """
     facts: list[str] = []
-    content_type = rec["content_type"]
-    is_pdf = content_type == "application/pdf"
-    blob_shown = False
-    if is_pdf or rec["text_source"] == "ocr":
-        # Function-level import: content_types pulls lxml and markdownify in,
-        # which every other path through this module never needs.
-        from content_types import extension_for
-
-        ext = extension_for(content_type) if content_type is not None else None
-        if ext is not None:
-            facts.append(f"blob: {blob_path(rec['content_sha'], ext)}")
-            blob_shown = True
+    is_pdf = rec["content_type"] == "application/pdf"
+    line = _render_handoff_line(rec)
+    blob_shown = line is not None
+    if line is not None:
+        facts.append(line)
     text = rec["text"] or ""
     if not text.strip():
         facts.append(
@@ -1526,6 +1551,11 @@ def _cmd_quote(url: str, needle: str, context: int) -> int:
 def _cmd_outline(url: str, min_chars: int) -> int:
     rec = _require_page(url)
     paginated = bool(_doc_of(rec).page_starts)
+    # Before the empty check: a PDF with nothing to map is when going to look
+    # at the blob is the only move left.
+    handoff = _render_handoff_line(rec)
+    if handoff is not None:
+        print(handoff, file=sys.stderr)
     entries = outline(url)
     if not entries:
         # Three different absences, and only the last is about structure. A
@@ -1640,7 +1670,13 @@ def _section_miss_hint(url: str, heading: str) -> str | None:
 
 
 def _cmd_section(url: str, heading: str) -> int:
-    _require_page(url)
+    rec = _require_page(url)
+    # A sheet's text is often not the answer — the page hints below say a blank
+    # sheet may still hold ink, and naming that sheet without saying where it
+    # lives leaves the reader nowhere to go.
+    handoff = _render_handoff_line(rec)
+    if handoff is not None:
+        print(handoff, file=sys.stderr)
     blocks = section(url, heading)
     if not blocks:
         print(f"no section {heading!r} in {url}", file=sys.stderr)
@@ -1737,6 +1773,11 @@ def _cmd_get(url: str) -> int:
     for key, value in rec.items():
         if key != "text":
             print(f"{key}: {value}", file=sys.stderr)
+    # Derived, so it follows the stored columns — and printed for every type,
+    # since a full-record read withholds nothing.
+    line = _blob_line(rec)
+    if line is not None:
+        print(line, file=sys.stderr)
     if rec["text"]:
         print(rec["text"])
     return 0
