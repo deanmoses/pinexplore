@@ -120,9 +120,10 @@ class PdfHandler(ContentHandler):
     text_source = "pdf"
     renderable = False
     backfillable = True
-    # Scanned manuals run to tens of megabytes: the cached Stern Transformers
-    # manual cleared the 10MB default by 0.9%, and a 15.5MB quick reference did not.
-    max_response_bytes: int | None = 50 * 1024 * 1024
+    # Scanned manuals run to tens of megabytes — the cached Stern Transformers
+    # manual and a 15.5MB quick reference both sit above the shared default — so
+    # PDFs carry their own cap. This is the only place its value is stated.
+    max_response_bytes: int | None = 65 * 1024 * 1024
 
     @override
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:

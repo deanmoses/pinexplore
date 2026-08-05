@@ -260,7 +260,7 @@ def test_http_get_html_still_decoded(monkeypatch):
 
 @pytest.fixture
 def small_caps(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink the caps so the branches are reachable without 50MB of test data."""
+    """Shrink the caps so the branches are reachable without 65MB of test data."""
     monkeypatch.setattr(web_http, "MAX_RESPONSE_BYTES", 100)
     monkeypatch.setattr(PdfHandler, "max_response_bytes", 400)
 
@@ -357,5 +357,5 @@ def test_sniffing_down_to_a_narrower_type_re_applies_its_cap(small_caps, monkeyp
 
 def test_pdfs_are_configured_larger_than_everything_else():
     # Locks the policy itself, not just the mechanism the tests above shrink.
-    assert PdfHandler.max_response_bytes == 50 * 1024 * 1024
+    assert PdfHandler.max_response_bytes == 65 * 1024 * 1024
     assert PdfHandler.max_response_bytes > web_http.MAX_RESPONSE_BYTES

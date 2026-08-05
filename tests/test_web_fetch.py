@@ -819,26 +819,28 @@ def _too_large(content_type: str, limit: int, declared: int | None) -> str:
     )
 
 
+# The caps below are formatter inputs, not the real policy — each type's actual
+# limit is stated once, in its handler.
 def test_too_large_names_the_type_whose_cap_applied():
-    # A bare "> 50MB" doesn't identify which limit that is now that they differ
-    # per type, and the number alone isn't something to act on.
-    msg = _too_large("application/pdf", 50 * 1024 * 1024, 62 * 1024 * 1024)
-    assert "50MB cap for application/pdf" in msg
+    # A bare "too large" doesn't identify which limit that is now that they
+    # differ per type, and the number alone isn't something to act on.
+    msg = _too_large("application/pdf", 3 * 1024 * 1024, 7 * 1024 * 1024)
+    assert "3MB cap for application/pdf" in msg
     assert "max_response_bytes" in msg
 
 
 def test_too_large_reports_how_far_over_it_is():
-    # 51MB and 500MB call for different decisions; the read stops at the cap, so
-    # the declared length is the only thing that can tell them apart.
-    assert "62.0MB response" in _too_large(
-        "application/pdf", 50 * 1024 * 1024, 62 * 1024 * 1024
+    # A hair over and ten times over call for different decisions; the read stops
+    # at the cap, so the declared length is the only thing that can tell them apart.
+    assert "7.0MB response" in _too_large(
+        "application/pdf", 3 * 1024 * 1024, 7 * 1024 * 1024
     )
 
 
 def test_too_large_stays_readable_when_no_length_was_declared():
-    msg = _too_large("application/pdf", 50 * 1024 * 1024, None)
-    assert msg.startswith("response over the 50MB cap")
+    msg = _too_large("application/pdf", 3 * 1024 * 1024, None)
+    assert msg.startswith("response over the 3MB cap")
 
 
 def test_too_large_reports_each_types_own_cap():
-    assert "10MB cap for text/html" in _too_large("text/html", 10 * 1024 * 1024, None)
+    assert "4MB cap for text/html" in _too_large("text/html", 4 * 1024 * 1024, None)
