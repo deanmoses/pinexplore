@@ -1553,3 +1553,188 @@ def test_cli_search_labels_non_html_text_sources(cache, capsys):
     assert "text_source: ocr" in out  # …and how its text was derived
     assert "type:" not in out.split("text_source: ocr")[1]  # web hit unlabeled
     assert "text_source: html" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Page maps: outline/section on a paginated (PDF) document
+# --------------------------------------------------------------------------- #
+
+# Three sheets, the middle one yielding no text — the shape a seventh of the
+# corpus's mapped sheets have, and the one a walk must not mistake for absence.
+PAGED_TEXT = "first sheet text\n\f\n\f\nthird sheet has more words\n\f"
+
+
+def _seed_paged(cache, text: str = PAGED_TEXT) -> str:
+    url = wc.normalize_url("https://paged.example/manual.pdf")
+    _seed(
+        cache,
+        url=url,
+        text=text,
+        content_type="application/pdf",
+        text_source="pdf",
+    )
+    return url
+
+
+def test_outline_maps_a_paginated_document_by_page(cache):
+    url = _seed_paged(cache)
+    entries = wc.outline(url, con=cache)
+    assert [e["heading"] for e in entries] == ["page 1", "page 2", "page 3"]
+    assert [e["chars"] for e in entries] == [16, 0, 26]
+    # Flat and unrepeated: sheets are ordinals, not a tree.
+    assert {e["level"] for e in entries} == {0}
+    assert {e["count"] for e in entries} == {1}
+
+
+def test_outline_page_map_wins_over_a_heading_misparse(cache):
+    # A PDF's text can carry a line that looks like ATX markdown. Pages are the
+    # document's real division, so the map is by sheet either way.
+    url = _seed_paged(cache, "# Not A Heading\nbody\n\f\nsecond sheet\n\f")
+    assert [e["heading"] for e in wc.outline(url, con=cache)] == ["page 1", "page 2"]
+
+
+def test_section_returns_one_page_without_its_marker(cache):
+    url = _seed_paged(cache)
+    assert wc.section(url, "page 3", con=cache) == ["third sheet has more words"]
+    assert "\f" not in wc.section(url, "page 1", con=cache)[0]
+
+
+def test_section_page_name_is_case_insensitive_like_every_other_name(cache):
+    url = _seed_paged(cache)
+    assert wc.section(url, "Page 3", con=cache) == ["third sheet has more words"]
+    assert wc.section(url, "  page 3  ", con=cache) == ["third sheet has more words"]
+
+
+@pytest.mark.parametrize("name", ["page 03", "page 3a", "page 0", "page -1", "page"])
+def test_section_rejects_names_that_are_not_page_names(cache, name):
+    # One spelling per sheet: the name outline() printed. A near-miss that
+    # silently resolved to sheet 3 would let a walk cite the wrong page.
+    url = _seed_paged(cache)
+    assert wc.section(url, name, con=cache) == []
+
+
+def test_section_textless_page_returns_no_blocks(cache):
+    # `[]` means "no blocks of text", which is true of such a sheet. The
+    # difference from an absent page is carried by the hint, not by a sentinel
+    # empty string that every caller would have to know about.
+    url = _seed_paged(cache)
+    assert wc.section(url, "page 2", con=cache) == []
+    assert wc.outline(url, con=cache)[1] == {
+        "level": 0,
+        "heading": "page 2",
+        "chars": 0,
+        "count": 1,
+    }
+
+
+def test_section_page_name_is_reserved_on_a_paginated_document(cache):
+    # A heading block runs to the next heading at its level, so composing it
+    # with the sheet would answer "give me sheet 2" with other sheets' text.
+    url = _seed_paged(cache, "# page 2\nheading body\n\f\nsecond sheet\n\f")
+    assert wc.section(url, "page 2", con=cache) == ["second sheet"]
+
+
+def test_section_out_of_range_page_is_not_rescued_by_a_heading(cache):
+    # The trap the reservation closes: a misparsed `# page 99` would otherwise
+    # make a sheet that does not exist answer as though it did.
+    url = _seed_paged(cache, "# page 99\nheading body\n\f\nsecond sheet\n\f")
+    assert wc.section(url, "page 99", con=cache) == []
+
+
+def test_section_page_name_matches_a_heading_when_unpaginated(cache):
+    # Nothing to reserve without sheets, so the name is just a heading — and a
+    # `quote` hit labelled "page 2" on such a page stays resolvable.
+    url = wc.normalize_url("https://plain.example/paged-looking")
+    _seed(cache, url=url, text="# page 2\nheading body", text_source="html")
+    assert wc.section(url, "page 2", con=cache) == ["# page 2\nheading body"]
+
+
+def test_section_out_of_range_page_is_a_miss_not_a_clamp(cache):
+    url = _seed_paged(cache)
+    assert wc.section(url, "page 99", con=cache) == []
+
+
+def test_cli_outline_ignores_min_chars_on_a_page_map(cache, capsys):
+    url = _seed_paged(cache)
+    assert wc.main(["outline", url, "--min-chars", "20"]) == 0
+    captured = capsys.readouterr()
+    # Every sheet still shown — hiding one would assert a gap in the ordinals.
+    assert "page 1  [16 chars]" in captured.out
+    assert "page 2  [0 chars]" in captured.out
+    assert "ignored" in captured.err
+    assert "hidden" not in captured.err
+
+
+def test_cli_outline_says_nothing_was_filtered_at_min_chars_zero(cache, capsys):
+    # An explicit 0 asks to see everything, which is what a page map shows, so
+    # there is nothing withheld to report.
+    url = _seed_paged(cache)
+    assert wc.main(["outline", url, "--min-chars", "0"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_outline_on_a_pdf_without_page_markers_names_what_it_lacks(cache, capsys):
+    url = wc.normalize_url("https://paged.example/scan.pdf")
+    _seed(cache, url=url, text="ocr text", content_type="application/pdf")
+    assert wc.main(["outline", url]) == 1
+    assert "no page markers" in capsys.readouterr().err
+
+
+def test_cli_outline_on_a_row_with_no_text_blames_the_text_not_the_markers(
+    cache, capsys
+):
+    # A fifth of the cached PDFs are image-only scans. "no page markers" would
+    # send a reader to re-extract a document that has none to find; `quote`
+    # draws the same line and these reads must agree.
+    url = wc.normalize_url("https://paged.example/image-only.pdf")
+    _seed(cache, url=url, text=None, content_type="application/pdf", text_source="pdf")
+    assert wc.main(["outline", url]) == 1
+    assert "no stored text" in capsys.readouterr().err
+
+    assert wc.main(["section", url, "page 2"]) == 1
+    assert "no stored text" in capsys.readouterr().err
+
+
+def test_cli_outline_on_html_still_says_no_headings(cache, capsys):
+    url = wc.normalize_url("https://plain.example/page")
+    _seed(cache, url=url, text="just prose", text_source="html")
+    assert wc.main(["outline", url]) == 1
+    assert "no headings" in capsys.readouterr().err
+
+
+def test_cli_section_miss_tells_textless_from_absent_from_unpaginated(cache, capsys):
+    paged = _seed_paged(cache)
+    assert wc.main(["section", paged, "page 2"]) == 1
+    assert "page 2 has no extracted text" in capsys.readouterr().err
+
+    assert wc.main(["section", paged, "page 99"]) == 1
+    assert "this document has 3 pages" in capsys.readouterr().err
+
+    # A PDF whose text lost its markers (OCR'd, or hand-supplied) reads the
+    # name as a page, because on a PDF that is what it means.
+    scan = wc.normalize_url("https://paged.example/ocr.pdf")
+    _seed(cache, url=scan, text="ocr text", content_type="application/pdf")
+    assert wc.main(["section", scan, "page 2"]) == 1
+    assert "no page markers" in capsys.readouterr().err
+
+
+def test_cli_section_miss_on_html_keeps_heading_guidance_for_a_page_name(cache, capsys):
+    # `section()` reserves nothing on an unpaginated page, so "page 2" is an
+    # ordinary heading name there — a forum index headed "Page 2 of 5" must get
+    # the near-heading hint, not a remark about PDF sheets it never had.
+    url = wc.normalize_url("https://forum.example/thread")
+    _seed(cache, url=url, text="# Page 2 of 5\nreplies", text_source="html")
+    assert wc.main(["section", url, "page 2"]) == 1
+    err = capsys.readouterr().err
+    assert "did you mean: Page 2 of 5" in err
+    assert "page markers" not in err
+
+
+def test_cli_section_miss_on_a_page_map_does_not_recite_the_map(cache, capsys):
+    # "page" is a substring of every row of a page map; offering all of them as
+    # near misses would print the map instead of a hint.
+    url = _seed_paged(cache)
+    assert wc.main(["section", url, "sheet"]) == 1
+    err = capsys.readouterr().err
+    assert "did you mean" not in err
+    assert "page 1" not in err

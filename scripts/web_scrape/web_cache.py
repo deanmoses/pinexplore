@@ -815,6 +815,41 @@ def _body_block(doc: _Doc) -> str | None:
     return "\n".join(doc.lines[doc.fm_close + 1 :]).strip()
 
 
+# A page pseudo-section's name, matched against an already-casefolded target.
+# A positive decimal with no leading zero, so the name a page is addressed by
+# is the same one `outline()` printed and `quote` reported — `page 041` and
+# `page 41a` name nothing rather than quietly resolving to sheet 41.
+_PAGE_NAME = re.compile(r"^page ([1-9][0-9]*)$")
+
+
+def _page_block(doc: _Doc, n: int) -> str | None:
+    """PDF document page ``n``'s text (1-based), or None when there is no such
+    page — the one definition of what counts as in range, so a caller reporting
+    "out of range" and a caller returning the text can never disagree.
+
+    The page runs from its first line to the marker that ends it, exclusive —
+    a boundary is not content, the same rule ``_render_hit`` follows when it
+    drops markers from a quoted span. The last page has no marker after it when
+    poppler's trailing form feed was the final line, which ``_parse_doc``
+    already declines to treat as opening a page. A sheet that exists but
+    yielded no text is ``""``, distinct from None.
+    """
+    if not 1 <= n <= len(doc.page_starts):
+        return None
+    start = doc.page_starts[n - 1]
+    end = next(
+        (i for i in range(start, len(doc.lines)) if doc.lines[i] == "\f"),
+        len(doc.lines),
+    )
+    return "\n".join(doc.lines[start:end]).strip()
+
+
+def _doc_of(rec: PageRow) -> _Doc:
+    """A row's stored text parsed — the one place the ``assembled`` gate is
+    derived from ``text_source``, so the CLI can't disagree with the library."""
+    return _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+
+
 def _heading_block(doc: _Doc, k: int) -> str:
     """The block ``doc.headings[k]`` opens: its line through the line before
     the next heading at the same or a higher (smaller-number) level."""
@@ -1000,7 +1035,7 @@ def quote_hits(
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+    doc = _doc_of(rec)
     needle_norm = _match_norm(needle)
     if not needle_norm:
         # The empty string is at every position, and a scan advancing by its
@@ -1134,11 +1169,29 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
 
     So a name recurring across places stays several rows, and their counts
     together add up to what ``section()`` returns for it.
+
+    **A paginated document is mapped by page instead.** A PDF's text has no
+    headings to tree, so pages are the only division it has: one ``level=0``
+    row per sheet, named ``page <N>``, counted the same way, and ``section()``
+    takes that name back. That is what lets a long PDF be read a piece at a
+    time — the 206KB Houdini manual against a schema, sheet by sheet, instead
+    of one whole-document read. It is a cruder division than headings (a
+    credits list can straddle a sheet), and it is the only one available.
     """
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+    doc = _doc_of(rec)
+    if doc.page_starts:
+        return [
+            OutlineEntry(
+                level=0,
+                heading=f"page {n}",
+                chars=len(_page_block(doc, n) or ""),
+                count=1,
+            )
+            for n in range(1, len(doc.page_starts) + 1)
+        ]
     entries: list[OutlineEntry] = []
     meta_block, body_block = _metadata_block(doc), _body_block(doc)
     if meta_block is not None:
@@ -1183,12 +1236,45 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
     match on the heading text; if it matches more than once, every matching
     block is returned — ambiguity should surface, not silently pick one. On an
     assembled page two pseudo-sections are addressable too: ``"metadata"`` (the
-    frontmatter's ``key: value`` lines) and ``"body"`` (everything after it)."""
+    frontmatter's ``key: value`` lines) and ``"body"`` (everything after it).
+
+    On a paginated document ``"page <N>"`` names one PDF sheet — the name
+    ``outline()`` prints and the axis ``quote`` reports, so walking a manual is
+    ``outline`` then ``section`` exactly as it is on an HTML page. **The page
+    number is the sheet's position in the file, never a number printed on it**:
+    printed numbering restarts per chapter (``4-39``, ``6-76``), is often
+    absent, and is not recoverable from the text. **On a paginated document the
+    page namespace is reserved**: ``page <N>`` is that sheet and nothing else,
+    unlike ``metadata``/``body``, which coexist with a same-named heading. The
+    two differ because those name the same kind of thing a heading does, where
+    returning both is the honest answer to an ambiguous name, while a sheet and
+    a heading are different kinds — and a heading block runs to the next
+    heading at its level, so it can span several sheets. Composing them would
+    answer "give me sheet 2" with text from sheets 3 and 4, and let a
+    ``page 99`` that no sheet answers look like a hit because the extractor
+    misparsed a ``# page 99`` line somewhere. Non-page names still match
+    headings on a PDF, which is what keeps a ``quote`` hit's ``[label]``
+    resolvable here.
+
+    A sheet with no extracted text comes back ``[]``, like a name that is
+    absent — the return is blocks of text, and such a sheet has none. The two
+    are told apart by ``_section_miss_hint``, which is where every other reason
+    for an empty result is already explained, and by ``outline()``, which lists
+    such a sheet as a row with 0 chars."""
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+    doc = _doc_of(rec)
     target = heading.strip().casefold()
+    page_match = _PAGE_NAME.match(target)
+    if page_match is not None and doc.page_starts:
+        # Truthiness, not `is not None`: an out-of-range sheet and one that
+        # yielded no text both give no block, and neither belongs in a list of
+        # text blocks. On an *unpaginated* document `page 2` reserves nothing
+        # and falls through, so a page with a heading by that name still
+        # answers to it.
+        page_block = _page_block(doc, int(page_match.group(1)))
+        return [page_block] if page_block else []
     blocks: list[str] = []
     pseudo = {"metadata": _metadata_block, "body": _body_block}.get(target)
     if pseudo is not None:
@@ -1405,10 +1491,7 @@ def _quote_row_facts(rec: PageRow) -> list[str]:
             if blob_shown
             else "no stored text, so no needle can match it"
         )
-    elif (
-        is_pdf
-        and not _parse_doc(text, assembled=rec["text_source"] == "html").page_starts
-    ):
+    elif is_pdf and not _doc_of(rec).page_starts:
         facts.append("pdf document pages: unavailable")
     return facts
 
@@ -1441,11 +1524,35 @@ def _cmd_quote(url: str, needle: str, context: int) -> int:
 
 
 def _cmd_outline(url: str, min_chars: int) -> int:
-    _require_page(url)
+    rec = _require_page(url)
+    paginated = bool(_doc_of(rec).page_starts)
     entries = outline(url)
     if not entries:
-        print(f"no headings in {url}", file=sys.stderr)
+        # Three different absences, and only the last is about structure. A
+        # row with no text has nothing to map whatever its type — a fifth of
+        # the cached PDFs are image-only scans — and blaming page markers
+        # there would send a reader to re-extract a document that has none to
+        # find. `quote` draws the same line; these reads must not disagree.
+        if not (rec["text"] or "").strip():
+            print(f"no stored text in {url}", file=sys.stderr)
+        elif rec["content_type"] == "application/pdf":
+            print(f"no page markers in {url}", file=sys.stderr)
+        else:
+            print(f"no headings in {url}", file=sys.stderr)
         return 1
+    if paginated:
+        # No filtering on a page map. Hiding sheets would break the ordinal
+        # reading the map exists to provide — page 42 following page 40 asserts
+        # a 41 that isn't there — and the thin sheets are often the ones worth
+        # rendering. Keyed on the value, not on whether the flag was passed:
+        # an explicit `--min-chars 0` asks to see everything, which is what
+        # this already shows, so there is nothing withheld to report.
+        if min_chars > 0:
+            print(
+                f"--min-chars {min_chars} ignored: a page map is shown in full",
+                file=sys.stderr,
+            )
+        min_chars = 0
     shown = [e for e in entries if e["chars"] >= min_chars]
     for entry in shown:
         indent = "  " * entry["level"]
@@ -1474,11 +1581,49 @@ def _section_miss_hint(url: str, heading: str) -> str | None:
     Order matters. ``section()`` matches exactly, so a heading that merely
     contains the needle is a near miss and must be reported as one; calling it
     body text would be false.
+
+    A ``page <N>`` name has its own causes, answered first and alone: the row
+    holds no text, the document is not paginated, the sheet is past the end, or
+    the sheet exists and yielded no text. The last is the reason this matters —
+    a seventh of the corpus's mapped sheets are that shape, and a walk over a
+    manual must be able to tell "no text on that sheet" from "no such sheet"
+    without opening the blob. It says nothing about whether the sheet is empty:
+    a full-page scan yields no text and is not blank, so the wording must not
+    claim more than the text layer knows. Range is asked of ``_page_block``,
+    not recomputed here, so this can never call a page absent that
+    ``section()`` would have returned.
+
+    Those answers are given only where ``section()`` read the name as a page —
+    a paginated document, or a PDF row that lost its markers. On an ordinary
+    HTML page ``page 2`` is just a heading name, matched as one, so the hint
+    must stay the heading hint: a forum index headed ``Page 2 of 5`` needs
+    "did you mean", not a remark about PDF sheets it was never going to have.
     """
     target = heading.strip().casefold()
     if not target:
         # The empty string is inside every heading — hinting on it would recite
         # the whole outline and say nothing.
+        return None
+    rec = get(url)
+    if rec is None:
+        return None
+    doc = _doc_of(rec)
+    page_match = _PAGE_NAME.match(target)
+    if page_match is not None and (
+        doc.page_starts or rec["content_type"] == "application/pdf"
+    ):
+        n = int(page_match.group(1))
+        if not (rec["text"] or "").strip():
+            return "no stored text in this row, so no page holds any"
+        if not doc.page_starts:
+            return "no page markers in this document; `page N` names a PDF sheet"
+        if _page_block(doc, n) is None:
+            return f"out of range; this document has {len(doc.page_starts)} pages"
+        return f"page {n} has no extracted text; the sheet itself may still hold ink"
+    if doc.page_starts:
+        # The rows of a page map are sheets, not headings. Offering "did you
+        # mean: page 41, page 42, …" for a substring of "page" would recite the
+        # map, and there are no headings here for the body-text hint to name.
         return None
     near = [e["heading"] for e in outline(url) if target in e["heading"].casefold()]
     if near:
@@ -1632,16 +1777,21 @@ def main(argv: list[str] | None = None) -> int:
         "(hits that then overlap merge)",
     )
 
-    p_outline = sub.add_parser("outline", help="heading tree with section sizes")
+    p_outline = sub.add_parser(
+        "outline", help="heading tree with section sizes (a PDF maps by page)"
+    )
     p_outline.add_argument("url")
     p_outline.add_argument(
         "--min-chars",
         type=int,
         default=0,
-        help="hide headings whose block is under N chars (UI chrome, mostly)",
+        help="hide headings whose block is under N chars (UI chrome, mostly); "
+        "not applied to a page map",
     )
 
-    p_section = sub.add_parser("section", help="one heading's block(s)")
+    p_section = sub.add_parser(
+        "section", help='one heading\'s block(s), or "page N" on a PDF'
+    )
     p_section.add_argument("url")
     p_section.add_argument("heading")
 

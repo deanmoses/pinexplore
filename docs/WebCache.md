@@ -238,7 +238,9 @@ cache quote <url> "2024"                   # 2. text containing a needle (matchi
 cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
 cache outline <url>                        # 3. heading tree + per-section char counts
 cache outline <url> --min-chars 20         #    …hiding blocks too small to be content
+cache outline <pdf-url>                    #    …one row per PDF sheet
 cache section <url> "Specifications"       # 4. one section's block, not the page
+cache section <pdf-url> "page 41"          #    …on a PDF, one sheet's text
 cache get <url>                            # 5. full page record — the last resort
                                            #    (text on stdout, row fields on stderr)
 ```
@@ -283,6 +285,8 @@ That collapse is what keeps the map usable on page-builder sites, where the mean
 ### Extracting everything a page knows
 
 The ladder is for needle-driven reads — you have a claim and want its span. The inverse task also comes up: building a whole catalog entry from one page ("every gameplay feature, every credit on the new Godzilla's page"), where the page is the input and the target schema is the sieve. No needle helper enumerates that; read the whole stored text against the schema — `get()` for a typical page, or `outline()` + `section()` to walk a long one piece by piece.
+
+**On a PDF that walk is by sheet.** `section(url, "page 41")` returns that sheet's text. A sheet with no extracted text gets no block in `section`.
 
 For a long page, do the read in a subagent so only results enter the main session's context: its prompt is the schema ("read this page's text; for every gameplay feature, credit, spec and date it states, return the verbatim span and the section it sits in"), its return is field → span pairs. The same applies to whole-page questions ("do any of the 41 replies dispute the production count?") — don't pull 38K chars into the main session to extract two sentences. Whole-document extraction is what makes either read reliable: credits live in footers and specs in tables, and both survive with structure intact. Each extracted span then becomes its own cite.
 
