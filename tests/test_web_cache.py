@@ -74,6 +74,8 @@ def _seed(
     text: str | None = None,
     title: str | None = None,
     content: str | bytes = "x",
+    content_type: str | None = None,
+    text_source: str | None = None,
 ) -> str:
     sha = wc.content_sha(content.encode() if isinstance(content, str) else content)
     wc.upsert_page(
@@ -84,6 +86,8 @@ def _seed(
         fetched_at=wc.now_iso(),
         title=title,
         text=text,
+        content_type=content_type,
+        text_source=text_source,
     )
     return sha
 
@@ -436,7 +440,15 @@ Second list section."""
 
 def _seed_structured(cache) -> str:
     url = wc.normalize_url("https://structured.example/doc")
-    _seed(cache, url=url, title="Structured Doc", text=STRUCTURED_TEXT)
+    # text_source="html" because the frontmatter is the HTML extractor's
+    # assembly — frontmatter semantics only apply to rows it provably wrote.
+    _seed(
+        cache,
+        url=url,
+        title="Structured Doc",
+        text=STRUCTURED_TEXT,
+        text_source="html",
+    )
     return url
 
 
@@ -733,6 +745,308 @@ def test_quote_context_windows_merge_in_document_order(cache):
 
 
 # --------------------------------------------------------------------------- #
+# quote: collapsed-whitespace matching + the PDF page axis
+# --------------------------------------------------------------------------- #
+
+
+def _assert_hit_invariants(text: str, needle: str, hits: list[wc.QuoteHit]) -> None:
+    """The two containment invariants guarding the span-mapping bisect, whose
+    failure mode is returning the line *beside* the match — something a recall
+    count alone scores as a pass. (a) The right span came back. (b) Nothing
+    was invented: every hit is a span of ``pages.text`` under the quote gate's
+    own normalization — collapsed, not literal, because a cross-page hit drops
+    its ``\\f`` marker lines and so is deliberately not a literal substring.
+    """
+    for hit in hits:
+        assert wc._match_norm(needle) in wc._match_norm(hit["text"])
+        assert wc._match_norm(hit["text"]) in wc._match_norm(text)
+
+
+def test_quote_finds_a_phrase_spanning_a_line_break(cache):
+    # The Houdini shape: reading-order PDF text breaks lines mid-phrase, and
+    # per-line matching returned nothing for a phrase really on the page.
+    url = wc.normalize_url("https://pdfish.example/houdini")
+    text = "The shot hits the left pop\nbumper. Then it drains."
+    _seed(cache, url=url, text=text)
+    hits = wc.quote_hits(url, "left pop bumper", con=cache)
+    # A match spanning lines returns those lines whole and verbatim — nothing
+    # is joined or reflowed, so the break survives as visible structure.
+    assert [h["text"] for h in hits] == [text]
+    _assert_hit_invariants(text, "left pop bumper", hits)
+
+
+def test_quote_hit_crossing_a_page_break_reports_both_pages(cache):
+    url = wc.normalize_url("https://pdfish.example/crossing")
+    text = "alpha bravo\n\f\ncharlie delta\n\f"
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.quote_hits(url, "bravo charlie", con=cache)
+    # The marker line is dropped from hit text (no viewer renders it); the
+    # page list carries the boundary as a field instead.
+    assert hit["text"] == "alpha bravo\ncharlie delta"
+    assert "\f" not in hit["text"]
+    assert hit["pdf_document_page_numbers"] == [1, 2]
+    _assert_hit_invariants(text, "bravo charlie", [hit])
+
+
+def test_one_page_document_reports_page_one_not_two(cache):
+    # The phantom-page bug: poppler terminates the last page too, so a lone
+    # trailing marker means one page, not two.
+    url = wc.normalize_url("https://pdfish.example/flyer")
+    _seed(cache, url=url, text="only line of the flyer\n\f")
+    (hit,) = wc.quote_hits(url, "only line", con=cache)
+    assert hit["pdf_document_page_numbers"] == [1]
+
+
+def test_document_without_markers_reports_no_pages(cache):
+    # Absent, not [1]: an unpaginated document's page structure is unknown —
+    # the OCR-imported manual row — which is different from having one page.
+    url = wc.normalize_url("https://html.example/plain")
+    _seed(cache, url=url, text="a plain paragraph with a needle in it")
+    (hit,) = wc.quote_hits(url, "needle", con=cache)
+    assert hit["pdf_document_page_numbers"] is None
+
+
+def test_blank_middle_page_keeps_page_numbers(cache):
+    # The Time Machine shape: blank pages mid-document. If an empty page lost
+    # its marker, every page after it would carry a confidently wrong number.
+    url = wc.normalize_url("https://pdfish.example/blankpage")
+    text = "page one text\n\f\n\f\npage three needle\n\f"
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.quote_hits(url, "needle", con=cache)
+    assert hit["pdf_document_page_numbers"] == [3]
+
+
+def test_merged_window_reports_the_page_range_it_spans(cache):
+    # The deliberate asymmetry with the heading rule: `heading` names the
+    # match — a claim about meaning, so widening must not move it — while
+    # `pdf_document_page_numbers` names the window, a claim about where the
+    # ink is, so it must cover everything shown, crossed pages included.
+    url = wc.normalize_url("https://pdfish.example/merged")
+    text = "needle a\n\f\nmiddle filler\n\f\nneedle b\n\f"
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.quote_hits(url, "needle", context=9, con=cache)
+    assert hit["text"] == "needle a\nmiddle filler\nneedle b"
+    assert hit["pdf_document_page_numbers"] == [1, 2, 3]
+    _assert_hit_invariants(text, "needle", [hit])
+
+
+def test_window_opening_on_a_dropped_marker_is_labelled_by_what_it_shows(cache):
+    # The pages describe the *displayed* text: a context window that opens on
+    # a marker line (which then disappears) must not claim the page before it.
+    url = wc.normalize_url("https://pdfish.example/edge")
+    _seed(cache, url=url, text="page one text\n\f\nneedle line\n\f")
+    (hit,) = wc.quote_hits(url, "needle", context=1, con=cache)
+    assert hit["text"] == "needle line"
+    assert hit["pdf_document_page_numbers"] == [2]
+
+
+def test_context_zero_keeps_sentence_granularity(cache):
+    # Two matching sentences on one line stay two hits...
+    url = wc.normalize_url("https://grouping.example/two-sentences")
+    text = "Needle one. Needle two.\nplain line"
+    _seed(cache, url=url, text=text)
+    hits = wc.quote_hits(url, "needle", con=cache)
+    assert [h["text"] for h in hits] == ["Needle one.", "Needle two."]
+    _assert_hit_invariants(text, "needle", hits)
+
+
+def test_two_occurrences_in_one_sentence_are_one_hit(cache):
+    # ...and two occurrences inside one sentence stay one hit — the grouping
+    # today's per-sentence walk produced, preserved through the span rewrite.
+    url = wc.normalize_url("https://grouping.example/one-sentence")
+    text = "The needle meets the needle here.\nplain line"
+    _seed(cache, url=url, text=text)
+    hits = wc.quote_hits(url, "needle", con=cache)
+    assert [h["text"] for h in hits] == ["The needle meets the needle here."]
+
+
+def test_context_on_a_long_single_line_returns_the_whole_line(cache):
+    # Narrowing keys on the context *setting*, never on whether the widened
+    # result occupies one line — else a --context call on a one-line paragraph
+    # would silently sentence-clip what it returns whole today.
+    url = wc.normalize_url("https://forum.example/comment")
+    long_line = "Sentence of filler. " * 20 + "The needle sits here. More follows."
+    text = f"{long_line}\nsecond line"
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.quote_hits(url, "needle sits", context=1, con=cache)
+    assert long_line in hit["text"]
+
+
+def test_context_zero_still_narrows_to_the_sentence(cache):
+    # The flip side, pinned so HTML doesn't regress: markdown paragraphs are
+    # single long lines, and a context=0 hit inside one returns its sentence,
+    # not the 900-word line.
+    url = wc.normalize_url("https://forum.example/comment2")
+    long_line = "Sentence of filler. " * 20 + "The needle sits here. More follows."
+    _seed(cache, url=url, text=f"{long_line}\nsecond line")
+    (hit,) = wc.quote_hits(url, "needle sits", con=cache)
+    assert hit["text"] == "The needle sits here."
+
+
+def test_needle_crossing_a_heading_boundary_returns_an_unlabeled_hit(cache):
+    # No single name is true of a match spanning two sections; None is the
+    # answer the code already gives for prose above the first heading.
+    # Rejecting the occurrence would silently drop a real match.
+    url = wc.normalize_url("https://cross.example/doc")
+    text = "## A\na see ## B target a\nend see\n## B\ntarget start\nb see ## B target b"
+    _seed(cache, url=url, text=text)
+    needle = "see ## B target"
+    hits = wc.quote_hits(url, needle, con=cache)
+    assert [h["heading"] for h in hits] == ["A", None, "B"]
+    assert hits[1]["text"] == "end see\n## B\ntarget start"
+    _assert_hit_invariants(text, needle, hits)
+    # And under a wide context the cross-section hit merges with neither
+    # neighbour, though all three windows touch: the merge guard compares
+    # whole section-id tuples, and (A,) != (A, B) != (B,).
+    wide = wc.quote_hits(url, needle, context=9, con=cache)
+    assert [h["heading"] for h in wide] == ["A", None, "B"]
+    assert "target start" not in wide[0]["text"]  # clipped at A's boundary
+    _assert_hit_invariants(text, needle, wide)
+
+
+def test_empty_or_whitespace_needle_returns_no_hits(cache):
+    # "" collapses to a needle str.find reports at every position while a scan
+    # never advances; the CLI accepts "" as an argument, so it is reachable.
+    url = wc.normalize_url("https://degenerate.example/doc")
+    _seed(cache, url=url, text="any text at all")
+    assert wc.quote(url, "", con=cache) == []
+    assert wc.quote(url, "  \n\t ", con=cache) == []
+    assert wc.main(["quote", url, ""]) == 1
+
+
+def test_matching_is_case_insensitive_but_not_casefolded(cache):
+    url = wc.normalize_url("https://case.example/doc")
+    text = "Die Straße war lang."
+    _seed(cache, url=url, text=text)
+    assert wc.quote(url, "die straße", con=cache) == [text]
+    # lower(), not casefold(): the aggressive cross-script fold would quietly
+    # widen quote()'s documented contract, so STRASSE must keep missing Straße.
+    assert wc.quote(url, "STRASSE", con=cache) == []
+
+
+def test_smart_quotes_straighten_on_both_sides(cache):
+    # The Sonic flyer's COLLECTOR'S has a curly apostrophe; a phrase typed
+    # off a rendered page has a straight one. Returned text stays verbatim.
+    # RUF001 waived: the curly apostrophe is the test's whole subject.
+    url = wc.normalize_url("https://smart.example/doc")
+    text = "COLLECTOR’S EDITION includes a topper."  # noqa: RUF001
+    _seed(cache, url=url, text=text)
+    assert wc.quote(url, "COLLECTOR'S EDITION", con=cache) == [text]
+    assert wc.quote(url, "COLLECTOR’S EDITION", con=cache) == [text]  # noqa: RUF001
+
+
+def test_blank_lines_do_not_skew_the_bisect(cache):
+    # An empty normalized line contributes no separator — the one place the
+    # prefix sum could drift and hand back the line beside the match.
+    url = wc.normalize_url("https://blanks.example/doc")
+    text = "first target line\n\n\n\nother needle here\n\n\nlast line"
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.quote_hits(url, "needle", con=cache)
+    assert hit["text"] == "other needle here"
+    _assert_hit_invariants(text, "needle", [hit])
+
+
+def test_html_hits_carry_no_page_numbers(cache):
+    url = _seed_structured(cache)
+    for context in (0, 2):
+        for hit in wc.quote_hits(url, "deep item", context=context, con=cache):
+            assert hit["pdf_document_page_numbers"] is None
+
+
+def test_frontmatter_delimiters_are_not_matchable(cache):
+    # The --- delimiters are assembly syntax, excluded from matching like \f
+    # markers. Left matchable, a context window opening on one gets clipped
+    # past its own match line by the metadata section's bounds — a hit that
+    # doesn't contain its needle.
+    url = wc.normalize_url("https://fm.example/delims")
+    _seed(
+        cache,
+        url=url,
+        text="---\ntitle: Sonic Flyer\nsource: example\n---\nbody",
+        text_source="html",
+    )
+    for context in (0, 1, 5):
+        assert wc.quote_hits(url, "---", context=context, con=cache) == []
+
+
+def test_a_body_thematic_break_still_matches(cache):
+    # Only the two delimiter lines are excluded — a markdown thematic break in
+    # the body is the page's own text and stays quotable.
+    url = wc.normalize_url("https://fm.example/thematic")
+    text = "---\ntitle: Doc\n---\nabove\n---\nbelow"
+    _seed(cache, url=url, text=text, text_source="html")
+    hits = wc.quote_hits(url, "---", con=cache)
+    assert [h["text"] for h in hits] == ["---"]
+    _assert_hit_invariants(text, "---", hits)
+
+
+def test_no_span_crosses_the_frontmatter_boundary(cache):
+    # The frontmatter is this cache's own assembly, so a phrase joining it to
+    # body text is never evidence — it would read our synthetic text as the
+    # document's, and it would verify at the gate because the frontmatter is
+    # in pages.text. With the delimiters unmatchable the two sit adjacent in
+    # matching space, so the boundary must be a hard barrier.
+    url = wc.normalize_url("https://fm.example/barrier")
+    _seed(
+        cache,
+        url=url,
+        text="---\ntitle: Sonic Flyer\nsource: example\n---\nbody starts here",
+        text_source="html",
+    )
+    assert wc.quote_hits(url, "example body starts", con=cache) == []
+    assert wc.quote_hits(url, "example --- body", con=cache) == []
+    # Each side still matches on its own.
+    assert wc.quote(url, "source: example", con=cache) == ["source: example"]
+    assert wc.quote(url, "body starts", con=cache) == ["body starts here"]
+
+
+def test_a_boundary_shaped_needle_still_finds_its_body_match(cache):
+    # Why the two sides are scanned separately rather than filtered after: a
+    # cross-boundary candidate that is found first and then rejected has
+    # already consumed the scan position, hiding a valid body occurrence that
+    # overlaps it. Metadata ends "alpha", body begins "alpha\nalpha target" —
+    # the real match is wholly inside the body and must come back.
+    url = wc.normalize_url("https://fm.example/overlap")
+    text = "---\ntitle: alpha\n---\nalpha\nalpha target"
+    _seed(cache, url=url, text=text, text_source="html")
+    hits = wc.quote_hits(url, "alpha alpha", con=cache)
+    assert [h["text"] for h in hits] == ["alpha\nalpha target"]
+    _assert_hit_invariants(text, "alpha alpha", hits)
+
+
+def test_frontmatter_semantics_apply_only_to_extracted_html(cache):
+    # Frontmatter is the HTML extractor's assembly, so only a row whose
+    # text_source proves that provenance gets its semantics. A document whose
+    # own first line happens to be --- (a PDF's rule line, a transcript) is
+    # page text through and through: its dashes stay matchable, phrases cross
+    # them, and nothing gets labeled metadata — the alternative silently
+    # suppresses real evidence on the strength of a coincidence.
+    url = wc.normalize_url("https://pdfish.example/dashes")
+    text = "---\nOwner's Note\n---\nreal content here\n\f"
+    _seed(cache, url=url, text=text, content_type="application/pdf", text_source="pdf")
+    (hit,) = wc.quote_hits(url, "Note --- real content", con=cache)
+    assert hit["text"] == "Owner's Note\n---\nreal content here"
+    assert hit["heading"] is None  # no headings at all, not "metadata"
+    assert wc.quote(url, "---", con=cache) == ["---", "---"]
+    _assert_hit_invariants(text, "Note --- real content", [hit])
+
+
+def test_parent_prose_spanning_into_a_child_keeps_the_parent_label(cache):
+    # Deliberate: a parent section's block runs through its subsections, so
+    # the parent's name is true of every line here (section(parent) returns
+    # the child's text too) — unlike a span across sibling sections, there is
+    # no misattribution to prevent, and None would discard a true locator.
+    url = wc.normalize_url("https://nested.example/doc")
+    text = "## Parent\nparent intro alpha\n### Child\nchild beta text"
+    _seed(cache, url=url, text=text)
+    needle = "alpha ### Child child beta"
+    (hit,) = wc.quote_hits(url, needle, con=cache)
+    assert hit["heading"] == "Parent"
+    assert hit["text"] == "parent intro alpha\n### Child\nchild beta text"
+    _assert_hit_invariants(text, needle, [hit])
+
+
+# --------------------------------------------------------------------------- #
 # CLI — the same five reads as shell commands
 # --------------------------------------------------------------------------- #
 
@@ -747,6 +1061,104 @@ def test_cli_search_prints_hits_and_quote_prints_matches(cache, capsys):
     assert wc.main(["quote", url, "intro line", "--context", "1"]) == 0
     out = capsys.readouterr().out
     assert "Intro line one.\nIntro line two." in out
+
+
+def test_cli_quote_pdf_prints_pages_and_blob_path(cache, capsys):
+    # The render handoff: everything Read(<blob>, pages=N) needs. The blob is
+    # a property of the page, printed once above the hits; the page numbers
+    # genuinely vary per hit, so they ride each one.
+    url = wc.normalize_url("https://pdf.example/manual.pdf")
+    sha = _seed(
+        cache,
+        url=url,
+        text="alpha needle intro\n\f\nneedle closer\n\f",
+        content_type="application/pdf",
+        text_source="pdf",
+    )
+    assert wc.main(["quote", url, "needle"]) == 0
+    assert capsys.readouterr().out == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\n"
+        "\n"
+        "alpha needle intro\n"
+        "pdf document pages: 1\n"
+        "\n"
+        "needle closer\n"
+        "pdf document pages: 2\n"
+    )
+
+
+def test_cli_quote_ocr_pdf_prints_path_and_pages_unavailable(cache, capsys):
+    # OCR text has no markers, but the blob is a PDF and renders fine — the
+    # row whose text most needs the go-look-at-the-page step. Silence about
+    # pages would read as "one page"; like the blob, it is a fact about the
+    # page and prints once.
+    url = wc.normalize_url("https://pdf.example/scan.pdf")
+    sha = _seed(
+        cache,
+        url=url,
+        text="ocr text of a scanned manual",
+        content_type="application/pdf",
+        text_source="ocr",
+    )
+    assert wc.main(["quote", url, "scanned manual"]) == 0
+    assert capsys.readouterr().out == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\n"
+        "pdf document pages: unavailable\n"
+        "\n"
+        "ocr text of a scanned manual\n"
+    )
+
+
+def test_cli_quote_pdf_without_markers_says_pages_unavailable(cache, capsys):
+    # A poppler-read row whose text predates the page markers: same answer.
+    url = wc.normalize_url("https://pdf.example/old-extraction.pdf")
+    sha = _seed(
+        cache,
+        url=url,
+        text="pre-marker extraction text",
+        content_type="application/pdf",
+        text_source="pdf",
+    )
+    assert wc.main(["quote", url, "extraction"]) == 0
+    assert capsys.readouterr().out == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\n"
+        "pdf document pages: unavailable\n"
+        "\n"
+        "pre-marker extraction text\n"
+    )
+
+
+def test_cli_quote_ocr_image_prints_path_without_page_noise(cache, capsys):
+    # An OCR'd JPEG has a renderable blob too, but telling someone their JPEG
+    # has no PDF pages is noise — the unavailable line keys on content type.
+    url = wc.normalize_url("https://img.example/flyer.jpg")
+    sha = _seed(
+        cache,
+        url=url,
+        text="flyer text via ocr",
+        content_type="image/jpeg",
+        text_source="ocr",
+    )
+    assert wc.main(["quote", url, "flyer text"]) == 0
+    assert capsys.readouterr().out == (
+        f"blob: {wc.blob_path(sha, 'jpg')}\n\nflyer text via ocr\n"
+    )
+
+
+def test_cli_quote_html_output_is_unchanged(cache, capsys):
+    # The corpus's most common type gains no lines at all: no pages, no blob.
+    url = wc.normalize_url("https://html.example/page")
+    _seed(
+        cache,
+        url=url,
+        text="## Section\n\nNeedle sentence one. Other.\n\nNeedle again.",
+        content_type="text/html",
+        text_source="html",
+    )
+    assert wc.main(["quote", url, "needle"]) == 0
+    assert capsys.readouterr().out == (
+        "[Section]\nNeedle sentence one.\n\n[Section]\nNeedle again.\n"
+    )
 
 
 def test_cli_outline_indents_by_level(cache, capsys):

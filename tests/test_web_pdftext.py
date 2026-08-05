@@ -1,4 +1,4 @@
-"""Tests for web_pdftext — the poppler ``pdftotext -layout`` backend.
+"""Tests for web_pdftext — the poppler ``pdftotext`` reading-order backend.
 
 Normalization is pure and runs everywhere; the poppler bridge is skipped where
 the binary isn't installed. The error paths stub ``subprocess.run``, since
@@ -24,9 +24,26 @@ needs_poppler = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 
 
-def test_normalize_turns_page_breaks_into_line_breaks():
-    # Left in, a form feed is an invisible control character inside a quote.
-    assert web_pdftext._normalize("page one\fpage two") == "page one\npage two"
+def test_normalize_keeps_each_page_break_as_its_own_line():
+    # The page marker survives as a line of its own — the page axis
+    # web_cache.quote_hits() reads — so no ordinary line of text carries one,
+    # and hit text (which drops marker lines) never shows the control char.
+    assert web_pdftext._normalize("page one\fpage two") == "page one\n\f\npage two"
+
+
+def test_normalize_keeps_a_blank_page_s_marker():
+    # A blank page must still contribute its marker, or every page after it is
+    # numbered one short — the Time Machine manual has three such pages.
+    assert web_pdftext._normalize("one\f\fthree\f") == "one\n\f\n\f\nthree\n\f"
+
+
+def test_normalize_page_count_equals_marker_count():
+    # poppler terminates every page, the last included, so a one-page document
+    # carries exactly one marker — what distinguishes it from a document with
+    # no page information at all.
+    out = web_pdftext._normalize("only page\f")
+    assert out == "only page\n\f"
+    assert out.count("\f") == 1
 
 
 def test_normalize_keeps_leading_whitespace_and_drops_trailing():
@@ -43,7 +60,11 @@ def test_normalize_keeps_the_first_content_line_indented():
 
 
 def test_normalize_still_drops_blank_lines_at_both_ends():
-    assert web_pdftext._normalize("\n\f\nreal text\n\n\f") == "real text"
+    # Blank lines trim at each page's edges, but the markers stay — including
+    # the leading one (page 1 is blank, and its marker is what says so) and the
+    # trailing terminator (nine of fifteen cached PDFs are three pages or
+    # fewer, so a lone trailing marker is the ordinary case, not an edge).
+    assert web_pdftext._normalize("\n\f\nreal text\n\n\f") == "\f\nreal text\n\f"
 
 
 def test_normalize_returns_none_for_whitespace_only_output():
@@ -135,8 +156,9 @@ def test_clean_exit_with_no_text_is_a_finding_not_a_failure(monkeypatch):
 
 @needs_poppler
 def test_reads_a_real_pdf_from_bytes(make_pdf):
+    # One page, so exactly one marker: poppler's trailing page terminator.
     assert web_pdftext.pdf_text(make_pdf(text="Hello PDF evidence")) == (
-        "Hello PDF evidence"
+        "Hello PDF evidence\n\f"
     )
 
 

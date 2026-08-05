@@ -2,16 +2,16 @@
 """PDF text-layer backend for the web evidence cache (see docs/WebCache.md).
 
 Turns a PDF's bytes into the text the cache indexes and quotes, using poppler's
-``pdftotext -layout``.
-
-``-layout`` is load-bearing, and worth a system binary when pypdf is already a
-dependency. A PDF has no structure, only glyphs at coordinates, so its "text" is
-always a reconstruction; reading them in content-stream order — what a pure
-Python reader does — gets every word right and the meaning wrong. On Jersey
-Jack's Sonic flyer that order put the Collector's Edition bullets under the
-heading ``SPECIAL EDITION`` and vice versa: verbatim strings a quote gate
-passes, with the attribution silently swapped. ``-layout`` rebuilds the page as
-printed, so a heading keeps its own list.
+``pdftotext`` in its default reading-order mode: text comes out column by
+column, so a two-column page never splices unrelated columns into one output
+line — the failure mode that puts a verbatim-looking quote under the wrong
+heading. What reading order gives up is the page as printed: a table read this
+way is a column of unrelated cells, and a vector checkmark was never in the
+text layer at all. Those questions are answered by rendering the page image
+from the raw blob instead (see WebCache.md), which is why the one piece of
+layout this module preserves is the page boundary: poppler terminates every
+page with a form feed, and ``_normalize`` keeps each as a line of its own so
+``web_cache.quote_hits()`` can say which PDF page a hit sits on.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 import subprocess
 
 # stdin/stdout, so the bytes read are exactly the caller's — no temp file.
-_ARGV = ("pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
+_ARGV = ("pdftotext", "-enc", "UTF-8", "-", "-")
 
 # Liveness, not tuning: the heaviest manual in the corpus takes a second, so this
 # only fires on a document that would otherwise hang the batch.
@@ -46,17 +46,35 @@ class PdfTextFailedError(RuntimeError):
 def _normalize(out: str) -> str | None:
     """poppler's stdout as storable text, or None when it holds nothing.
 
-    Leading whitespace is the column alignment and must survive — which is why
-    the ends are trimmed a line at a time. ``str.strip()`` on the joined text
-    would take the first content line's indentation with the blank lines above
-    it, shifting it out of its column.
+    Page markers survive: poppler terminates every page — the last included —
+    with a form feed, and each one is kept as a line of its own, so a page's
+    text starts on the line after its predecessor's marker and page count
+    equals marker count. A blank page still contributes its marker; dropping
+    it would shift every later page's ordinal position in the file, which is
+    the one thing the markers promise (the cached Time Machine manual has
+    three blank pages mid-document). Hence the page-at-a-time shape below:
+    ``str.splitlines()`` and per-line ``rstrip()`` both eat form feeds
+    outright, so neither may ever see one.
+
+    Within a page, leading whitespace is kept (trailing is page-width padding)
+    and blank lines at both edges are trimmed. Output that is nothing but
+    whitespace and form feeds still returns None, not a skeleton of empty
+    pages — an image-only PDF is a finding, and the caller's thin-content
+    warning depends on it.
     """
-    lines = [line.rstrip() for line in out.replace("\f", "\n").splitlines()]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines) or None
+    pages = out.split("\f")
+    kept: list[str] = []
+    for i, page in enumerate(pages):
+        lines = [line.rstrip() for line in page.split("\n")]
+        while lines and not lines[0]:
+            lines.pop(0)
+        while lines and not lines[-1]:
+            lines.pop()
+        kept.extend(lines)
+        if i < len(pages) - 1:
+            kept.append("\f")
+    text = "\n".join(kept)
+    return text if text.strip() else None
 
 
 def pdf_text(raw: bytes) -> str | None:

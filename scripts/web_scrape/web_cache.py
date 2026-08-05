@@ -25,10 +25,13 @@ live on disk rather than in SQLite to keep the DB lean and the FTS index fast.
 Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
     search(term)          FTS5 BM25-ranked pages (url, title, snippet)
-    quote(url, needle)    sentence(s) in a page's text containing a needle;
+    quote(url, needle)    sentence(s) in a page's text containing a needle —
+                          matching ignores case, smart quotes, and whitespace
+                          runs (so a phrase spanning a line break still hits);
                           context=N widens each hit by ±N lines, clipped to
                           its section. quote_hits() is the same read with each
-                          hit's enclosing heading, so one call yields a cite
+                          hit's enclosing heading and, on a PDF, the PDF page
+                          number(s) the shown text sits on — one call, one cite
     outline(url)          the page's heading tree with per-section char counts
     section(url, heading) one heading's block(s), without the whole page
     get(url)              the full page record — the last resort
@@ -51,6 +54,7 @@ import shutil
 import sqlite3
 import sys
 import urllib.parse
+from bisect import bisect_right
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, TypedDict, cast
@@ -557,15 +561,127 @@ def search(
 
 
 # A pragmatic sentence splitter: break after ., !, or ? followed by whitespace,
-# or on a line break (paragraph/heading boundary). Good enough to isolate a
+# or on a line/page break (paragraph, heading, or PDF page boundary — a form
+# feed breaks like a newline whatever precedes it). Good enough to isolate a
 # quotable sentence; the patch author verifies verbatim against the raw blob
-# anyway.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+# anyway. Every separator this consumes is a whitespace run, which is what
+# lets _sentence_extent reuse match offsets computed on the whole line.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|[\n\f]+")
 
 
 def sentences(text: str | None) -> list[str]:
     """Split readable text into trimmed, non-empty sentences."""
     return [s.strip() for s in _SENTENCE_SPLIT.split(text or "") if s.strip()]
+
+
+# Smart-quote straightening for quote matching, mirroring flippatch's quote
+# gate (quote_verify/verify_quotes.py, _SMART): a phrase typed off a rendered
+# page carries straight quotes where the stored text may have curly ones.
+# RUF001 waived: the curly characters are the mapping's whole subject.
+_MATCH_SMART = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})  # noqa: RUF001
+
+
+def _match_norm(s: str) -> str:
+    """``s`` as the quote matcher compares it: smart quotes straightened,
+    whitespace runs collapsed to single spaces (never deleted — word boundaries
+    survive, so ``abc`` still does not match ``ab\\nc``), ends trimmed, and
+    lowercased.
+
+    This is flippatch's ``make verify-quotes`` normalization plus lowercasing:
+    case-insensitivity is ``quote()``'s documented contract, and being one step
+    more permissive than the gate is safe because a hit's text is always stored
+    lines verbatim — over-matching can only surface a span whose typography
+    differs from the needle typed, never invent one. ``lower()``, not
+    ``casefold()``: the aggressive cross-script fold would quietly widen the
+    documented contract for nothing this corpus contains.
+    """
+    return " ".join(s.translate(_MATCH_SMART).split()).lower()
+
+
+class _Span(NamedTuple):
+    """One match's extent across a unit list (a document's lines, or a line's
+    sentences): the first and last unit it touches, plus the match's char
+    offsets — ``start_off`` within the *first* unit's normalized text,
+    ``end_off`` (exclusive) within the *last*'s. On a multi-unit span those
+    are offsets into two different strings, so they are only meaningful
+    together when ``first == last`` — the sentence-narrowing case they
+    exist for."""
+
+    first: int
+    last: int
+    start_off: int
+    end_off: int
+
+
+def _unit_bounds(units: list[str]) -> tuple[list[tuple[int, int, int]], str]:
+    """Each non-empty unit's ``(start, end, index)`` in the normalized join,
+    plus that join: unit norms separated by single spaces.
+
+    Empty-normalizing units (blank lines, ``\\f`` markers) occupy no space and
+    contribute no separator, so they can never skew a match's mapping back to
+    its units — and can never be matched themselves.
+    """
+    bounds: list[tuple[int, int, int]] = []
+    parts: list[str] = []
+    pos = 0
+    for idx, unit in enumerate(units):
+        norm = _match_norm(unit)
+        if not norm:
+            continue
+        if parts:
+            pos += 1  # the single joining space
+        bounds.append((pos, pos + len(norm), idx))
+        parts.append(norm)
+        pos += len(norm)
+    return bounds, " ".join(parts)
+
+
+def _find_spans(units: list[str], needle_norm: str) -> list[_Span]:
+    """Non-overlapping occurrences of a normalized needle across ``units``,
+    in document order, each mapped to the units it touches.
+
+    One rule in each direction: comparison ignores whitespace (the units join
+    through ``_unit_bounds``, so a needle spanning a unit boundary matches),
+    output preserves it (spans map back to whole units; the caller returns
+    those verbatim). ``needle_norm`` must be non-empty and ``_match_norm``-ed
+    already, so it can never begin or end inside a collapsed run.
+    """
+    bounds, joined = _unit_bounds(units)
+    starts = [b[0] for b in bounds]
+    spans: list[_Span] = []
+    at = joined.find(needle_norm)
+    while at != -1:
+        end = at + len(needle_norm)
+        # The match's edge chars are non-space (the needle is normalized), so
+        # each lies inside some unit's interval — never on a separator.
+        first = bisect_right(starts, at) - 1
+        last = bisect_right(starts, end - 1) - 1
+        spans.append(
+            _Span(
+                bounds[first][2],
+                bounds[last][2],
+                at - bounds[first][0],
+                end - bounds[last][0],
+            )
+        )
+        at = joined.find(needle_norm, end)
+    return spans
+
+
+def _sentence_extent(sents: list[str], start_off: int, end_off: int) -> tuple[int, int]:
+    """The inclusive range of ``sents`` a match at these offsets touches.
+
+    The offsets come from ``_find_spans`` over whole lines and are relative to
+    one line's normalized text; they transfer because the sentence norms joined
+    on single spaces reproduce the line norm exactly — every separator
+    ``_SENTENCE_SPLIT`` consumes is a whitespace run, which normalization would
+    have collapsed to the same single space.
+    """
+    bounds, _ = _unit_bounds(sents)
+    starts = [b[0] for b in bounds]
+    first = bisect_right(starts, start_off) - 1
+    last = bisect_right(starts, end_off - 1) - 1
+    return bounds[first][2], bounds[last][2]
 
 
 # --------------------------------------------------------------------------- #
@@ -596,11 +712,14 @@ type _TreePath = tuple[_TreeStep, ...]
 
 
 class _Doc(NamedTuple):
-    """A page's text parsed for navigation: frontmatter span + headings."""
+    """A page's text parsed for navigation: frontmatter, headings, PDF pages."""
 
     lines: list[str]
     fm_close: int | None  # line index of the closing --- delimiter, or None
     headings: list[_Heading]
+    # First line of each PDF page, in order; [] when the document has no page
+    # structure — deliberately distinct from a one-page document's [0].
+    page_starts: list[int]
 
 
 class OutlineEntry(TypedDict):
@@ -613,29 +732,54 @@ class OutlineEntry(TypedDict):
 
 
 class QuoteHit(TypedDict):
-    """One hit from ``quote_hits()``: a span and the section it sits in."""
+    """One hit from ``quote_hits()``: a span, its section, and its PDF pages."""
 
     text: str
-    heading: str | None  # enclosing section name, or None above the first heading
+    # The match's enclosing section name; None above the first heading, and
+    # None when the match itself crosses a section boundary (no single name
+    # can be true of such a hit).
+    heading: str | None
+    # 1-based ordinal position within the PDF *file* of every page the shown
+    # text touches (a merged context window can cross pages), inclusive of
+    # pages it merely passes through. None — not [1] — when the document has
+    # no page structure. Deliberately not named "page": the number printed on
+    # the sheet is often different ink, and the locator convention names both
+    # ("printed page 17, PDF document page 27").
+    pdf_document_page_numbers: list[int] | None
 
 
-def _parse_doc(text: str) -> _Doc:
-    """Parse stored text into its frontmatter span and heading list.
+def _parse_doc(text: str, *, assembled: bool) -> _Doc:
+    """Parse stored text into its frontmatter span, headings, and PDF pages.
 
     The HTML extractor assembles ``text`` as YAML-style frontmatter (``---`` on
     line 1, ``key: value`` lines, a closing ``---``) followed by the page as
-    markdown. Recognition is positional: the frontmatter exists only when line
-    1 is ``---``, and the next ``---`` line closes it — frontmatter holds only
-    ``key: value`` lines, so the first such line is always ours, never a
-    thematic break from the page. Headings are ATX lines outside the
+    markdown. Recognition is positional — the frontmatter exists only when
+    line 1 is ``---``, and the next ``---`` line closes it — but **only on an
+    assembled text** (``assembled`` is true when the row's ``text_source`` is
+    ``html``, the one extractor that writes frontmatter). That gate matters
+    more than it used to: quote matching treats the frontmatter as synthetic —
+    delimiters unmatchable, no span across the boundary — which is correct for
+    text we assembled and *suppresses real evidence* on a document whose own
+    first line happens to be ``---`` (a PDF's rule line, a transcript). A
+    document with unrecorded provenance gets its own-text reading, since lost
+    metadata labels are the cheaper error. Headings are ATX lines outside the
     frontmatter and outside code fences. A literal paragraph starting with
-    ``#`` and a space can still misparse — accepted: these helpers are
-    navigation aids, and a misparse costs a slightly-off outline, never a
-    wrong quote (verification and FTS read no structure).
+    ``#`` and a space can still misparse — accepted: a heading misparse costs
+    a slightly-off outline, never a wrong quote (verification and FTS read no
+    structure).
+
+    Pages come from the text itself, no content-type threading: a line that is
+    exactly ``"\\f"`` is a page boundary, and only the PDF extractor writes one
+    (the human-text paths replace stray form feeds — see web_pdftext.py), so
+    "has page markers" and "is a paginated document" are the same predicate. A
+    line's page number is 1 + the count of marker lines above it. Both guard
+    halves below matter: without the empty case an unpaginated document would
+    read as one-page, and without the length filter the trailing terminator
+    poppler emits would mint a phantom last page.
     """
     lines = text.split("\n")
     fm_close: int | None = None
-    if lines and lines[0] == "---":
+    if assembled and lines and lines[0] == "---":
         fm_close = next((i for i, ln in enumerate(lines) if i and ln == "---"), None)
     start = fm_close + 1 if fm_close is not None else 0
     headings: list[_Heading] = []
@@ -650,7 +794,11 @@ def _parse_doc(text: str) -> _Doc:
         match = _ATX_HEADING.match(line)
         if match:
             headings.append(_Heading(i, len(match.group(1)), match.group(2).strip()))
-    return _Doc(lines, fm_close, headings)
+    markers = [i for i, ln in enumerate(lines) if ln == "\f"]
+    page_starts = (
+        [] if not markers else [0] + [i + 1 for i in markers if i + 1 < len(lines)]
+    )
+    return _Doc(lines, fm_close, headings, page_starts)
 
 
 def _metadata_block(doc: _Doc) -> str | None:
@@ -722,13 +870,93 @@ def _enclosing_section(doc: _Doc, line_idx: int) -> _Section:
     return _Section(-2, None, body_start, first_heading)
 
 
-class _Window(NamedTuple):
-    """The lines shown for one hit: a match plus its padding, within a section."""
+class _Hit(NamedTuple):
+    """The unrendered form of one ``QuoteHit`` — everything but the text lookup.
+
+    ``start``/``end`` are the shown line range; ``sentence_span`` (context<=0,
+    one-line match only) narrows it further to a sentence extent within that
+    line. ``match_line`` is the match's own first line — where the heading is
+    read, never the window's edges. ``section_ids`` are the section(s) the
+    *match* touches, in order: the merge guard compares whole tuples, so an
+    ordinary hit ``(id,)`` merges exactly as before, while a cross-section hit
+    can never absorb — or be absorbed by — a neighbour, and more than one id
+    means ``heading=None``.
+    """
 
     start: int
     end: int  # one past its last line
-    match_line: int  # where the heading is taken from, never the window's edges
-    section_id: int  # the _Section it is clipped to; merges never cross it
+    match_line: int
+    section_ids: tuple[int, ...]
+    sentence_span: tuple[int, int] | None  # inclusive sentence indices
+
+
+def _match_sections(doc: _Doc, first: int, last: int) -> list[_Section]:
+    """The section(s) lines ``first``..``last`` (inclusive) pass through, in
+    order, each entered at the previous one's ``end``.
+
+    Deliberately coarser than nearest-heading granularity: a parent section's
+    block runs through its nested subsections, so a span starting in the
+    parent's own prose and running into a child stays one entry — the parent —
+    and keeps its label. That is not the misattribution the cross-section rule
+    exists to prevent: the parent's name is true of every line it covers
+    (``section(parent)`` returns the child's text too), unlike a span across
+    *sibling* sections, where no returned name would be. Only a span reaching
+    past the block's end collects a second id and goes unlabeled.
+    """
+    at = first
+    secs = [_enclosing_section(doc, at)]
+    while secs[-1].end <= last:
+        # A section's end is one past its last line, so the next one opens
+        # there. max() guards the frontmatter quirk where the closing ---
+        # line sits at its own section's end and would probe in place.
+        at = max(secs[-1].end, at + 1)
+        secs.append(_enclosing_section(doc, at))
+    return secs
+
+
+def _render_hit(doc: _Doc, hit: _Hit) -> QuoteHit:
+    """A ``_Hit`` as the public ``QuoteHit``: text, heading, PDF pages.
+
+    ``\\f`` marker lines are dropped from the shown text — a character no
+    viewer renders is residue, not evidence, and the page numbers carry the
+    fact of the boundary in a field instead. The drop is scoped to hit text
+    only: ``get()``/``section()`` keep their markers, where a whole-document
+    read needs the page structure visible.
+
+    The page numbers describe the *shown* text, bisected from the first and
+    last lines that survive into it — after the marker drop and the edge
+    trim — so a window opening on a dropped marker or a blank line is never
+    labelled with a page contributing nothing. Interior pages a merged window
+    crosses stay included: whoever renders the hit needs every sheet the ink
+    came from. (Contrast ``heading``, which names the match, not the window —
+    a heading is a claim about meaning and must not move when the display
+    widens; a page range is a claim about where the ink is and must cover
+    everything shown.)
+    """
+    if hit.sentence_span is not None:
+        sents = sentences(doc.lines[hit.match_line])
+        text = " ".join(sents[hit.sentence_span[0] : hit.sentence_span[1] + 1])
+        shown = [hit.match_line]
+    else:
+        shown = [i for i in range(hit.start, hit.end) if doc.lines[i] != "\f"]
+        # The .strip() below erases blank edge lines from the text; drop them
+        # from the page bookkeeping too so the label describes what is shown.
+        while shown and not doc.lines[shown[0]].strip():
+            shown.pop(0)
+        while shown and not doc.lines[shown[-1]].strip():
+            shown.pop()
+        text = "\n".join(doc.lines[i] for i in shown).strip()
+    heading = (
+        _enclosing_section(doc, hit.match_line).name
+        if len(hit.section_ids) == 1
+        else None
+    )
+    pages: list[int] | None = None
+    if doc.page_starts and shown:
+        first = bisect_right(doc.page_starts, shown[0])
+        last = bisect_right(doc.page_starts, shown[-1])
+        pages = list(range(first, last + 1))
+    return QuoteHit(text=text, heading=heading, pdf_document_page_numbers=pages)
 
 
 def quote_hits(
@@ -738,18 +966,32 @@ def quote_hits(
     context: int = 0,
     con: sqlite3.Connection | None = None,
 ) -> list[QuoteHit]:
-    """``quote()`` with each hit's enclosing heading — a cite in one call.
+    """``quote()`` with each hit's enclosing heading and PDF page(s) — a cite
+    in one call.
 
     A patch cite needs a verbatim ``quote`` **and** a ``locator`` saying where
     it sits, and this answers both at once. Each hit carries ``heading``: the
-    nearest heading at or above it (or ``"metadata"`` inside the frontmatter,
-    None above the first heading), ready to become ``locator: in the <x>
-    section`` and to pass straight back to ``section()``.
+    nearest heading at or above the match (or ``"metadata"`` inside the
+    frontmatter; None above the first heading, and None when the match itself
+    crosses a section boundary), ready to become ``locator: in the <x>
+    section`` and to pass straight back to ``section()``. On a PDF each hit
+    also carries ``pdf_document_page_numbers`` — the page(s) of the file its
+    shown text sits on, the number that navigates a PDF reader to the page
+    worth rendering.
 
-    A hit never leaves the section it names — the name is the match's own, and
-    padding clips to the section's bounds — so ``context`` changes how much you
-    see without changing where the evidence is said to live, and any span
-    lifted out of a hit can carry that hit's locator.
+    Matching ignores case, smart quotes, and whitespace runs, so a phrase
+    spanning a stored line break is still found; what comes back is always the
+    stored text verbatim — whole lines when a match or window spans several
+    (whitespace is the surviving evidence of structure: a needle matching
+    across two table cells comes back as two lines, and the boundary renders),
+    the matching sentence(s) when a ``context=0`` match sits within one.
+
+    A hit never leaves the section(s) its match touches — the name is the
+    match's own, and padding clips to the section's bounds — so ``context``
+    changes how much you see without changing where the evidence is said to
+    live, and any span lifted out of a hit can carry that hit's locator. The
+    page numbers, by contrast, describe the whole shown window; see
+    ``_render_hit`` for why the two rules differ.
 
     The heading is only as good as the page's own markup. A page-builder site
     whose tab labels are real ``<h2>``s yields locators like ``$7,995``;
@@ -758,41 +1000,74 @@ def quote_hits(
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "")
-    low = needle.lower()
-    if context <= 0:
-        # Per-line, then per-sentence: identical spans to splitting the whole
-        # text at once (_SENTENCE_SPLIT breaks on \n+, so no sentence ever
-        # crosses a line) but each one keeps the line index its heading needs.
-        return [
-            QuoteHit(text=s, heading=_enclosing_section(doc, i).name)
-            for i, line in enumerate(doc.lines)
-            for s in sentences(line)
-            if low in s.lower()
+    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+    needle_norm = _match_norm(needle)
+    if not needle_norm:
+        # The empty string is at every position, and a scan advancing by its
+        # length would never advance. No hits, same as _section_miss_hint's
+        # treatment of the identical degenerate input.
+        return []
+    # The frontmatter is this cache's own assembly, not page text, so its two
+    # sides are scanned as separate ranges: the delimiter lines fall outside
+    # both (a reader never sees them as content, same rule as \f markers, and
+    # no match can sit on a line the metadata section's bounds exclude), and a
+    # span joining metadata to body — our synthetic text reading as the
+    # document's, the splice hazard in one more costume — is never a
+    # candidate. Never-a-candidate matters: a post-scan reject would already
+    # have consumed the scan position, hiding a valid body match that
+    # overlaps the rejected one.
+    if doc.fm_close is None:
+        spans = _find_spans(doc.lines, needle_norm)
+    else:
+        spans = [
+            s._replace(first=s.first + start, last=s.last + start)
+            for start, segment in (
+                (1, doc.lines[1 : doc.fm_close]),
+                (doc.fm_close + 1, doc.lines[doc.fm_close + 1 :]),
+            )
+            for s in _find_spans(segment, needle_norm)
         ]
-    # Both the clip and the section check keep a hit's label true of every word
-    # in it: unclipped padding spills across a heading, and windows either side
-    # of one can abut exactly, so a merged pair would hold evidence from two
-    # sections under a single name. Near an edge that yields less than ±N.
-    windows: list[_Window] = []
-    for i, line in enumerate(doc.lines):
-        if low not in line.lower():
-            continue
-        sec = _enclosing_section(doc, i)
-        start = max(sec.start, i - context)
-        end = min(sec.end, i + context + 1)
-        last = windows[-1] if windows else None
-        if last is not None and start <= last.end and sec.id == last.section_id:
-            windows[-1] = last._replace(end=max(last.end, end))
+    # One path for every context: find spans, widen by context (possibly
+    # zero), narrow to sentences only at context<=0 on a one-line match —
+    # keyed on the context *setting*, never on whether a widened result
+    # happens to occupy one line, which would silently sentence-clip a
+    # --context call on a one-line document.
+    hits: list[_Hit] = []
+    for span in spans:
+        secs = _match_sections(doc, span.first, span.last)
+        section_ids = tuple(s.id for s in secs)
+        if context <= 0 and span.first == span.last:
+            extent = _sentence_extent(
+                sentences(doc.lines[span.first]), span.start_off, span.end_off
+            )
+            hit = _Hit(span.first, span.first + 1, span.first, section_ids, extent)
         else:
-            windows.append(_Window(start, end, i, sec.id))
-    return [
-        QuoteHit(
-            text="\n".join(doc.lines[w.start : w.end]).strip(),
-            heading=_enclosing_section(doc, w.match_line).name,
-        )
-        for w in windows
-    ]
+            # Both the clip and the tuple check keep a hit's label true of
+            # every word in it: unclipped padding spills across a heading, and
+            # windows either side of one can abut exactly, so a merged pair
+            # would hold evidence from two sections under a single name. Near
+            # an edge this yields less than ±N.
+            hit = _Hit(
+                max(secs[0].start, span.first - max(context, 0)),
+                min(secs[-1].end, span.last + 1 + max(context, 0)),
+                span.first,
+                section_ids,
+                None,
+            )
+        last = hits[-1] if hits else None
+        if last is None:
+            hits.append(hit)
+        elif context > 0:
+            if hit.start <= last.end and hit.section_ids == last.section_ids:
+                hits[-1] = last._replace(end=max(last.end, hit.end))
+            else:
+                hits.append(hit)
+        elif hit != last:
+            # context<=0 never merges, but two occurrences resolving to the
+            # same extent — twice inside one sentence — are one hit; two
+            # matching sentences on one line stay two (distinct extents).
+            hits.append(hit)
+    return [_render_hit(doc, h) for h in hits]
 
 
 def quote(
@@ -802,11 +1077,17 @@ def quote(
     context: int = 0,
     con: sqlite3.Connection | None = None,
 ) -> list[str]:
-    """Text in a page containing ``needle`` (case-insensitive), document order.
+    """Text in a page containing ``needle``, document order.
 
-    With ``context=0`` (the default): the matching sentences, one per hit — the
-    starting point for a verbatim ``cite.quote`` in a data patch. The author
-    still confirms wording against the stored raw blob before shipping.
+    Matching ignores case, smart quotes, and whitespace runs — a needle typed
+    off a rendered page finds the stored text even across a line break or a
+    curly apostrophe — while the returned text is always the stored lines
+    verbatim, so every hit still passes the quote gate.
+
+    With ``context=0`` (the default): the matching sentence(s), one hit per
+    match — the starting point for a verbatim ``cite.quote`` in a data patch.
+    The author still confirms wording against the stored raw blob before
+    shipping. A match spanning several lines returns those lines whole.
 
     With ``context=N``: each hit widened to ±N surrounding lines, so confirming
     a span's surroundings rarely needs the whole page. Overlapping windows
@@ -815,8 +1096,9 @@ def quote(
     windows and buy skim-comfort at the cost of a confusing contract.
 
     Just the spans. ``quote_hits()`` is the same read with each hit's enclosing
-    heading attached; this stays the plain-text form because it is what the
-    quote gate consumes — a verbatim span and nothing to strip back off.
+    heading and PDF page numbers attached; this stays the plain-text form
+    because it is what the quote gate consumes — a verbatim span and nothing
+    to strip back off.
     """
     return [h["text"] for h in quote_hits(url, needle, context=context, con=con)]
 
@@ -856,7 +1138,7 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "")
+    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
     entries: list[OutlineEntry] = []
     meta_block, body_block = _metadata_block(doc), _body_block(doc)
     if meta_block is not None:
@@ -905,7 +1187,7 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
     rec = get(url, con=con)
     if not rec or not rec.get("text"):
         return []
-    doc = _parse_doc(rec["text"] or "")
+    doc = _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
     target = heading.strip().casefold()
     blocks: list[str] = []
     pseudo = {"metadata": _metadata_block, "body": _body_block}.get(target)
@@ -1076,11 +1358,42 @@ def _cmd_search(term: str, limit: int) -> int:
 
 
 def _cmd_quote(url: str, needle: str, context: int) -> int:
-    _require_page(url)
+    rec = _require_page(url)
     hits = quote_hits(url, needle, context=context)
     if not hits:
         print(f"no matches for {needle!r} in {url}", file=sys.stderr)
         return 1
+    # The render handoff: a PDF hit's payoff step is Read(<blob>, pages=N), so
+    # print what that call needs. The two lines are gated independently —
+    # independent facts. The blob path prints when the row has a blob worth
+    # looking at (a property of the content type, not the extraction method: a
+    # PDF with a reviewed manual transcription renders as well as one poppler
+    # read; an OCR'd image displays too). The page line is keyed on the
+    # content type alone — an OCR'd JPEG has a renderable blob but telling
+    # someone their JPEG has no PDF pages is noise.
+    content_type = rec["content_type"]
+    header: list[str] = []
+    if content_type == "application/pdf" or rec["text_source"] == "ocr":
+        # Function-level import: content_types pulls lxml and markdownify in,
+        # which every other path through this module never needs.
+        from content_types import extension_for
+
+        ext = extension_for(content_type) if content_type is not None else None
+        if ext is not None:
+            header.append(f"blob: {blob_path(rec['content_sha'], ext)}")
+    if (
+        content_type == "application/pdf"
+        and hits[0]["pdf_document_page_numbers"] is None
+    ):
+        # Row-level like the blob (a document has markers or it doesn't), and
+        # silence would read as "one page" when this row may be a 103-page
+        # manual whose text predates the page markers.
+        header.append("pdf document pages: unavailable")
+    if header:
+        # Once, above the hits: these are facts about the page, not the hit —
+        # unlike the page numbers below, which genuinely vary per hit.
+        print("\n".join(header))
+        print()
     # The locator prints on stdout with its span, not on stderr like section's
     # ambiguity note: a heading belongs to one hit, and the two streams give no
     # ordering guarantee to pair them by. Nothing is lost — quote's output is a
@@ -1091,6 +1404,9 @@ def _cmd_quote(url: str, needle: str, context: int) -> int:
         if hit["heading"]:
             print(f"[{hit['heading']}]")
         print(hit["text"])
+        pages = hit["pdf_document_page_numbers"]
+        if pages is not None:
+            print(f"pdf document pages: {', '.join(str(p) for p in pages)}")
     return 0
 
 
@@ -1271,7 +1587,10 @@ def main(argv: list[str] | None = None) -> int:
     p_search.add_argument("--limit", type=int, default=20)
 
     p_quote = sub.add_parser(
-        "quote", help="sentences containing a needle, each labelled with its section"
+        "quote",
+        help="text containing a needle (case/whitespace/smart-quote-"
+        "insensitive), labelled with its section and, on a PDF, its PDF "
+        "page number(s) and blob path",
     )
     p_quote.add_argument("url")
     p_quote.add_argument("needle")

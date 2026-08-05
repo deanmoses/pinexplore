@@ -93,22 +93,34 @@ Flags: `--no-render` (pure stdlib, never render), `--render` (force a render for
 
 ### PDFs
 
-PDFs are fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the PDF file itself. Title and `last_updated` come from the PDF's own Info dict via pypdf — `/ModDate`, then `/CreationDate` — a real date or null.
+PDFs are fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the PDF file itself. Title and `last_updated` come from the document's own metadata — a real date it states, or null.
 
-The text comes from poppler's **`pdftotext -layout`**, which rebuilds the page as it was printed. That is not a performance choice, it is a correctness one. A PDF has no structure, only glyphs at coordinates, so "the text of this document" is always a reconstruction; reading glyphs in content-stream order (what pypdf does) yields text whose words are all correct and whose _meaning_ is not. On Jersey Jack's Sonic comparison flyer it emitted the heading `SPECIAL EDITION` followed by the **Collector's** Edition bullets, and `COLLECTOR'S EDITION` followed by the **Special** Edition ones — the two editions' feature lists swapped. Every string was verbatim, so a quote gate passes it; only the attribution was wrong, which is the half a catalog correction is made of.
+PDFs with a text layer are extracted to text — searchable and quotable like any page. Page boundaries are stored as lone `\f` lines, so `get` and `section` show them; `quote` drops them, so a span you lift never contains one.
 
-Two things to know before quoting a PDF:
+`quote` hits name the PDF document page(s) on which they sit, and print the blob's path:
 
-- **`-layout` pads with spaces to hold columns apart**, so one line can carry text from two columns at once. That is what makes the flyer readable, but a quote lifted blindly across a gutter can splice unrelated columns into one sentence. Read the line, not just the match.
-- **Marks that are not text stay invisible.** Stern's per-model feature matrices draw their Pro/Premium/LE checkmarks as vector art, not glyphs, so no text extractor recovers them — the features all survive, the column they belong to does not. Treat an extracted feature matrix as a list of features the _game family_ has, and go to the rendered page for which model gets what.
+```console
+$ uv run python scripts/web_scrape/web_cache.py quote <manual-url> "Bottom Pop Bumper"
+Bottom Pop Bumper
+pdf document pages: 27
+blob: /…/pinexplore/ingest_sources/web/raw/9a83…0721.pdf
+```
 
-This needs poppler installed (`brew install poppler`). It is the one system binary the cache requires; a host without it stores the blob, extracts nothing, and prints how to fix it — then `web_backfill.py` fills the text in once poppler is there, so a missing binary never blanks text another host already stored.
+Looking at the text is usually not enough. For example:
 
-A scanned/image-only PDF has no text layer at all and extracts to nothing here, with a loud warning. Its words need OCR, which this path does not do; see `--text-source` under [Import](#import-when-fetching-fails).
+- **Printed page numbers**. To construct a citation you need the page number printed onto the sheet. The text isn't a reliable way to get that page number. The hit's `pdf document pages` is the PDF index of the sheet, not any page number printed on it.
+- **Tables**. The text flattens a table into a column of cells with nothing tying rows to headers. You need to see the actual table.
+- **Visual elements**. You might need to see a checkmark visually embedded in the page.
 
-### Images (OCR)
+For these, look at the page visually. Claude Code can render a single page straight out of the blob: `Read(<blob path>, pages="27")` returns page 27 of a 5MB manual as an image without touching the rest.
 
-Images are evidence whose text is **printed**: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. A JPEG or PNG stores the raw bytes, and its text comes from **OCR** via macOS Vision — no system binary, no model download, no network. A picture with no legible text prints a loud warning rather than silently caching a blank page.
+A hit whose `--context` window spans multiple pages lists every page the shown text touches (`pdf document pages: 26, 27`).
+
+A scanned or image-only PDF has no text layer: the blob caches, no text is extracted, and the fetch warns. We don't OCR PDFs yet.
+
+### Images
+
+Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and its text comes from **OCR** via macOS Vision — no system binary, no model download, no network. A picture with no legible text prints a loud warning rather than silently caching a blank page.
 
 OCR is deliberately deterministic, not smart: it garbles stylized lettering but never invents fluent sentences that would sail through the verbatim quote gate — and it cannot tell you when it _is_ wrong. So OCR'd text is a **draft**: fine to index and search, but review it against the picture before citing (see [Import](#import-when-fetching-fails)). The image's `title` and `last_updated` stay null. OCR is macOS-only; on another platform the bytes still cache with a warning and the text comes in by hand — and a host that can't OCR never blanks text a Mac already stored.
 
@@ -213,7 +225,10 @@ cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # shorthand fo
                                            # block only — and a function, because zsh
                                            # won't word-split a CACHE="…" variable
 cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, snippet
-cache quote <url> "2024"                   # 2. sentences containing a needle
+cache quote <url> "2024"                   # 2. text containing a needle (matching
+                                           #    ignores case, smart quotes, and line
+                                           #    breaks; on a PDF each hit names its
+                                           #    PDF page(s) and the blob path)
 cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
 cache outline <url>                        # 3. heading tree + per-section char counts
 cache outline <url> --min-chars 20         #    …hiding blocks too small to be content
@@ -222,7 +237,7 @@ cache get <url>                            # 5. full page record — the last re
                                            #    (text on stdout, row fields on stderr)
 ```
 
-The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section attached (`{"text": …, "heading": …}`); `quote()` stays the plain-span form the gate consumes.
+The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section and PDF pages attached (`{"text": …, "heading": …, "pdf_document_page_numbers": …}`); `quote()` stays the plain-span form the gate consumes. Matching collapses whitespace runs, straightens smart quotes, and ignores case — so a phrase spanning a stored line break is still found — while the returned text is always the stored lines verbatim, which is why every hit still verifies.
 
 `search` spans **every cached type** — one index over web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its text was derived (`text_source:`), so you know to weigh (and for `ocr`, review) before quoting; web pages are the unlabeled common case:
 
@@ -249,7 +264,7 @@ $ uv run python scripts/web_scrape/web_cache.py quote \
 - Space Shuttle (nearly identical to Space Shuttle (Williams Electronics, 1984) made under the label 'Mecatronics')
 ```
 
-The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name — and on a page whose markup has no headings at all, nothing is labelled.
+The label is a name `section()` accepts, so it doubles as the way to pull the span's surroundings. `metadata` means the hit is in the frontmatter — an `og:description` rather than the page's own prose, which is usually a signal to keep reading for the body's wording. A hit above the first heading has no label, because there is no section to name — and on a page whose markup has no headings at all, nothing is labelled. A match that itself crosses a section boundary is likewise unlabeled: no single name is true of it.
 
 The label names the **match**, never the widened window around it, so **a hit never leaves the section it names** and any span you lift out of one can carry that hit's locator — `--context` changes how much you see, never where the evidence is said to live. The cost is that a large `--context` gives you less than ±N lines near a section edge; `section()` shows the whole block when that's what you want. The label is also only as good as the page's own markup: a site whose tab labels are real `<h2>`s yields locators like `$7,995` — faithful to the document, and no more wrong than the outline it comes from.
 
@@ -292,6 +307,8 @@ cite:
 
 `cite:` also takes a list, and the policy for AI-authored patches is to corroborate a fact from as many separate sources as possible.
 
+**When the fact is only in pixels — a quote-less cite.** A checkmark in a PDF feature matrix is vector art; there is no text to quote. The honest cite is the analogue of a locator-only book cite: `ref` the page URL, `locator` the PDF document page (`printed page 17, PDF document page 27`), `note` the visual observation — `quote:` is optional in the cite grammar. **Do not quote the feature's row label instead**: it is verbatim and it is on the page, but it establishes the row, never the edition column — a true string doing work its context doesn't support, which is the column-splice forgery in a new costume. flippatch's `RULE_QUOTE_SUPPORTS_CLAIM` would rightly reject it; the point is not to author it. (The authoring-side rules live in flipcommons' [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md); this paragraph is the reading-side statement of the same policy.)
+
 Every quote is machine-checked. flippatch's `make verify-quotes` gate is **fast, deterministic and offline** — it requires the cite's `quote` to be a verbatim substring of `pages.text` once smart quotes are straightened and whitespace runs collapsed, and it never does a live fetch. A quote needs to verify for one brief window: from the moment a session authors the patch to the moment it's committed. After that the quote is shipped and immutable — the gate globs pending `patches/[0-9]*.yaml` only, so a change to how this cache extracts text can never break a shipped patch.
 
 **If a quote doesn't verify, the presumption is that the quote is wrong** — changing cached text to match a claim is a deliberate human act, never a side effect of making a check pass.
@@ -321,7 +338,7 @@ scripts/web_scrape/
   web_video.py               transport: YouTube caption tracks via yt-dlp
   content_types/             one handler per document type (the registry)
   web_ocr.py                 OCR backend for images (macOS Vision)
-  web_pdftext.py             PDF text backend (poppler pdftotext -layout)
+  web_pdftext.py             PDF text backend (poppler pdftotext, reading order)
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
   web_import.py              CLI: file a hand-obtained file as evidence

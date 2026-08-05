@@ -131,7 +131,8 @@ def test_backfill_rewrites_pdf_rows(cache, make_pdf):
     tally = web_backfill.backfill(con=cache)
     assert tally["rewritten"] == 1
     row = _row(cache, url)
-    assert row["text"] == "9 Stand-Up Targets"
+    # The trailing "\f" line is the one-page document's page marker.
+    assert row["text"] == "9 Stand-Up Targets\n\f"
     assert row["text_source"] == "pdf"
 
 
@@ -202,7 +203,7 @@ def test_backfill_keeps_a_curated_title_on_an_imported_pdf_row(cache, make_pdf):
     web_backfill.backfill(con=cache)
     row = _row(cache, url)
     assert row["title"] == "Transformers MTMTE Feature Matrix (Stern, 2026)"
-    assert row["text"] == "Feature matrix"
+    assert row["text"] == "Feature matrix\n\f"
 
 
 def test_backfill_rewrites_the_title_on_a_fetched_row(cache):

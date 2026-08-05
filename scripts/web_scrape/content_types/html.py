@@ -442,6 +442,11 @@ def _postprocess(markdown: str) -> str:
     removes 0.9% of lines and mostly real content (non-adjacent nav copies never
     fire), an arbitrary exception to keeping the document verbatim.
     """
+    # A line that is exactly "\f" means one thing corpus-wide: a PDF page
+    # boundary written by web_pdftext. Replace — never delete, or "a\fb" fuses
+    # into a word nobody wrote — the only way one could arrive here (a <pre>
+    # block; the per-line rstrip below already eats any at line ends).
+    markdown = markdown.replace("\f", " ")
     markdown = "\n".join(line.rstrip() for line in markdown.split("\n"))
     return re.sub(r"\n{3,}", "\n\n", markdown).strip()
 

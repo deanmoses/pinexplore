@@ -149,6 +149,8 @@ def _read_transcription(path: Path) -> str:
     raises ``UnicodeDecodeError`` (a ``ValueError``). Left unhandled, either
     prints a traceback instead of the CLI's message — and naming this path
     matters, since the image is a *different* file that can fail the same way.
+    Form-feed sanitization happens in ``import_one``, the storage boundary
+    every caller passes through, not here.
     """
     try:
         return path.read_text(encoding="utf-8")
@@ -239,7 +241,15 @@ def import_one(
             "(omit it to store what extraction found, or fill it in)"
         )
     if text is not None:
-        page_text: str | None = text
+        # Supplied text gets its form feeds turned into line breaks — replaced,
+        # never deleted, so no words fuse. A line that is exactly "\f" means
+        # one thing corpus-wide (a PDF page boundary written by web_pdftext,
+        # the page axis quote_hits reads), and a person's paste or an outside
+        # OCR run must not mint phantom pages on a manual/ocr row. Done here
+        # at the storage boundary so every caller is covered, not just the
+        # CLI's --text-file reader. Handler-extracted text is untouched: an
+        # imported PDF's form feeds are the real page markers.
+        page_text: str | None = text.replace("\f", "\n")
         stored_source = text_source or "manual"
     else:
         page_text = meta.text

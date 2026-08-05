@@ -160,6 +160,17 @@ def test_supplied_text_is_recorded_as_manual(cache, jpeg):
     assert _page(cache, FLYER_URL)["text_source"] == "manual"
 
 
+def test_supplied_text_form_feeds_become_line_breaks(cache, jpeg):
+    # A line that is exactly "\f" means one thing corpus-wide: a PDF page
+    # boundary written by web_pdftext, the page axis quote_hits() reads. A
+    # paste or an outside OCR run must not mint phantom pages on a manual/ocr
+    # row — and the guard sits in import_one, the storage boundary, so it
+    # covers programmatic callers as well as the CLI's --text-file reader.
+    # Replaced, never deleted: "page one\fpage two" must not fuse words.
+    _run(cache, jpeg, text="page one\fpage two\n\f\npage three")
+    assert _page(cache, FLYER_URL)["text"] == "page one\npage two\n\n\npage three"
+
+
 def test_ocr_text_is_recorded_as_ocr(cache, jpeg, monkeypatch):
     monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: "MACHINE READ THIS")
     _run(cache, jpeg)
