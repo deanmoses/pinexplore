@@ -2,19 +2,19 @@
 
 The web scrape cache is a searchable, durable cache of web pages / text-extracted PDFs / OCR'ed images / video transcripts used as **evidence** for Flipcommons catalog data.
 
-Flipcommons catalog data are written as curated [data patches](#cite). This web scrape cache is used to source that data from web. This cache:
+Flipcommons catalog data are written as curated [data patches](#cite). This web scrape cache is used to source that data from the web. This cache:
 
-- fetches a resource once and reuses it forever, avoiding rate-limiting and slow foreign sites
+- fetches a document once and stores it forever, avoiding rate-limiting and slow foreign sites
 - extracts text from web sites, PDFs, video transcripts
-- supports [automated quote verification](#cite)
 - provides a **searchable corpus** of pinball evidence that grows over years
-- captures **provenance** — when we fetched, the search intent that led there, and the page's own publish/modified date
+- captures **provenance** — when we fetched and the page's own publish/modified date
+- supports [automated quote verification](#cite)
 
 ## Basic usage
 
-Cache a source once, then pull a verbatim quote from it whenever a claim needs evidence:
+Cache a document once, then mine it for evidence.
 
-Cache a page:
+### Cache a document
 
 ```console
 $ uv run python scripts/web_scrape/web_fetch.py \
@@ -23,22 +23,26 @@ fetched [200] (new): https://www.pinballnews.com/site/2024/07/18/haggis-pinball-
     HAGGIS PINBALL IN LIQUIDATION ⬅️ page title
 ```
 
-Search cached pages:
+### Search cached documents
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py search "haggis closed"
 url: https://www.pinballnews.com/site/2024/07/18/haggis-pinball-in-liquidation
 title: HAGGIS PINBALL IN LIQUIDATION
 last_updated: 2024-07-18 ⬅️ the page's own stated date.  Not the fetch date.
+matches: 25 in 2 sections ⬅️ how hard it matched, and how spread out
 snippet: … from Damian or [Haggis] Pinball. Today the company [closed] their social media … ⬅️ `[bracketed]` is a matched search term
 
 url: https://www.pinballnews.com/site/2020/01/18/2019-review-of-the-year
 title: 2019 REVIEW OF THE YEAR
 last_updated: 2020-01-18
+matches: 15 in 1 section
 snippet: … [HAGGIS] PINBALL … may have its roots in Australia …
 ```
 
-Pull the quotable span, labelled with the section it sits in (`--context 1` widens each hit to a line either side):
+### Pull the quotable span
+
+Spans are labelled with the section it sits in (`--context 1` widens each hit to a line either side):
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py quote \
@@ -57,13 +61,16 @@ cite:
   locator: in the Welcome to Pinball News – First & Free section
 ```
 
-In Flippatch, `make verify-quotes` then confirms the quote against the cached text before the patch ships. Everything below is detail on the three steps:
+In Flippatch, `make verify-quotes` then confirms the quote against the cached text before the patch ships.
 
-1. [Fetch](#fetch) (and [import](#import-when-fetching-fails) what won't fetch)
-2. [Query](#query)
-3. [Cite](#cite)
+## The commands
 
-## Fetch
+- [Fetch](#fetch-fetch-a-document) (and [import](#import-when-fetching-fails) what won't fetch)
+- [Query](#query)
+- [Cite](#cite)
+- [Have](#have-determine-what-documents-the-cache-already-holds)
+
+### `fetch`: fetch a document
 
 ```bash
 uv run python scripts/web_scrape/web_fetch.py <url>
@@ -81,7 +88,7 @@ Scrape behavior:
 - **Normalized** — URLs are canonicalized (host lowercased, tracking params and fragment stripped, trailing slash dropped) so the same page dedups to one row; UTF-8 preserved, including non-ASCII in foreign-language quotes.
 - **Extracted whole** — the entire document as block-level markdown (see [What the stored text looks like](#what-the-stored-text-looks-like)), plus a `last_updated` date extracted conservatively — a real date the page states, else null. We deliberately don't pad a weak year-only signal up to a fabricated `Jan 1`: for evidence, no date beats a wrong one.
 
-### JavaScript-rendered pages
+#### JavaScript-rendered pages
 
 A client-rendered (JavaScript-only) site returns a skeleton document to the plain GET. When the extracted **body** comes back thin (under `--thin-chars`, default 200 — the frontmatter doesn't count, since JS-only pages ship rich `og:` tags), the fetcher escalates to a **headless-Chromium render** (Playwright), executes the page's JavaScript, and stores _that_ DOM as the blob, marked `rendered`.
 
@@ -91,7 +98,7 @@ uv run playwright install chromium    # one-time: download the browser binary (~
 
 Flags: `--no-render` (pure stdlib, never render), `--render` (force a render for sites known to be JS-only — pair with `--force` if the page is already cached and fresh), `--thin-chars N`. Rendered blobs are the rendered DOM, not what the server sent — the `rendered` flag keeps a citation's provenance clear — and their `content_sha` is non-deterministic, so a `--force` on a JS page typically writes a new blob each time.
 
-### PDFs
+#### PDFs
 
 PDFs are fetched like any other URL: detected by content type or `%PDF-` magic bytes when a server mislabels them, stored as the raw bytes the server sent. The blob is the PDF file itself. Title and `last_updated` come from the document's own metadata — a real date it states, or null.
 
@@ -124,19 +131,19 @@ Captions and table titles are usually real text even when their contents aren't,
 
 A scanned or image-only PDF has no text layer at all: the blob caches, no text is extracted, and the fetch warns. We don't OCR PDFs yet. A row holding no text quotes as `no stored text, so no needle can match it` rather than a bare `no matches` — but it stops there, because the row cannot say whether the document is image-only or whether extraction was merely unavailable on the host that fetched it (a missing poppler, a document poppler couldn't read). Only the fetch's own warning drew that line. Read the blob to find out which.
 
-### Images
+#### Images
 
 Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and its text comes from **OCR** via macOS Vision — no system binary, no model download, no network. A picture with no legible text prints a loud warning rather than silently caching a blank page.
 
 OCR is deliberately deterministic, not smart: it garbles stylized lettering but never invents fluent sentences that would sail through the verbatim quote gate — and it cannot tell you when it _is_ wrong. So OCR'd text is a **draft**: fine to index and search, but review it against the picture before citing (see [Import](#import-when-fetching-fails)). The image's `title` and `last_updated` stay null. OCR is macOS-only; on another platform the bytes still cache with a warning and the text comes in by hand — and a host that can't OCR never blanks text a Mac already stored.
 
-### Video transcripts (YouTube)
+#### Video transcripts (YouTube)
 
 A YouTube URL routes automatically to the caption-track transport: yt-dlp pulls the video's metadata and best caption track, the raw `.vtt` becomes the blob and the parsed transcript the page text — searchable and quotable like any page. Every URL shape (`watch?v=`, `youtu.be/`, `/shorts/`, `/live/`, `/embed/`) collapses to the one canonical `watch?v=<id>` cache key; `title` is the video title, `last_updated` its upload date. Manual subtitles beat auto-captions, and among auto-captions the original spoken language beats YouTube's machine translations; the `fetches` log records which track was taken. Timestamps stay in the `.vtt` blob for a citation's `locator:` moment.
 
 A video with **no captions at all** (common for livestream archives) logs a loud warning and no page — there is no transcript to quote. Check the video's description for the written source it usually links, and cite that instead.
 
-### Import: when fetching fails
+#### Import: when fetching fails
 
 Some sources won't be fetched — `ipdb.org` answers HTTP 403 site-wide to the fetcher, others sit behind a login or a Cloudflare challenge — while a person with a browser gets the same page fine. `web_import.py` takes the file that person saved and files it as evidence like anything else: content-addressed blob, extracted text, FTS-indexed, quotable and citable. This is the minority path, not a routine alternative to fetching; any type the cache understands can come in this way. See `--help` for `--title`, `--date`, and `--force`.
 
@@ -161,9 +168,9 @@ The intended flow for an image, and the reason `--dry-run` exists:
 
 Keep the document's line structure in a transcription; the quote gate's whitespace collapsing handles the rest.
 
-## Query
+### Query
 
-### What the stored text looks like
+#### What the stored text looks like
 
 `pages.text` for an HTML page is the **whole document** — footers, nav, comments, forum replies, a manufacturer index kept in a `<select>` dropdown, etc.
 
@@ -195,7 +202,7 @@ The `title` column is `og:title` → `<title>` → first `<h1>`, stored verbatim
 
 After an extraction change, run `web_backfill.py` to re-derive `text`/`title` for every cached HTML page and PDF from its stored blob, so the corpus reflects one extractor instead of splitting into before and after. It skips any row whose `text_source` isn't the one that handler produces — `manual` transcriptions and `ocr` text (including the OCR'd scanned PDFs, whose empty text layer is exactly why they were OCR'd) — and never blanks a non-empty row. Images and video transcripts are never swept: their text comes from a recognizer that moves under us, not a parser, so a bulk re-run would churn reviewed evidence with no extractor change to justify it.
 
-### Determining what the cache already holds
+### `have`: determine what documents the cache already holds
 
 The `have` command answers "which of these N sources am I already holding, and which still need fetching?":
 
@@ -230,28 +237,58 @@ The reads (`scripts/web_scrape/web_cache.py`) are an **escalation ladder** — e
 cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # shorthand for this
                                            # block only — and a function, because zsh
                                            # won't word-split a CACHE="…" variable
-cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, snippet
+cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, match
+                                           #    count, sections matched, snippet
 cache search '"upper magnet" knocker'      #    …a double-quoted run is one phrase
                                            #    (single-quote the whole term so the
                                            #    shell keeps the double quotes)
-cache quote <url> "2024"                   # 2. text containing a needle (matching
+cache search "coil" --url <url>            # 2. that document's matching sections,
+                                           #    document order, each with its count
+cache search "coil" --url <url> \          # 3. one section's matches, each with
+      --section "page 41"                  #    surrounding words of context
+cache search "coil" --url <url> \          #    …--surrounding-words sizes it;
+      --pages 40-50                        #    --pages is a sheet range
+cache quote <url> "2024"                   # 4. text containing a needle (matching
                                            #    ignores case, smart quotes, and line
                                            #    breaks; on a PDF each hit names its
                                            #    PDF page(s) and the blob path)
 cache quote <url> "2024" --context 3       #    …each hit widened to ±3 lines
-cache outline <url>                        # 3. heading tree + per-section char counts
+cache outline <url>                        # 5. heading tree + per-section char counts
 cache outline <url> --min-chars 20         #    …hiding blocks too small to be content
 cache outline <pdf-url>                    #    …one row per PDF sheet, and the
                                            #    blob path on stderr
-cache section <url> "Specifications"       # 4. one section's block, not the page
+cache section <url> "Specifications"       # 6. one section's block, not the page
 cache section <pdf-url> "page 41"          #    …on a PDF, one sheet's text, and
                                            #    the blob path on stderr
-cache get <url>                            # 5. full page record — the last resort
+cache get <url>                            # 7. full page record — the last resort
                                            #    (text on stdout, row fields and the
                                            #     blob path on stderr)
 ```
 
-The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section and PDF pages attached (`{"text": …, "heading": …, "pdf_document_page_numbers": …}`); `quote()` stays the plain-span form the gate consumes. Matching collapses whitespace runs, straightens smart quotes, and ignores case — so a phrase spanning a stored line break is still found — while the returned text is always the stored lines verbatim, which is why every hit still verifies.
+The same reads are Python functions in `web_cache.py` (`search()`, `search_sections()`, `search_matches()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section and PDF pages attached (`{"text": …, "heading": …, "pdf_document_page_numbers": …}`); `quote()` stays the plain-span form the gate consumes. Matching collapses whitespace runs, straightens smart quotes, and ignores case — so a phrase spanning a stored line break is still found — while the returned text is always the stored lines verbatim, which is why every hit still verifies.
+
+**Search scopes.** `search` narrows in three steps, and each step returns the units at that level with a match count. A term alone ranks documents; `--url` lists that document's matching sections; `--section` (or `--pages`, an inclusive sheet range) shows the matches themselves with `--surrounding-words` of context around each. The counts are the point — a term appearing 95 times across 35 sheets and a term appearing once no longer look alike, and they tell you how much to trust the snippet beside them:
+
+```console
+$ cache search "coil" --url <sonic-manual-url>
+page 8                    1 match
+page 9                    2 matches
+page 10                   4 matches
+…
+
+$ cache search "coil" --url <sonic-manual-url> --pages 24-26 --surrounding-words 8
+[page 25]
+The Switch History screen displays the 24 most recent inactive-to-active switch transitions.
+Coils - test virtually any coil, magnet, motor or light in the game. A screen will be displayed, listing
+```
+
+The section names are the ones `outline` prints and `section` resolves, so an address you read here is an address the other reads take: sheets on a paginated PDF, headings elsewhere, `metadata` in an assembled page's frontmatter. Unheaded text — above the first heading, or a document with no headings at all — lists as `(no heading)`, which `--section` accepts but `section` does not, since there is no heading for it to resolve. A window labelled `section boundary` is a match that runs past its section's end: returned whole rather than truncated, and deliberately unaddressable, because no single section name is true of it. Sections are listed in **document order, never ranked** — sheet numbers stay monotonic and every matching section is shown. Where there is only one section to choose, `--url` skips the list and returns the matches.
+
+A **match count is matched phrases plus matched loose words**: `'"camel toes" bananas'` reads two phrase hits and five `bananas` as seven. Overlapping phrases merge into one, so `'"a b" "b c"'` over `a b c` counts one.
+
+Match windows are **stored lines verbatim and unmarked**, so any part of one can be lifted into a cite's `quote` — unlike the global snippet, which elides with `…` and brackets its matches. `--surrounding-words` sizes a window in words rather than lines (a PDF sheet's lines are short and irregular, so ±3 lines means something different on every document) but whole lines still come out, keeping table rows intact. N is a cap on lines either side too, which only ever bites on blank runs: a blank line holds no words, so without it two matches a page apart would merge into one window of mostly whitespace. A window's padding never leaves the section it is filed under, so a window that sits inside one carries its locator. The exception is a match that itself runs past the section's end: that comes back whole and labelled `section boundary` rather than truncated, since a span missing the words it was found for would be worse than one without a locator. Overlapping windows merge and say how many matches they absorbed. `--limit` caps how many are shown and reports what it withheld.
+
+Two documents can both match with no text match at all, since the index covers url and title as well: `url/title match, no text layer` is a document whose bytes are cached but unreadable — a scanned PDF, until [OCR](#images) reaches it — while `url/title match, 0 text matches` is an ordinary document that simply doesn't say the word.
 
 **Search syntax.** Units of a term AND together, and a **double-quoted run is one phrase**: `'"upper magnet" knocker'` asks for the phrase and the loose word, where `upper magnet` asks only that both words appear somewhere on the page. On this corpus that is 1 hit against 28 — worth reaching for whenever you know one exact caption and are guessing at the rest. The shell has to be told to keep the double quotes, hence the surrounding single ones. Every unit is sent as a quoted phrase, so FTS5 operator syntax in a term (`AND`, `OR`, `NEAR(…)`, `*`) is searched for literally rather than obeyed, and no term can raise a query error; an unbalanced quote runs to the end of the term, and the CLI shows the expression it ran.
 

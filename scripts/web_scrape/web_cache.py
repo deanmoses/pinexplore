@@ -24,9 +24,18 @@ live on disk rather than in SQLite to keep the DB lean and the FTS index fast.
 
 Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
-    search(term)          FTS5 BM25-ranked pages (url, title, snippet). Units
-                          AND together and a double-quoted run is one phrase,
-                          so '"upper magnet" knocker' is phrase-and-word
+    search(term)          FTS5 BM25-ranked pages, each with its match count and
+                          how many sections it matched in. Units AND together
+                          and a double-quoted run is one phrase, so
+                          '"upper magnet" knocker' is phrase-and-word
+    search_sections(url, term)
+                          that document's matching sections, document order,
+                          each with its count — where in a long document the
+                          term actually lives
+    search_matches(url, term, section=…)
+                          each match in a section, with surrounding words of
+                          context. A sheet range (pages=(40, 50)) is the same
+                          read reached by a different address
     quote(url, needle)    sentence(s) in a page's text containing a needle —
                           matching ignores case, smart quotes, and whitespace
                           runs (so a phrase spanning a line break still hits);
@@ -45,7 +54,8 @@ about a page:
 
 These are also a CLI (``python web_cache.py search|quote|outline|section|
 have|get``), so pulling a quote from a shell is one command just like caching
-a page is.
+a page is. The three search scopes are one command there too, narrowed by
+``--url`` and ``--section``/``--pages``.
 """
 
 from __future__ import annotations
@@ -59,7 +69,12 @@ import urllib.parse
 from bisect import bisect_right
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
+
+if TYPE_CHECKING:
+    # Type-only: the CLI imports argparse inside main(), so a library consumer
+    # of the query helpers never pays for it.
+    import argparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WEB_DIR = REPO_ROOT / "ingest_sources" / "web"
@@ -93,14 +108,23 @@ class PageRow(TypedDict):
 
 
 class SearchHit(TypedDict):
-    """One FTS5 search result row from ``search()``."""
+    """One FTS5 search result row from ``search()`` — the global scope."""
 
     url: NormalizedUrl
     title: str | None
     last_updated: str | None
     content_type: str | None  # what kind of document the hit is
     text_source: str | None  # how the hit's text was derived (html|pdf|vtt|ocr|manual)
-    snippet: str
+    tier: str  # which text layer the counts describe; see _TEXT_TIER
+    snippet: str | None  # None on a row with no text to snippet
+    # Matched phrases plus matched loose words, and how many sections they fall
+    # in. None when the count could not be taken (see MarkerCollisionError).
+    matches: int | None
+    sections: int | None
+    # False when the row holds no text at all. Told apart from a document whose
+    # text simply doesn't contain the term, which also counts 0 — see
+    # ``_match_label`` for why the two must not print alike.
+    has_text: bool
 
 
 # Query params that are tracking noise, never content-bearing. Stripped on
@@ -589,39 +613,6 @@ def _fts_query(term: str) -> str:
     return _fts_expr(units)
 
 
-def search(
-    term: str, limit: int = 20, con: sqlite3.Connection | None = None
-) -> list[SearchHit]:
-    """FTS5 BM25-ranked pages matching ``term``.
-
-    Units AND together; a double-quoted run is one phrase
-    (``'"upper magnet" knocker'``). Returns ``SearchHit`` dicts, best match
-    first — or none at all when ``term`` holds nothing searchable.
-    """
-    query = _fts_query(term)
-    if not query:
-        return []
-    own = con is None
-    con = con or connect(read_only=True)
-    try:
-        rows = con.execute(
-            """
-            SELECT p.url, p.title, p.last_updated, p.content_type, p.text_source,
-                   snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet
-            FROM pages_fts
-            JOIN pages p ON p.rowid = pages_fts.rowid
-            WHERE pages_fts MATCH ?
-            ORDER BY bm25(pages_fts)
-            LIMIT ?
-            """,
-            (query, limit),
-        ).fetchall()
-        return [cast("SearchHit", dict(r)) for r in rows]
-    finally:
-        if own:
-            con.close()
-
-
 # A pragmatic sentence splitter: break after ., !, or ? followed by whitespace,
 # or on a line/page break (paragraph, heading, or PDF page boundary — a form
 # feed breaks like a newline whatever precedes it). Good enough to isolate a
@@ -883,6 +874,10 @@ def _body_block(doc: _Doc) -> str | None:
 # `page 41a` name nothing rather than quietly resolving to sheet 41.
 _PAGE_NAME = re.compile(r"^page ([1-9][0-9]*)$")
 
+# A `--pages` sheet range, both ends inclusive. Same digit rule as _PAGE_NAME, so
+# a range is written the way the sheets it spans are named.
+_PAGE_RANGE = re.compile(r"^([1-9][0-9]*)-([1-9][0-9]*)$")
+
 
 def _page_block(doc: _Doc, n: int) -> str | None:
     """PDF document page ``n``'s text (1-based), or None when there is no such
@@ -1036,13 +1031,15 @@ def _render_hit(doc: _Doc, hit: _Hit) -> QuoteHit:
         shown = [hit.match_line]
     else:
         shown = [i for i in range(hit.start, hit.end) if doc.lines[i] != "\f"]
-        # The .strip() below erases blank edge lines from the text; drop them
-        # from the page bookkeeping too so the label describes what is shown.
+        # Blank edge lines are dropped from the text, so drop them from the
+        # page bookkeeping too — the label has to describe what is shown.
+        # Only whole blank lines go: a content line's own indentation is
+        # stored text, and this read's promise is to return that verbatim.
         while shown and not doc.lines[shown[0]].strip():
             shown.pop(0)
         while shown and not doc.lines[shown[-1]].strip():
             shown.pop()
-        text = "\n".join(doc.lines[i] for i in shown).strip()
+        text = "\n".join(doc.lines[i] for i in shown)
     heading = (
         _enclosing_section(doc, hit.match_line).name
         if len(hit.section_ids) == 1
@@ -1351,6 +1348,409 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
     return blocks
 
 
+# --------------------------------------------------------------------------- #
+# Search scopes: global, document, section
+# --------------------------------------------------------------------------- #
+
+# Marks each match for counting and slicing, so these must be characters no
+# cached text contains. Measured: `[`/`]` are in a third of documents, and
+# \x03 is the Elvis manual's space character. Escapes, never literals — a
+# private-use literal is invisible in an editor and survives no copy-paste,
+# and an empty marker would match everywhere, hence the guard.
+_MARK_OPEN = "\ue000"
+_MARK_CLOSE = "\ue001"
+if len(_MARK_OPEN) != 1 or len(_MARK_CLOSE) != 1:  # pragma: no cover - import guard
+    raise AssertionError("highlight markers must be exactly one character each")
+
+# Which text layer the counts describe. PDF OCR will add "ocr" as a second
+# value, so results carry the field now rather than growing one later.
+_TEXT_TIER = "text"
+
+# Shared by the CLI and the library so a scripted read and a typed one agree.
+_DEFAULT_SURROUNDING_WORDS = 30
+
+# Names text above the first heading, and a document with no headings at all.
+# An address `--section` takes back. Not `body`: that addresses the whole body
+# including every headed section, answering a three-match question with 60K.
+NO_HEADING = "(no heading)"
+
+
+class MarkerCollisionError(RuntimeError):
+    """A document's own text contains a highlight marker, so it cannot be
+    counted or sliced. The markers were chosen against a corpus that keeps
+    growing, so this is possible; the global scope catches it per hit rather
+    than losing the whole result set."""
+
+
+class SectionHit(TypedDict):
+    """One row of the document scope."""
+
+    section: str | None  # None is the unheaded region; printed as NO_HEADING
+    matches: int
+    tier: str
+
+
+class MatchHit(TypedDict):
+    """One window from the section scope; ``text`` is stored lines verbatim."""
+
+    text: str
+    # The window's address, or None when no single one is true of it. Which of
+    # the two reasons applies is `straddles` — a paginated document has no
+    # unheaded region, so calling a cross-sheet match "(no heading)" would be a
+    # false locator rather than a vague one.
+    section: str | None
+    straddles: bool  # the match itself runs past its section's end
+    matches: int  # matches inside this window; >1 where neighbours merged
+    tier: str
+
+
+class _Region(NamedTuple):
+    """The unit all three scopes count and address."""
+
+    name: str | None
+    start: int
+    end: int  # one past its last line
+
+
+def _row_minus(row: sqlite3.Row, *computed: str) -> PageRow:
+    """A result row as a ``PageRow``, less the columns the query computed.
+
+    ``SELECT p.*`` so a column added to ``pages`` needs no change here."""
+    fields = dict(row)
+    for name in computed:
+        del fields[name]
+    return cast("PageRow", fields)
+
+
+class _MatchSpan(NamedTuple):
+    """One match's line extent: where its highlight opens, and where it closes.
+
+    Two line indexes rather than one because a match need not sit on a single
+    line: ``unicode61`` reads a newline as a separator, so ``upper\\nmagnet``
+    holds the adjacent tokens the phrase ``"upper magnet"`` asks for. A PDF's
+    text layer wraps constantly, which makes that the ordinary case. Anything
+    reading only ``first`` returns half a match.
+
+    The two differing also means a match can straddle a section boundary — the
+    same thing ``_Span`` records for ``quote``, and it gets ``quote``'s answer:
+    no single section name is true of such a hit.
+    """
+
+    first: int
+    last: int
+
+
+def _match_spans(rec: PageRow, highlighted: str) -> list[_MatchSpan]:
+    """Every match's line extent in a row's highlighted text column.
+
+    ``highlight()`` inserts markers instead of eliding like ``snippet()``, so
+    line i here is line i of the stored text — which is what lets a match be
+    placed by line index alone. The roundtrip check proves that per document."""
+    stripped = highlighted.replace(_MARK_OPEN, "").replace(_MARK_CLOSE, "")
+    if stripped != (rec["text"] or ""):
+        raise MarkerCollisionError(rec["url"])
+    opens: list[int] = []
+    closes: list[int] = []
+    for i, line in enumerate(highlighted.split("\n")):
+        opens += [i] * line.count(_MARK_OPEN)
+        closes += [i] * line.count(_MARK_CLOSE)
+    # FTS5 marks non-overlapping regions in document order, so the k-th opening
+    # marker is closed by the k-th closing one. ``strict`` turns any violation
+    # of that into an error rather than a quietly mispaired span.
+    return [_MatchSpan(o, c) for o, c in zip(opens, closes, strict=True)]
+
+
+def _region_of(doc: _Doc, line_idx: int) -> _Region:
+    """The region a line sits in, named the way ``outline()`` names it.
+
+    Deliberately the same division, so every name this returns is one
+    ``section()`` accepts. The cost is that an unpaginated PDF is carved up by
+    whatever ATX lines the extractor misparsed out of its parts list; better
+    names here would be addresses the next rung cannot resolve."""
+    if doc.page_starts:
+        n = bisect_right(doc.page_starts, line_idx)
+        end = doc.page_starts[n] if n < len(doc.page_starts) else len(doc.lines)
+        return _Region(f"page {n}", doc.page_starts[n - 1], end)
+    sec = _enclosing_section(doc, line_idx)
+    return _Region(sec.name, sec.start, sec.end)
+
+
+def _matched_regions(
+    doc: _Doc, spans: list[_MatchSpan]
+) -> list[tuple[_Region, list[_MatchSpan]]]:
+    """Every region holding at least one match, in document order, with them.
+
+    A match belongs to the region it **starts** in, so one straddling a boundary
+    is counted once and the section counts still sum to the document total.
+    Regions are monotonic in the line index, so this needs no grouping table."""
+    found: list[tuple[_Region, list[_MatchSpan]]] = []
+    for span in spans:
+        region = _region_of(doc, span.first)
+        if found and found[-1][0] == region:
+            found[-1][1].append(span)
+        else:
+            found.append((region, [span]))
+    return found
+
+
+def _scoped(
+    url: str, term: str, con: sqlite3.Connection | None = None
+) -> tuple[PageRow, list[_MatchSpan]] | None:
+    """One document's row and its match spans, or None if it doesn't match.
+
+    One query, so the narrower scopes filter the same index the global scope
+    ranks and all three count a term identically. ``highlight()`` over a NULL
+    text column is NULL, which is no spans rather than an error."""
+    query = _fts_query(term)
+    if not query:
+        return None
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        row = con.execute(
+            """
+            SELECT p.*, highlight(pages_fts, 2, ?, ?) AS hl
+            FROM pages_fts
+            JOIN pages p ON p.rowid = pages_fts.rowid
+            WHERE pages_fts MATCH ? AND p.url = ?
+            """,
+            (_MARK_OPEN, _MARK_CLOSE, query, normalize_url(url)),
+        ).fetchone()
+    finally:
+        if own:
+            con.close()
+    if row is None:
+        return None
+    rec = _row_minus(row, "hl")
+    highlighted = row["hl"]
+    if highlighted is None:
+        return rec, []
+    return rec, _match_spans(rec, highlighted)
+
+
+def search(
+    term: str, limit: int = 20, con: sqlite3.Connection | None = None
+) -> list[SearchHit]:
+    """FTS5 BM25-ranked pages matching ``term`` — the global scope.
+
+    Units AND together; a double-quoted run is one phrase
+    (``'"upper magnet" knocker'``). Returns ``SearchHit`` dicts, best match
+    first — or none at all when ``term`` holds nothing searchable. ``limit <= 0``
+    returns every hit.
+
+    The match count is the triage signal a snippet cannot carry: it says
+    whether the snippet shown is representative or one of hundreds. Counting
+    costs a whole-column read and a parse per hit, so it scales with ``limit``,
+    never with the corpus."""
+    query = _fts_query(term)
+    if not query:
+        return []
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        rows = con.execute(
+            """
+            SELECT p.*,
+                   snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet,
+                   highlight(pages_fts, 2, ?, ?) AS hl
+            FROM pages_fts
+            JOIN pages p ON p.rowid = pages_fts.rowid
+            WHERE pages_fts MATCH ?
+            ORDER BY bm25(pages_fts)
+            LIMIT ?
+            """,
+            # SQLite reads a negative LIMIT as no limit, which is the shape
+            # `--limit 0` asks for at every scope.
+            (_MARK_OPEN, _MARK_CLOSE, query, limit if limit > 0 else -1),
+        ).fetchall()
+    finally:
+        if own:
+            con.close()
+    hits: list[SearchHit] = []
+    for row in rows:
+        rec = _row_minus(row, "snippet", "hl")
+        matches: int | None = 0
+        sections: int | None = 0
+        if row["hl"] is not None:
+            try:
+                spans = _match_spans(rec, row["hl"])
+            except MarkerCollisionError:
+                # This one document cannot be counted; the other hits still can.
+                matches = sections = None
+            else:
+                regions = _matched_regions(_doc_of(rec), spans)
+                # Distinct names: two blocks sharing a heading are one address.
+                matches = len(spans)
+                sections = len({region.name for region, _ in regions})
+        hits.append(
+            SearchHit(
+                url=rec["url"],
+                title=rec["title"],
+                last_updated=rec["last_updated"],
+                content_type=rec["content_type"],
+                text_source=rec["text_source"],
+                tier=_TEXT_TIER,
+                snippet=row["snippet"],
+                matches=matches,
+                sections=sections,
+                has_text=bool((rec["text"] or "").strip()),
+            )
+        )
+    return hits
+
+
+def search_sections(
+    url: str, term: str, con: sqlite3.Connection | None = None
+) -> list[SectionHit]:
+    """The sections of one document that match ``term``, in document order.
+
+    Unranked, because ranking would need BM25 at section grain and HTML leaf
+    blocks are short enough that nav fragments would win. One row per **name**,
+    summing that name's blocks, so this list and ``search_matches`` describe the
+    same thing. Raises ``MarkerCollisionError``."""
+    scoped = _scoped(url, term, con=con)
+    if scoped is None:
+        return []
+    rec, spans = scoped
+    totals: dict[str | None, int] = {}
+    for region, region_spans in _matched_regions(_doc_of(rec), spans):
+        totals[region.name] = totals.get(region.name, 0) + len(region_spans)
+    # dict order is insertion order, and regions arrive in document order.
+    return [
+        SectionHit(section=name, matches=n, tier=_TEXT_TIER)
+        for name, n in totals.items()
+    ]
+
+
+class _Window(NamedTuple):
+    """One shown span: its line range, its section, and the matches inside it.
+
+    ``section`` rides the window because a straddling match has none, and such a
+    window must not merge with a labelled neighbour it happens to abut."""
+
+    start: int
+    end: int  # one past its last line
+    matches: int
+    section: str | None
+    straddles: bool
+
+
+def _window_extent(
+    doc: _Doc, opens_in: _Region, closes_in: _Region, span: _MatchSpan, words: int
+) -> tuple[int, int]:
+    """The line range shown around a match: sized in words, clipped to its region.
+
+    Only the padding is negotiable — clipping the match itself would return a
+    span missing the words it was found for. Padding stops at the region so a
+    window can carry its hit's locator, as ``quote --context`` does.
+
+    Words, not lines, because PDF lines are short and irregular; whole lines
+    still come out, keeping table rows intact. ``words`` caps lines either side
+    too, or a run of blank lines (no words, so free to cross) would merge two
+    distant matches into one window of whitespace."""
+    start, end = span.first, span.last
+    before = after = 0
+    while start > opens_in.start and before < words and span.first - start < words:
+        start -= 1
+        before += len(doc.lines[start].split())
+    while end + 1 < closes_in.end and after < words and end - span.last < words:
+        end += 1
+        after += len(doc.lines[end].split())
+    return start, end + 1
+
+
+def _window_text(doc: _Doc, start: int, end: int) -> str:
+    """A window's lines as stored text, verbatim.
+
+    ``\\f`` markers and blank edge lines drop; nothing else is touched and
+    nothing is marked, so any part of the result can be lifted into a cite's
+    ``quote``. Brackets would cost that, and the corpus is full of its own."""
+    shown = [i for i in range(start, end) if doc.lines[i] != "\f"]
+    while shown and not doc.lines[shown[0]].strip():
+        shown.pop(0)
+    while shown and not doc.lines[shown[-1]].strip():
+        shown.pop()
+    return "\n".join(doc.lines[i] for i in shown)
+
+
+def _addresses(
+    region: _Region, section: str | None, pages: tuple[int, int] | None
+) -> bool:
+    """Whether a region answers to the address asked for — no address, all of them.
+
+    ``section`` arrives casefolded, matching ``section()``. A sheet range tests
+    the region's name rather than a separate ordinal, so an unpaginated document
+    yields nothing instead of hits under numbers that mean nothing."""
+    if pages is not None:
+        match = _PAGE_NAME.match(region.name or "")
+        return match is not None and pages[0] <= int(match.group(1)) <= pages[1]
+    if section is None:
+        return True
+    if region.name is None:
+        return section == NO_HEADING.casefold()
+    return region.name.casefold() == section
+
+
+def search_matches(
+    url: str,
+    term: str,
+    *,
+    section: str | None = None,
+    pages: tuple[int, int] | None = None,
+    surrounding_words: int = _DEFAULT_SURROUNDING_WORDS,
+    con: sqlite3.Connection | None = None,
+) -> list[MatchHit]:
+    """Each match in a document, with surrounding words — the section scope.
+
+    ``section`` is a name ``search_sections()`` returned (``"(no heading)"`` for
+    the unheaded region); ``pages`` is an inclusive sheet range. Two names for
+    one thing, so pass at most one; with neither, every match comes back.
+
+    Overlapping windows merge and report how many matches they absorbed. Every
+    window is returned — capping is the caller's job, so it can say what it
+    withheld. Raises ``MarkerCollisionError``."""
+    if section is not None and pages is not None:
+        raise ValueError("section and pages name the same thing; pass at most one")
+    scoped = _scoped(url, term, con=con)
+    if scoped is None:
+        return []
+    rec, spans = scoped
+    doc = _doc_of(rec)
+    target = None if section is None else section.strip().casefold()
+    words = max(surrounding_words, 0)
+    hits: list[MatchHit] = []
+    for region, region_spans in _matched_regions(doc, spans):
+        if not _addresses(region, target, pages):
+            continue
+        # Merged as they are laid down: the matches arrive in document order, so
+        # an overlap can only ever be with the window just placed.
+        windows: list[_Window] = []
+        for span in region_spans:
+            closes_in = region if span.last < region.end else _region_of(doc, span.last)
+            name = region.name if closes_in == region else None
+            start, end = _window_extent(doc, region, closes_in, span, words)
+            last = windows[-1] if windows else None
+            if last is not None and start <= last.end and last.section == name:
+                windows[-1] = last._replace(
+                    end=max(last.end, end),
+                    matches=last.matches + 1,
+                    straddles=last.straddles or closes_in != region,
+                )
+            else:
+                windows.append(_Window(start, end, 1, name, closes_in != region))
+        hits.extend(
+            MatchHit(
+                text=_window_text(doc, w.start, w.end),
+                section=w.section,
+                straddles=w.straddles,
+                matches=w.matches,
+                tier=_TEXT_TIER,
+            )
+            for w in windows
+        )
+    return hits
+
+
 class Holding(TypedDict):
     """What the cache holds for one requested URL — ``have()``'s answer."""
 
@@ -1477,47 +1877,6 @@ _TYPE_LABELS = {
 }
 
 
-def _cmd_search(term: str, limit: int) -> int:
-    units, unbalanced = _fts_units(term)
-    if unbalanced:
-        # search() reads the open quote to end of term rather than raising. That
-        # is the charitable reading — the usual cause is shell quoting, not
-        # intent — but reinterpreting a query without saying so is the failure
-        # this syntax exists to fix, so show the expression that actually ran.
-        # Naming one phrase as "the" open quote's would misreport: the quote can
-        # own part of a unit (`foo"bar` is one unit, half bare word) or none of
-        # one (`foo "` leaves the trailing phrase empty).
-        print(
-            f"unbalanced quote; searched {_fts_expr(units) or 'nothing'}",
-            file=sys.stderr,
-        )
-    hits = search(term, limit=limit)
-    if not hits:
-        print(f"no pages match: {term}", file=sys.stderr)
-        return 1
-    for i, hit in enumerate(hits):
-        if i:
-            print()
-        print(f"url: {hit['url']}")
-        print(f"title: {hit['title'] or '(no title)'}")
-        if hit["last_updated"]:
-            # The page's own stated publish/modified date — not when we fetched.
-            print(f"last_updated: {hit['last_updated']}")
-        content_type = hit["content_type"]
-        type_label = _TYPE_LABELS.get(content_type or "", content_type)
-        if type_label:
-            print(f"type: {type_label}")
-        if hit["text_source"] not in (None, "html"):
-            # Flag hits whose text isn't a web page's own words — a PDF's text
-            # layer, a caption track, OCR or a transcription — so the reader
-            # knows to weigh (and for ocr, review) before quoting.
-            print(f"text_source: {hit['text_source']}")
-        # The snippet quotes the page mid-flow, so it can span stored line
-        # breaks; collapse them for a one-line display. Matches are [bracketed].
-        print(f"snippet: {' '.join(hit['snippet'].split())}")
-    return 0
-
-
 def _blob_line(rec: PageRow) -> str | None:
     """``blob: <path>`` for a row, or None when its type maps to no extension.
 
@@ -1550,12 +1909,12 @@ def _render_handoff_line(rec: PageRow) -> str | None:
     return None
 
 
-def _quote_row_facts(rec: PageRow) -> list[str]:
-    """What a quote reader needs to know about the *page*, hit or miss.
+def _row_facts(rec: PageRow) -> list[str]:
+    """What a reader needs to know about the *document*, hit or miss.
 
     The render handoff: a PDF hit's payoff step is Read(<blob>, pages=N), so
-    say what that call needs — on a miss too, where the needle may be printed
-    on the sheet as artwork the text layer never held.
+    say what that call needs — on a miss too, where the wanted words may be
+    printed on the sheet as artwork the text layer never held.
 
     The blob path prints when the row has a blob worth looking at (a property
     of the content type, not the extraction method: a PDF with a reviewed
@@ -1585,15 +1944,188 @@ def _quote_row_facts(rec: PageRow) -> list[str]:
     text = rec["text"] or ""
     if not text.strip():
         facts.append(
-            "no stored text, so no needle can match it — the document may be "
+            "no stored text, so nothing can match it — the document may be "
             "image-only, or extraction may have been unavailable when it was "
             "fetched; read the blob to find out which"
             if blob_shown
-            else "no stored text, so no needle can match it"
+            else "no stored text, so nothing can match it"
         )
     elif is_pdf and not _doc_of(rec).page_starts:
         facts.append("pdf document pages: unavailable")
     return facts
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _warn_unbalanced(term: str) -> None:
+    """Say what was actually searched when a quote was left open.
+
+    The term is reinterpreted rather than rejected, so the expression that ran
+    has to be visible. Showing the whole expression, not "the" open quote's
+    phrase: a quote can own part of a unit or none of one."""
+    units, unbalanced = _fts_units(term)
+    if unbalanced:
+        print(
+            f"unbalanced quote; searched {_fts_expr(units) or 'nothing'}",
+            file=sys.stderr,
+        )
+
+
+def _match_label(hit: SearchHit) -> str:
+    """One global-scope hit's count line.
+
+    The index covers url and title too, so a document can match with no text
+    match. The two ways that happens differ: no text layer at all (what OCR
+    will fix) versus text that just lacks the term. `0 in 0 sections` for
+    either would read as a broken counter."""
+    if hit["matches"] is None:
+        return "count unavailable: this document's text contains a highlight marker"
+    if not hit["has_text"]:
+        return "url/title match, no text layer"
+    if not hit["matches"]:
+        return "url/title match, 0 text matches"
+    return f"{hit['matches']} in {_plural(hit['sections'] or 0, 'section', 'sections')}"
+
+
+def _cmd_search(term: str, limit: int) -> int:
+    _warn_unbalanced(term)
+    hits = search(term, limit=limit)
+    if not hits:
+        print(f"no pages match: {term}", file=sys.stderr)
+        return 1
+    for i, hit in enumerate(hits):
+        if i:
+            print()
+        print(f"url: {hit['url']}")
+        print(f"title: {hit['title'] or '(no title)'}")
+        if hit["last_updated"]:
+            # The page's own stated publish/modified date — not when we fetched.
+            print(f"last_updated: {hit['last_updated']}")
+        content_type = hit["content_type"]
+        type_label = _TYPE_LABELS.get(content_type or "", content_type)
+        if type_label:
+            print(f"type: {type_label}")
+        if hit["text_source"] not in (None, "html"):
+            # Flag hits whose text isn't a web page's own words — a PDF's text
+            # layer, a caption track, OCR or a transcription — so the reader
+            # knows to weigh (and for ocr, review) before quoting.
+            print(f"text_source: {hit['text_source']}")
+        print(f"matches: {_match_label(hit)}")
+        if hit["snippet"]:
+            # The snippet spans stored line breaks; collapse for one line.
+            print(f"snippet: {' '.join(hit['snippet'].split())}")
+    return 0
+
+
+# Aligns a page map's counts. Long headings overflow rather than truncate —
+# the name is an address to paste into --section.
+_SECTION_COLUMN = 24
+
+
+def _print_sections(sections: list[SectionHit]) -> None:
+    for entry in sections:
+        name = entry["section"] or NO_HEADING
+        print(
+            f"{name:<{_SECTION_COLUMN}}  {_plural(entry['matches'], 'match', 'matches')}"
+        )
+
+
+def _print_matches(hits: list[MatchHit], limit: int) -> None:
+    shown = hits if limit <= 0 else hits[:limit]
+    for i, hit in enumerate(shown):
+        if i:
+            print()
+        # Not an address, and shaped so nobody pastes it back into --section.
+        label = hit["section"] or (
+            "section boundary" if hit["straddles"] else NO_HEADING
+        )
+        if hit["matches"] > 1:
+            # Merged neighbours — say so, or the window count reads as the match
+            # count and silently disagrees with the section list.
+            label += f"  {_plural(hit['matches'], 'match', 'matches')}"
+        print(f"[{label}]")
+        print(hit["text"])
+    if len(shown) < len(hits):
+        # stdout is block-buffered when redirected while stderr is not, so this
+        # would otherwise print above the windows it is qualifying.
+        sys.stdout.flush()
+        withheld = len(hits) - len(shown)
+        noun = "window" if withheld == 1 else "windows"
+        print(f"{withheld} more {noun} not shown (--limit 0 for all)", file=sys.stderr)
+
+
+def _print_address_miss(
+    address: str, sections: list[SectionHit], url: NormalizedUrl
+) -> None:
+    """An address that named nothing, plus where the matches actually are.
+
+    A sheet in range holding none is not an error, so the useful reply names
+    what would have worked. Capped, or a long manual recites its whole map."""
+    print(f"no matches in {address} of {url}", file=sys.stderr)
+    names = [e["section"] or NO_HEADING for e in sections]
+    listed = ", ".join(names[:10])
+    if len(names) > 10:
+        listed += f", … (+{len(names) - 10} more)"
+    print(f"sections with matches: {listed}", file=sys.stderr)
+
+
+def _cmd_search_document(
+    url: str,
+    term: str,
+    *,
+    section: str | None,
+    pages: tuple[int, int] | None,
+    surrounding_words: int,
+    limit: int,
+) -> int:
+    """The document and section scopes: `search TERM --url` and its narrowings."""
+    rec = _require_page(url)
+    _warn_unbalanced(term)
+    for line in _row_facts(rec):
+        print(line, file=sys.stderr)
+    if pages is not None and not _doc_of(rec).page_starts:
+        print(
+            "no page markers in this document; --pages names PDF sheets",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        sections = search_sections(url, term)
+    except MarkerCollisionError:
+        print(
+            f"cannot count matches in {url}: its own text contains one of the "
+            "markers this read depends on",
+            file=sys.stderr,
+        )
+        return 1
+    if not sections:
+        print(f"no matches for {term!r} in {url}", file=sys.stderr)
+        return 1
+    addressed = section is not None or pages is not None
+    if not addressed and len(sections) > 1:
+        # A one-section document would only restate the global count.
+        if surrounding_words != _DEFAULT_SURROUNDING_WORDS:
+            print(
+                f"--surrounding-words {surrounding_words} ignored: it sizes a "
+                "match window, and this document needs --section or --pages "
+                "first",
+                file=sys.stderr,
+            )
+        _print_sections(sections)
+        return 0
+    # Cannot raise: search_sections just cleared the same roundtrip check.
+    hits = search_matches(
+        url, term, section=section, pages=pages, surrounding_words=surrounding_words
+    )
+    if not hits:
+        # Only reachable with an address: matching sections imply windows.
+        named = f"pages {pages[0]}-{pages[1]}" if pages else f"section {section!r}"
+        _print_address_miss(named, sections, rec["url"])
+        return 1
+    _print_matches(hits, limit)
+    return 0
 
 
 def _cmd_quote(url: str, needle: str, context: int) -> int:
@@ -1603,7 +2135,7 @@ def _cmd_quote(url: str, needle: str, context: int) -> int:
         print(f"no matches for {needle!r} in {url}", file=sys.stderr)
     # Row facts to stderr, hit facts to stdout — the split `get` makes, so
     # stdout is the hit list and nothing else.
-    for line in _quote_row_facts(rec):
+    for line in _row_facts(rec):
         print(line, file=sys.stderr)
     if not hits:
         return 1
@@ -1766,6 +2298,55 @@ def _cmd_section(url: str, heading: str) -> int:
     return 0
 
 
+def _validated_pages(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[int, int] | None:
+    """Check ``search``'s scope flags, and return ``--pages`` as a sheet range.
+
+    Every way of asking for something undeliverable is rejected rather than
+    dropped, so a flag never silently narrows the question asked."""
+    # `is not None`, never truthiness: an empty value is something somebody
+    # typed, most likely an unset shell variable, and `--url ""` reading as
+    # "search everything" is a silent scope change.
+    if args.url is not None and not args.url.strip():
+        parser.error(
+            "--url is empty: pass a cached document's URL, or drop "
+            "the flag to search every document"
+        )
+    if args.url is None:
+        unusable = [
+            flag
+            for flag, value in (("--section", args.section), ("--pages", args.pages))
+            if value is not None
+        ]
+        if unusable:
+            verb = "need" if len(unusable) > 1 else "needs"
+            parser.error(
+                f"{' and '.join(unusable)} {verb} --url: a section address is "
+                "only meaningful within one document"
+            )
+        if args.surrounding_words != _DEFAULT_SURROUNDING_WORDS:
+            parser.error(
+                "--surrounding-words needs --url: it sizes the context around a "
+                "match, which only a section scope prints"
+            )
+    if args.section is not None and args.pages is not None:
+        parser.error(
+            "--section and --pages are two ways of naming the same thing; pass one"
+        )
+    if args.pages is None:
+        return None
+    match = _PAGE_RANGE.match(args.pages.strip())
+    if match is None:
+        parser.error(
+            '--pages takes a sheet range like 40-50 (one sheet is --section "page 41")'
+        )
+    first, last = int(match.group(1)), int(match.group(2))
+    if first > last:
+        parser.error(f"--pages {args.pages}: the range runs backwards")
+    return first, last
+
+
 def _read_url_list(path: str) -> list[str]:
     """URLs from a file. Blank and ``#`` lines skipped.
 
@@ -1873,14 +2454,52 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_search = sub.add_parser("search", help="FTS5 BM25-ranked pages matching a term")
+    p_search = sub.add_parser(
+        "search",
+        help="ranked documents matching a term; --url and --section narrow it",
+        description=(
+            "Three scopes. A term alone ranks documents, each with its match "
+            "count. --url lists that document's matching sections with theirs. "
+            "--section (or --pages, a sheet range) shows the matches themselves "
+            "with surrounding words. A count is matched phrases plus matched "
+            "loose words, so '\"camel toes\" bananas' reads two phrase hits and "
+            "five bananas as seven; overlapping phrases merge into one, so "
+            "'\"a b\" \"b c\"' over 'a b c' counts one."
+        ),
+    )
     p_search.add_argument(
         "term",
         help="words AND together; a double-quoted run is one phrase. Wrap the "
         "whole term in single quotes so the shell keeps the double ones: "
         "search '\"upper magnet\" knocker'",
     )
-    p_search.add_argument("--limit", type=int, default=20)
+    p_search.add_argument(
+        "--url", help="scope to one document: its matching sections, with counts"
+    )
+    p_search.add_argument(
+        "--section",
+        help="scope to one section (needs --url): its matches, with context. "
+        'Takes a name the section list printed, including "(no heading)"',
+    )
+    p_search.add_argument(
+        "--pages",
+        help="scope to a PDF sheet range (needs --url), e.g. 40-50. One sheet "
+        'is --section "page 41"',
+    )
+    p_search.add_argument(
+        "--surrounding-words",
+        type=int,
+        default=_DEFAULT_SURROUNDING_WORDS,
+        help="words of context either side of each match, clipped to its "
+        "section (default %(default)s); whole lines are returned",
+    )
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="documents to rank, or match windows to show once scoped "
+        "(default %(default)s; 0 for all)",
+    )
 
     p_quote = sub.add_parser(
         "quote",
@@ -1927,7 +2546,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     match args.command:
         case "search":
-            return _cmd_search(args.term, args.limit)
+            pages = _validated_pages(parser, args)
+            if args.url is None:
+                return _cmd_search(args.term, args.limit)
+            return _cmd_search_document(
+                args.url,
+                args.term,
+                section=args.section,
+                pages=pages,
+                surrounding_words=args.surrounding_words,
+                limit=args.limit,
+            )
         case "quote":
             return _cmd_quote(args.url, args.needle, args.context)
         case "outline":

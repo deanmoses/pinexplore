@@ -1263,7 +1263,7 @@ def test_cli_quote_on_a_text_less_html_row_names_no_causes(cache, capsys):
     _seed(cache, url=url, text=None, content_type="text/html", text_source="html")
     assert wc.main(["quote", url, "anything"]) == 1
     captured = capsys.readouterr()
-    assert "no stored text, so no needle can match it\n" in captured.err
+    assert "no stored text, so nothing can match it\n" in captured.err
     assert "image-only" not in captured.err
     assert "blob:" not in captured.err
 
@@ -1918,3 +1918,386 @@ def test_cli_section_on_html_offers_no_blob_path(cache, capsys):
     url = _seed_structured(cache)
     assert wc.main(["section", url, "Intro"]) == 0
     assert capsys.readouterr().err == ""
+
+
+# --------------------------------------------------------------------------- #
+# search scopes: global, document, section
+# --------------------------------------------------------------------------- #
+
+# Three sheets, two of which say the word.
+COIL_PAGES = (
+    "first sheet mentions the coil once\n"
+    "\f\n"
+    "second sheet is quiet\n"
+    "\f\n"
+    "third sheet says coil and coil again\n"
+    "\f"
+)
+
+
+def test_search_counts_matches_and_the_sections_they_fall_in(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    (hit,) = wc.search("coil", con=cache)
+    assert (hit["matches"], hit["sections"]) == (3, 2)
+    assert hit["tier"] == "text"
+    assert hit["has_text"] is True
+    # The two scopes must not disagree about how spread out a term is.
+    assert hit["sections"] == len(wc.search_sections(url, "coil", con=cache))
+
+
+def test_search_counts_every_matched_phrase_and_loose_word(cache):
+    url = wc.normalize_url("https://a.com/mixed")
+    _seed(cache, url=url, text="upper magnet, bananas bananas, upper magnet")
+    (hit,) = wc.search('"upper magnet" bananas', con=cache)
+    # Two phrase hits plus two loose words.
+    assert hit["matches"] == 4
+
+
+def test_search_withholds_a_count_from_a_document_holding_a_marker(cache):
+    # Absent by measurement, not by rule, so a document could carry one. The
+    # count is withheld; the other hit is answered as normal.
+    poisoned = wc.normalize_url("https://a.com/poisoned")
+    clean = wc.normalize_url("https://a.com/clean")
+    _seed(cache, url=poisoned, text=f"coil{wc._MARK_OPEN} and coil")
+    _seed(cache, url=clean, text="coil and coil")
+    hits = {h["url"]: h for h in wc.search("coil", con=cache)}
+    assert (hits[poisoned]["matches"], hits[poisoned]["sections"]) == (None, None)
+    assert hits[clean]["matches"] == 2
+    with pytest.raises(wc.MarkerCollisionError):
+        wc.search_sections(poisoned, "coil", con=cache)
+
+
+def test_search_tells_a_dark_row_from_one_whose_text_lacks_the_term(cache):
+    # Both match on url alone and count zero, and are not the same fact: one
+    # holds bytes nothing can read yet, the other just doesn't say it.
+    dark = wc.normalize_url("https://a.com/uploads/dark.pdf")
+    lit = wc.normalize_url("https://a.com/uploads/lit.pdf")
+    _seed(cache, url=dark, text=None, content_type="application/pdf")
+    _seed(cache, url=lit, text="This document never says the word.")
+    hits = {h["url"]: h for h in wc.search("uploads", con=cache)}
+    assert (hits[dark]["has_text"], hits[dark]["matches"]) == (False, 0)
+    assert hits[dark]["snippet"] is None  # nothing to snippet — this used to crash
+    assert (hits[lit]["has_text"], hits[lit]["matches"]) == (True, 0)
+
+
+def test_search_limit_zero_returns_every_hit(cache):
+    for i in range(3):
+        _seed(cache, url=wc.normalize_url(f"https://a.com/{i}"), text="coil")
+    assert len(wc.search("coil", limit=0, con=cache)) == 3
+    assert len(wc.search("coil", limit=2, con=cache)) == 2
+
+
+def test_search_sections_maps_a_paginated_document_by_sheet(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    rows = wc.search_sections(url, "coil", con=cache)
+    # Document order, quiet sheets absent, counts per sheet.
+    assert [(r["section"], r["matches"]) for r in rows] == [
+        ("page 1", 1),
+        ("page 3", 2),
+    ]
+
+
+def test_search_sections_follows_outlines_rule_on_an_unpaginated_pdf(cache):
+    # No sheets to name, so it falls to headings — including whatever ATX line
+    # the extractor misparsed. The names `outline` prints and `section` takes.
+    url = _seed_paged(cache, "coil above\n\n# 6-32 x /4 Phil.M.S.\n\ncoil below")
+    assert [e["heading"] for e in wc.outline(url, con=cache)] == ["6-32 x /4 Phil.M.S."]
+    rows = wc.search_sections(url, "coil", con=cache)
+    assert [(r["section"], r["matches"]) for r in rows] == [
+        (None, 1),
+        ("6-32 x /4 Phil.M.S.", 1),
+    ]
+
+
+def test_search_sections_sums_a_repeated_name_into_one_row(cache):
+    # `section()` answers a repeated name with every block bearing it.
+    url = wc.normalize_url("https://a.com/repeat")
+    _seed(
+        cache, url=url, text="# Specs\n\ncoil\n\n# Other\n\nx\n\n# Specs\n\ncoil coil"
+    )
+    rows = wc.search_sections(url, "coil", con=cache)
+    assert [(r["section"], r["matches"]) for r in rows] == [("Specs", 3)]
+
+
+def test_search_sections_collapses_unheaded_text_to_one_row(cache):
+    url = wc.normalize_url("https://a.com/unheaded")
+    _seed(cache, url=url, text="coil up here\n\n# Heading\n\ncoil under it")
+    rows = wc.search_sections(url, "coil", con=cache)
+    assert [(r["section"], r["matches"]) for r in rows] == [(None, 1), ("Heading", 1)]
+
+
+def test_search_sections_names_the_frontmatter_metadata(cache):
+    # `metadata` is an address `section()` already accepts, so a hit in the
+    # assembly's frontmatter stays reachable.
+    url = _seed_structured(cache)
+    rows = wc.search_sections(url, "structured", con=cache)
+    assert rows[0]["section"] == "metadata"
+
+
+def test_search_matches_returns_verbatim_stored_lines(cache):
+    url = wc.normalize_url("https://a.com/verbatim")
+    text = "Flipper coil resistance should read 4.2 ohms across the winding."
+    _seed(cache, url=url, text=text)
+    (hit,) = wc.search_matches(url, "coil", con=cache)
+    # Unmarked and unmodified, so any part of it can be lifted into a cite.
+    assert hit["text"] == text
+    assert wc._MARK_OPEN not in hit["text"]
+
+
+def test_search_matches_sizes_the_window_in_words_and_returns_whole_lines(cache):
+    url = wc.normalize_url("https://a.com/words")
+    _seed(
+        cache,
+        url=url,
+        text="one two three\nfour five six\ncoil here\nseven eight nine\nten more words",
+    )
+    (hit,) = wc.search_matches(url, "coil", surrounding_words=3, con=cache)
+    assert hit["text"] == "four five six\ncoil here\nseven eight nine"
+    # Zero words is the match's own line, still whole.
+    (tight,) = wc.search_matches(url, "coil", surrounding_words=0, con=cache)
+    assert tight["text"] == "coil here"
+
+
+def test_search_matches_does_not_cross_a_blank_run_to_reach_its_words(cache):
+    # Blank lines hold no words, so without the line cap the window walks the
+    # gap for free and merges two distant matches.
+    url = wc.normalize_url("https://a.com/gap")
+    _seed(cache, url=url, text="coil one" + "\n" * 30 + "coil two")
+    hits = wc.search_matches(url, "coil", surrounding_words=2, con=cache)
+    assert [h["text"] for h in hits] == ["coil one", "coil two"]
+
+
+def test_search_matches_keeps_a_lines_own_indentation(cache):
+    # Verbatim includes a line's own indentation; only blank edge lines go.
+    url = wc.normalize_url("https://a.com/indented")
+    _seed(cache, url=url, text="# H\n\n    indented coil line\n    second line")
+    (hit,) = wc.search_matches(url, "coil", surrounding_words=0, con=cache)
+    assert hit["text"] == "    indented coil line"
+    # `quote` returns the same span the same way — the two reads must not
+    # disagree about what the stored text is.
+    assert wc.quote(url, "indented coil", context=1, con=cache) == [
+        "    indented coil line\n    second line"
+    ]
+
+
+def test_search_matches_never_truncates_a_phrase_at_a_line_break(cache):
+    # FTS5 matches a phrase across a newline, so the match opens on one line
+    # and closes on another. Reading only the first returns "the upper".
+    url = wc.normalize_url("https://a.com/wrapped")
+    _seed(cache, url=url, text="the upper\nmagnet holds the ball")
+    (hit,) = wc.search_matches(url, '"upper magnet"', surrounding_words=0, con=cache)
+    assert hit["text"] == "the upper\nmagnet holds the ball"
+
+
+def test_search_matches_a_phrase_crossing_a_sheet_keeps_both_halves(cache):
+    # Unlabelled, because no single section name is true of it — and marked as
+    # straddling, since a paginated document has no unheaded region and calling
+    # this "(no heading)" would be a false locator rather than a vague one.
+    url = _seed_paged(cache, "upper\n\f\nmagnet\n\f")
+    (hit,) = wc.search_matches(url, '"upper magnet"', surrounding_words=0, con=cache)
+    assert hit["text"] == "upper\nmagnet"
+    assert (hit["section"], hit["straddles"]) == (None, True)
+    assert wc.quote_hits(url, "upper magnet", con=cache)[0]["text"] == hit["text"]
+    # Counted once, so section counts still sum to the document total.
+    assert wc.search_sections(url, '"upper magnet"', con=cache) == [
+        {"section": "page 1", "matches": 1, "tier": "text"}
+    ]
+
+
+def test_search_matches_clips_a_window_to_its_own_section(cache):
+    # A window never leaves the section it is filed under, so it can be
+    # lifted with that section's locator.
+    url = wc.normalize_url("https://a.com/clip")
+    _seed(
+        cache,
+        url=url,
+        text="# First\n\nsecret words here\n\n# Second\n\ncoil sits here",
+    )
+    (hit,) = wc.search_matches(url, "coil", surrounding_words=50, con=cache)
+    assert hit["section"] == "Second"
+    assert "secret" not in hit["text"]
+
+
+def test_search_matches_merges_overlapping_windows_and_says_how_many(cache):
+    url = wc.normalize_url("https://a.com/merge")
+    _seed(cache, url=url, text="coil one\ncoil two\n\n\n\n\n\n\n\n\n\nfar away coil")
+    hits = wc.search_matches(url, "coil", surrounding_words=2, con=cache)
+    # The adjacent pair is one window carrying both; the distant one stays.
+    assert [h["matches"] for h in hits] == [2, 1]
+    assert hits[0]["text"] == "coil one\ncoil two"
+
+
+def test_search_matches_drops_page_markers_from_a_window(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    hits = wc.search_matches(url, "coil", surrounding_words=50, con=cache)
+    # A character no viewer renders is residue, not evidence.
+    assert all("\f" not in h["text"] for h in hits)
+    assert hits[0]["text"] == "first sheet mentions the coil once"
+
+
+def test_search_matches_takes_a_section_name_or_a_sheet_range(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    assert [h["section"] for h in wc.search_matches(url, "coil", con=cache)] == [
+        "page 1",
+        "page 3",
+    ]
+    named = wc.search_matches(url, "coil", section="Page 3", con=cache)
+    assert [h["section"] for h in named] == ["page 3"]  # matched like section()
+    ranged = wc.search_matches(url, "coil", pages=(2, 3), con=cache)
+    assert [h["section"] for h in ranged] == ["page 3"]
+    # A range past the end is an answer, not an error.
+    assert wc.search_matches(url, "coil", pages=(40, 500), con=cache) == []
+
+
+def test_search_matches_addresses_unheaded_text_by_name(cache):
+    url = wc.normalize_url("https://a.com/unheaded2")
+    _seed(cache, url=url, text="coil up here\n\n# Heading\n\ncoil under it")
+    hits = wc.search_matches(url, "coil", section=wc.NO_HEADING, con=cache)
+    assert [h["text"] for h in hits] == ["coil up here"]
+    # An unheaded region, not a straddling match — the CLI prints them apart.
+    assert hits[0]["straddles"] is False
+
+
+def test_search_matches_refuses_two_addresses_for_one_thing(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    with pytest.raises(ValueError, match="at most one"):
+        wc.search_matches(url, "coil", section="page 1", pages=(1, 2), con=cache)
+
+
+def test_search_scopes_return_nothing_for_a_term_with_nothing_to_match(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    assert wc.search_sections(url, "", con=cache) == []
+    assert wc.search_matches(url, "", con=cache) == []
+
+
+# --------------------------------------------------------------------------- #
+# search scopes: CLI
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_search_prints_the_count_beside_the_snippet(cache, capsys):
+    _seed_paged(cache, COIL_PAGES)
+    assert wc.main(["search", "coil"]) == 0
+    out = capsys.readouterr().out
+    assert "matches: 3 in 2 sections" in out
+    assert "snippet: " in out  # the one-command answer is still there
+
+
+def test_cli_search_labels_the_two_kinds_of_zero(cache, capsys):
+    _seed(
+        cache,
+        url=wc.normalize_url("https://a.com/uploads/dark.pdf"),
+        text=None,
+        content_type="application/pdf",
+    )
+    _seed(cache, url=wc.normalize_url("https://a.com/uploads/lit.pdf"), text="nothing")
+    assert wc.main(["search", "uploads"]) == 0  # and no traceback
+    out = capsys.readouterr().out
+    assert "matches: url/title match, no text layer" in out
+    assert "matches: url/title match, 0 text matches" in out
+
+
+def test_cli_search_labels_a_straddling_match_apart_from_an_unheaded_one(cache, capsys):
+    # `(no heading)` on a paginated document would be a false locator: every
+    # line there sits on a named sheet, so a cross-sheet match has too many
+    # names rather than none. The label is also shaped to not look addressable.
+    url = _seed_paged(cache, "upper\n\f\nmagnet\n\f")
+    assert wc.main(["search", '"upper magnet"', "--url", url]) == 0
+    out = capsys.readouterr().out
+    assert "[section boundary]" in out
+    assert wc.NO_HEADING not in out
+
+
+def test_cli_search_document_scope_lists_sections_with_counts(cache, capsys):
+    url = _seed_paged(cache, COIL_PAGES)
+    assert wc.main(["search", "coil", "--url", url]) == 0
+    out = capsys.readouterr().out
+    assert "page 1                    1 match\n" in out
+    assert "page 3                    2 matches\n" in out
+
+
+def test_cli_search_document_scope_collapses_a_single_section(cache, capsys):
+    # A one-row list would restate the global count, so the hop is skipped.
+    url = wc.normalize_url("https://a.com/single")
+    _seed(cache, url=url, text="the coil sits here alone")
+    assert wc.main(["search", "coil", "--url", url]) == 0
+    out = capsys.readouterr().out
+    assert f"[{wc.NO_HEADING}]" in out
+    assert "the coil sits here alone" in out
+
+
+def test_cli_search_section_scope_reports_what_it_withheld(cache, capsys):
+    url = wc.normalize_url("https://a.com/many")
+    _seed(cache, url=url, text="\n\n\n".join(f"coil {i}" for i in range(6)))
+    argv = ["search", "coil", "--url", url, "--limit", "2", "--surrounding-words", "0"]
+    assert wc.main(argv) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("[") == 2
+    # Silent truncation would read as "that's all of them".
+    assert "4 more windows not shown" in captured.err
+
+
+def test_cli_search_pages_on_an_unpaginated_document_says_so(cache, capsys):
+    url = wc.normalize_url("https://a.com/nopages")
+    _seed(cache, url=url, text="coil", content_type="application/pdf")
+    assert wc.main(["search", "coil", "--url", url, "--pages", "1-5"]) == 1
+    assert "no page markers in this document" in capsys.readouterr().err
+
+
+def test_cli_search_a_miss_under_an_address_says_where_matches_are(cache, capsys):
+    url = _seed_paged(cache, COIL_PAGES)
+    assert wc.main(["search", "coil", "--url", url, "--section", "nope"]) == 1
+    err = capsys.readouterr().err
+    assert "sections with matches: page 1, page 3" in err
+
+
+def test_cli_search_rejects_an_address_without_a_document(cache):
+    # A section address across documents is meaningless; argparse exits 2.
+    with pytest.raises(SystemExit) as exc:
+        wc.main(["search", "coil", "--section", "page 1"])
+    assert exc.value.code == 2
+
+
+def test_cli_search_rejects_a_context_size_with_nothing_to_size(cache, capsys):
+    # The global scope prints no match windows, so this cannot be honoured.
+    _seed(cache, url=wc.normalize_url("https://a.com/x"), text="coil")
+    with pytest.raises(SystemExit) as exc:
+        wc.main(["search", "coil", "--surrounding-words", "99"])
+    assert exc.value.code == 2
+    assert "--surrounding-words needs --url" in capsys.readouterr().err
+
+
+def test_cli_search_rejects_an_empty_section_rather_than_dropping_it(cache):
+    # Falsy but typed: truthiness would silently answer the unscoped question.
+    with pytest.raises(SystemExit) as exc:
+        wc.main(["search", "coil", "--section", ""])
+    assert exc.value.code == 2
+
+
+def test_cli_search_reports_a_context_size_the_section_list_cannot_use(cache, capsys):
+    # A document still needing an address prints no window, so the size asked
+    # for cannot be honoured and must not be silently dropped.
+    url = _seed_paged(cache, COIL_PAGES)
+    argv = ["search", "coil", "--url", url, "--surrounding-words", "1"]
+    assert wc.main(argv) == 0
+    assert "--surrounding-words 1 ignored" in capsys.readouterr().err
+
+
+def test_cli_search_rejects_an_empty_url_rather_than_searching_everything(cache):
+    # An unset shell variable must not widen the scope to the whole corpus.
+    _seed(cache, url=wc.normalize_url("https://a.com/x"), text="coil")
+    with pytest.raises(SystemExit) as exc:
+        wc.main(["search", "coil", "--url", ""])
+    assert exc.value.code == 2
+
+
+def test_cli_search_rejects_two_addresses_and_a_backwards_range(cache):
+    url = _seed_paged(cache, COIL_PAGES)
+    for argv in (
+        ["search", "coil", "--url", url, "--section", "page 1", "--pages", "1-2"],
+        ["search", "coil", "--url", url, "--pages", "50-2"],
+        ["search", "coil", "--url", url, "--pages", "page 4"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            wc.main(argv)
+        assert exc.value.code == 2
