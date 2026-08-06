@@ -97,13 +97,57 @@ A search hit returns a `snippet` from `pages.ocr_text`. This help the consumer d
 
 When the same document has hits on both tiers, don't dedup; return both
 
+#### Detailed search design
+
+Today `search` returns one row per document with one snippet, and has no concept of a sheet. A term appearing 99 times and a term appearing once look identical, and FTS5 picks the window by its own rule: searching `coil`, the top hit is the 175-sheet Sonic manual and the snippet is a table-of-contents line. That is survivable today because `match` resolves it on the next rung. It stops being survivable with OCR, whose whole value is _which sheet do I render_.
+
+So index at **segment** grain rather than document grain: a derived, rebuildable table holding each document's segments, with a separate FTS index per tier so BM25 never ranks the two against each other. `pages` stays the system-of-record; the segment table is a cache, never cited against.
+
+Two segmentation rules to start:
+
+- **PDF → one segment per sheet**, split on the `\f` markers both columns already carry, addressed as `page N`.
+- **Everything else → one segment for the whole document.** A legitimate case, not a placeholder — search behaves identically across types, and a finer rule can be added later without touching the schema.
+
+HTML is excluded for now. Its unit would have to be the leaf block (heading to next heading of any level), since `section()`'s blocks nest and indexing those would enter the same text two or three times. Leaf blocks partition correctly but make poor index units — median 174 chars, 35% under 100 — and evening them out needs a size-merging knob. Only 3 HTML pages in the corpus exceed 15K chars with no headings, so revisit on evidence.
+
+Segment-grain BM25 is what makes "the best sheets" definable: the same ranking function, finer grain. Return each document's best segments, capped at 5, one snippet each, labeled with address and tier:
+
+```terminal
+$ web_cache.py search "coil"
+
+url: https://marketing.jerseyjackpinball.com/sonic/Sonic_Manual_10_July_2026.pdf
+type: pdf
+page 60: … Flipper [coil] resistance should read 4.2 ohms across the …
+page 102: … replace the [coil] stop before it damages the plunger …
+page 141 (ocr): … Table 6-2 [COIL] POSITIONS … UPPER MAGNET … KNOCKER …
++ 94 more matches on 31 other pages
+```
+
+**Best segments, never the first** — document order returns the parts list and the table of contents, which is the failure this fixes. The cap is on segments, not matches; a sheet matching repeatedly still contributes one snippet. Tier labeling rides the segment, so one document can show both tiers.
+
+This also keeps `search` FTS end-to-end. The alternative — document-level FTS plus the literal matcher for labeled snippets — breaks down because FTS ANDs tokens anywhere while the matcher needs a contiguous phrase, so a large share of multi-word hits yield zero spans. `match` stays the literal-span tool, which is its job.
+
+### When OCR happens
+
+Here's the ways that OCR can get kicked off:
+
+1. We show a coverage line on `search` when the corpus has un-OCR'd PDFs, so a thin result set says so rather than implying completeness.
+2. We provide a manual command that consumers can run in ⬆️ that case. Default is to run against all outstanding docs, but there's also a way to run against 1 doc, which I think we'll use for testing more than anything else.
+3. `fetch` spawns detached process, if that is a simple thing to build
+
+#### Failed OCRs
+
+Vision might permanently choke on a document. In that case it would stay in the gap forever and gets retried on every subsequent fetch. Either mark the attempt on the row (an ocr_attempted_at or a failure flag, so the gap query can skip what has already failed and a --retry-failed flag can bring it back) or accept perpetual retry.
+
+For v1 we accept perpetual retry. YAGNI.
+
 ### Match
 
 When the same sheet has hits on both tiers, dedup; don't return the OCR one.
 
 ### Staleness
 
-When content is re-fetched, we re-OCR. However, OCR is macOS-only. A row can be refetched on a host that can't OCR — new bytes, text re-extracted. Probably the way to do this is that `ocr_text` clears when `content_sha` changes, then on Macs re-OCR.
+When content is re-fetched, we re-OCR. However, OCR is macOS-only. A row can be refetched on a host that can't OCR — new bytes, text re-extracted. Probably the way to do this is that `ocr_text` clears when `content_sha` changes, then (only on Macs) re-OCR.
 
 ## Proving this out
 
