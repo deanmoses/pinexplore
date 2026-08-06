@@ -119,4 +119,6 @@ The 13 fully dark PDFs have no text for any scope to search until OCR lands. The
 
 ## Sequencing note
 
-`pages` (the table, meaning one URL) and `page N` (a PDF sheet) collide, and this is the code that uses both senses most heavily. If that rename is happening, it should land first — otherwise this diff carries it as noise.
+`pages` (the table, meaning one URL) and `page N` (a PDF sheet) collide, and this is the code that uses both senses most heavily. The [documents-not-pages rename](DocumentsNotPages.md) would resolve it, but **this does not wait on it** — the rename is a 26-file mechanical sweep plus a destructive migration, and blocking a feature on it buys nothing the feature needs.
+
+So the collision gets handled locally instead: in the new code the URL sense is never called `page`. It is `rec`/`doc` in variables and "document" in output and help text, exactly as `_doc_of` and `_Doc` already do, leaving `page` to mean a sheet everywhere the reader can see. The only unavoidable uses of the old sense are the `pages` / `pages_fts` identifiers in SQL. If the rename does happen later, that convention is what keeps its diff here to those lines.
