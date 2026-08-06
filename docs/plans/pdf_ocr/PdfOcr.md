@@ -45,6 +45,8 @@ It may even be able to restrict the search to specific pages or page ranges per 
 
 The Flippatch Claude Code AI session renders page 41 and reads it. It reads UPPER MAGNET off the actual table, and that is what goes in the patch's `quote:`.
 
+#### Enhanced render - not for v1
+
 Handing the PDF straight to Claude Code's `Read` tool — `Read("/…/raw/9a83…0721.pdf", pages="41")` — works, but at roughly 850x1100 it is the weakest link in the chain. Measured on an Iron Man parts sheet, that path renders a bushing spec as `Bushing, 16" a ID X 281" oOD X 187`; the same sheet rendered at scale 4.0 reads `Bushing, .16" ø ID X .281" ø OD X .187"`. Decimal points and `ø` glyphs are exactly the characters a parts citation turns on, so it is worth the better render.
 
 So `web_cache.py` should expose an **on-demand render**: give it a url and a page, it rasterizes that sheet to a PNG in a temp location and prints the path, which the session then `Read`s. Same Quartz path the OCR uses, ~35ms per sheet.
@@ -55,6 +57,18 @@ Going higher buys less than it looks. The ceiling is not the rasterizer but the 
 
 Render on demand rather than storing the images. Storing every sheet would be ~13GB against an R2-backed cache to save 35ms of work, and the blobs we already keep can regenerate any sheet at any scale whenever it is actually wanted.
 
+ENHANCED RENDER IS NOT FOR V1.
+
+### Step 4 — confirm against the text layer (conditional)
+
+If step 2 labelled the hit `(ocr)`, skip this: the words are only ink, and the cite is quote-less — `ref`, a `locator` naming the sheet, and a `note` recording what was seen.
+
+However, if the hit was not labeled `(ocr)`, the words are in the text layer, and you will need to quote it. A reading of the ink can differ from the stored text — decimal points, `ø`, hyphenation across a line break. Use `section <url> "page 41"` to get that sheet's stored text verbatim.
+
+### `quote` is not needed for PDFs
+
+For PDFs, `search` and `section` replace everything that `quote` was once used for. `quote` is still needed for HTML documents, though, because we don't provide a FTS way to search within a HTML document, and `quote`'s needle-driven read beats dumping a 60K HTML document.
+
 ## Architecture
 
 We will OCR every sheet. OCR content must be stored separately from the PDF's text layer that's what quotes are verified against, and also duplicated content would garble spans.
@@ -64,9 +78,9 @@ We will OCR every sheet. OCR content must be stored separately from the PDF's te
 
 We retire `text_source = 'ocr'`. Not the field, but the `ocr` value.
 
-### Why `ocr_text` is not citable
+### `ocr_text` shall not be citable
 
-It is tempting to let `match` verify a quote against either column — OCR reads the corpus faithfully in aggregate (97.9% of the text layer's vocabulary), so why not accept it as a citation source? Because aggregate fidelity is the wrong test. Citation needs the exact character sequence, and measured at line grain against sheets where both columns exist, only **88.2% of corresponding OCR lines are character-exact**. The other 11.8% look like this:
+It is tempting to allow quote verification against OCR text -- OCR reads the corpus faithfully in aggregate (97.9% of the text layer's vocabulary). However, aggregate fidelity is the wrong test. Citation needs the exact character sequence, and measured at line grain against sheets where both columns exist, only **88.2% of corresponding OCR lines are character-exact**. The other 11.8% look like this:
 
 ```text
 text: 11/16" Single Groove Post (Clear)
@@ -80,7 +94,9 @@ Neither reads as damaged. One is a different valid spec, the other a zero silent
 
 Reading order compounds it. Vision emits text in spatial order, and adjacency between corresponding lines survives only 68–86% of the time, so a quote spanning two lines can splice content that is not contiguous on the sheet.
 
-`match` therefore verifies against `text` only. Note this cuts the other way on the mojibake sheets, where `text` is a cipher and `ocr_text` is the only readable version — but the answer there is still render-and-cite, not cite-the-OCR.
+Quote verification therefore happens against `text` only.
+
+Note this cuts the other way on the mojibake sheets, where `text` is a cipher and `ocr_text` is the only readable version — but the answer there is still render-and-cite, not cite-the-OCR.
 
 ### Pagination
 
@@ -112,7 +128,7 @@ When the same document has hits on both tiers, don't dedup; return both
 
 #### Detailed search design
 
-Today `search` returns one row per document with one snippet, and has no concept of a sheet. A term appearing 99 times and a term appearing once look identical, and FTS5 picks the window by its own rule: searching `coil`, the top hit is the 175-sheet Sonic manual and the snippet is a table-of-contents line. That is survivable today because `match` resolves it on the next rung. It stops being survivable with OCR, whose whole value is _which sheet do I render_.
+Today `search` returns one row per document with one snippet, and has no concept of a sheet. A term appearing 99 times and a term appearing once look identical, and FTS5 picks the window by its own rule: searching `coil`, the top hit is the 175-sheet Sonic manual and the snippet is a table-of-contents line. That is survivable today because `quote` resolves it on the next rung. It stops being survivable with OCR, whose whole value is _which sheet do I render_.
 
 So index at **segment** grain rather than document grain: a derived, rebuildable table holding each document's segments, with a separate FTS index per tier so BM25 never ranks the two against each other. `pages` stays the system-of-record; the segment table is a cache, never cited against.
 
@@ -138,7 +154,7 @@ page 141 (ocr): … Table 6-2 [COIL] POSITIONS … UPPER MAGNET … KNOCKER …
 
 **Best segments, never the first** — document order returns the parts list and the table of contents, which is the failure this fixes. The cap is on segments, not matches; a sheet matching repeatedly still contributes one snippet. Tier labeling rides the segment, so one document can show both tiers.
 
-This also keeps `search` FTS end-to-end. The alternative — document-level FTS plus the literal matcher for labeled snippets — breaks down because FTS ANDs tokens anywhere while the matcher needs a contiguous phrase, so a large share of multi-word hits yield zero spans. `match` stays the literal-span tool, which is its job.
+This also keeps `search` FTS end-to-end. The alternative — document-level FTS plus the literal matcher for labeled snippets — breaks down because FTS ANDs tokens anywhere while the matcher needs a contiguous phrase, so a large share of multi-word hits yield zero spans. `quote` stays the literal-span tool, which is its job.
 
 ### When OCR happens
 
@@ -162,25 +178,32 @@ Probing the outcome of every sheet individually — raster refused / Vision erro
 
 That makes per-sheet outcome recording cheap insurance rather than a correctness fix. Worth doing — it costs a few lines and nothing at query time, and it is what lets the coverage line on `search` vouch for its own number if a future document does fail mid-run — but it is not a blocker.
 
-### Match
-
-When the same sheet has hits on both tiers, dedup; don't return the OCR one.
-
 ### Staleness
 
 When content is re-fetched, we re-OCR. However, OCR is macOS-only. A row can be refetched on a host that can't OCR — new bytes, text re-extracted. Probably the way to do this is that `ocr_text` clears when `content_sha` changes, then (only on Macs) re-OCR.
 
 ## Document-scoped `search`
 
-We will also provide an option on `search` to scope it to a single document. This will be better than `match` for many scenarios:
+We will provide an option on `search` to scope it to a single document. This will be better than `quote` for many scenarios:
 
-- **Tokenized vs literal**. FTS ANDs tokens anywhere in a segment; match needs a contiguous phrase. That's the divergence I measured earlier — for "upper magnet" and "haggis closed", a large share of FTS hits yield zero literal spans. So scoped search finds relevant sheets that match structurally cannot, which today is a real hole: if you don't already know the exact wording, match gives you nothing.
-- **Ranked vs exhaustive**. Scoped search would rank sheets and cap. match returns every span in document order — 97 of them for coil on the Sonic manual. That's correct for citation work (you need to see them all, and document order keeps page numbers monotonic) and poor for "where should I look."
-- **Snippet vs verbatim**. match returns stored lines verbatim, which is why every hit verifies. FTS snippets are constructed with elisions and bracket markers — never citable, by design.
+- **Tokenized vs literal**. FTS ANDs tokens anywhere in a segment; `quote` needs a contiguous phrase. That's the divergence I measured earlier — for "upper magnet" and "haggis closed", a large share of FTS hits yield zero literal spans. So scoped search finds relevant sheets that `quote` structurally cannot, which today is a real hole: if you don't already know the exact wording, `quote` gives you nothing.
+- **Ranked vs exhaustive**. Scoped search would rank sheets and cap. `quote` returns every span in document order — 97 of them for coil on the Sonic manual. That's correct for citation work (you need to see them all, and document order keeps page numbers monotonic) and poor for "where should I look."
+- **Snippet vs verbatim**. `quote` returns stored lines verbatim, which is why every hit verifies. FTS snippets are constructed with elisions and bracket markers — never citable, by design.
 
 Document-scoped `search` would return more results (all results?) than the limited # per-document that global `search` does.
 
-Document `search` and `match` don't overlap so much as hand off. The ladder gains a rung: `search` the corpus → `search` one document → `match` for the span you'll actually quote. And `match`'s role narrows to what its new name says it is — producing citable text — rather than doubling as the find-things tool, which it was only ever adequate at.
+### Page-scoped `search`
+
+We've determined that outline/section is almost useless on a PDF. You mostly get Page 1...N. To actually find content in a document, you have to search. The scenario I'm thinking of is, say you find a promising table at page 45 that tells you you're in the right area, a comparison of models. Now you want to search for terms you hope to find around model comparison, in pages 40-50.
+
+Something like `--pages 40-50`. It would return results from both the text and OCR tiers.
+
+Cheap to build on the segment table — the filter is a `WHERE` on an indexed integer column, and prototyping it against the real index found no performance or ranking problem. Four things it needs:
+
+- **`--pages` requires a document scope.** A sheet range across documents is meaningless; make it a validation error rather than something silently applied to every hit.
+- **Filtering happens after ranking, and that is correct.** BM25's term statistics come from the whole index, so a term that is rare corpus-wide stays rare inside the range. Ordering among the surviving sheets is unaffected. Don't "fix" this by building an index per range.
+- **Out-of-range is not an error.** `--pages 40-500` on a 58-sheet document returns what exists.
+- **The sheet-vs-folio distinction bites hardest here**, because this is the one rung where a human types a page number rather than copying one out of search output. See [Page separator](#page-separator).
 
 ## Implementation notes
 
@@ -191,6 +214,14 @@ Traps and mechanics that cost real time to discover. None are visible from the A
 **Splitting on `\f` yields one more element than there are sheets.** poppler terminates _every_ page including the last, so `text.count("\f")` is the sheet count while `text.split("\f")` leaves a trailing empty string to discard. Getting this backwards turns every paginated document into an off-by-one and makes the sheet-count assertion fire on the whole corpus. Emit `ocr_text` the same way — a marker after every sheet, including the final one — so both columns split identically.
 
 **A blank sheet still contributes its marker.** Dropping it shifts every later sheet's ordinal, which is the one thing the markers promise. `web_pdftext._normalize` already does this deliberately; match it.
+
+### Segment addressing
+
+**Store the sheet ordinal as an integer column, not just the rendered address.** `page 41` does not compare numerically, and [page-scoped search](#page-scoped-search) needs a range filter.
+
+**Never label an unpaginated text layer `page 1`.** A PDF whose `text` holds no form feeds is not a one-page document — it is a document with no page information. Emitting a single segment addressed `page 1` silently mis-addresses every hit in it: the cached Jurassic Park manual has zero markers across 103 real sheets, so a hit on sheet 60 would report as page 1 and `--pages 1-5` would return the whole document. Emit one whole-document segment with a null ordinal instead, exactly as for a non-PDF. The pagination rule in [Pages in dark documents](#pages-in-dark-documents) decides which column supplies the ordinals; this is what the other column must do when it has none.
+
+**`max(page)` is not the sheet count.** Empty sheets contribute no segment, so a document whose last sheet is blank tops out below its true length — TAG's text tier ends at 59 of 60. Read sheet counts from the marker count, never from the segment table.
 
 ### Rasterizing with Quartz
 
