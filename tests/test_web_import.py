@@ -171,34 +171,51 @@ def test_supplied_text_form_feeds_become_line_breaks(cache, jpeg):
     assert _page(cache, FLYER_URL)["text"] == "page one\npage two\n\n\npage three"
 
 
-def test_ocr_text_is_recorded_as_ocr(cache, jpeg, monkeypatch):
+def test_ocr_text_lands_in_the_machine_read_tier(cache, jpeg, monkeypatch):
+    # An image imported without a transcription is findable, not citable: its
+    # OCR lands in ocr_text, and no citable layer is claimed.
     monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: "MACHINE READ THIS")
     _run(cache, jpeg)
     row = _page(cache, FLYER_URL)
-    assert row["text"] == "MACHINE READ THIS"
-    assert row["text_source"] == "ocr"
+    assert row["text"] is None
+    assert row["ocr_text"] == "MACHINE READ THIS"
+    assert row["text_source"] is None
 
 
 def test_supplied_text_wins_over_ocr(cache, jpeg, monkeypatch):
     # The reviewed transcription is authoritative — OCR is only ever a draft.
+    # The draft still rides along in the findable tier, so words the person
+    # didn't transcribe stay searchable.
     monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: "MEGATRONICS")
     _run(cache, jpeg, text="MECATRONICS")
     row = _page(cache, FLYER_URL)
     assert row["text"] == "MECATRONICS"
     assert row["text_source"] == "manual"
+    assert row["ocr_text"] == "MEGATRONICS"
 
 
-def test_supplied_text_can_declare_the_machine_that_read_it(cache, tmp_path, make_pdf):
-    # A scanned PDF has no text layer and no OCR path in its handler, so its
-    # text must be supplied — but it is machine output, and only `manual` says
-    # a person is answerable for the words.
+def test_machine_read_text_is_not_an_importable_label(cache, tmp_path, make_pdf):
+    # `ocr` retired as a text_source: machine-read words are never citable, so
+    # outside OCR can't be imported as a text layer any more — the OCR pass
+    # (web_pdfocr) reads a scanned PDF's sheets into ocr_text instead.
     path = tmp_path / "scan.pdf"
     path.write_bytes(make_pdf(title="Scan"))
     url = "https://www.ipdb.org/files/1343/scan.pdf"
-    _run(cache, path, url=url, text="1990 JANICE AVE", text_source="ocr")
+    with pytest.raises(web_import.ImportRefusedError, match="text-source"):
+        _run(cache, path, url=url, text="1990 JANICE AVE", text_source="ocr")
+
+
+def test_scanned_pdf_imports_without_text_for_the_ocr_pass(cache, tmp_path, make_pdf):
+    # A scanned PDF has no text layer and needs none to be worth importing:
+    # the blob lands, and web_pdfocr later reads its sheets into ocr_text.
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(make_pdf(title="Scan", text=""))
+    url = "https://www.ipdb.org/files/1343/scan.pdf"
+    _run(cache, path, url=url)
     row = _page(cache, url)
-    assert row["text"] == "1990 JANICE AVE"
-    assert row["text_source"] == "ocr"
+    assert row["text"] is None
+    assert row["ocr_text"] is None  # not yet — the pass fills it
+    assert row["content_type"] == "application/pdf"
 
 
 def test_declared_text_source_must_be_one_the_cache_knows(cache, jpeg):
@@ -210,7 +227,7 @@ def test_declared_text_source_needs_text_to_describe(cache, jpeg):
     # Without --text-file the handler's own extraction is stored, and its
     # provenance is a fact about the handler, not something to declare.
     with pytest.raises(web_import.ImportRefusedError, match="text-source"):
-        _run(cache, jpeg, text_source="ocr")
+        _run(cache, jpeg, text_source="manual")
 
 
 def test_imported_pdf_keeps_its_handler_text_source(cache, tmp_path, make_pdf):

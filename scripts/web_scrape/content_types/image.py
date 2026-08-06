@@ -12,12 +12,14 @@ what decides the blob extension (a PNG blob must not be stored as ``.jpg``) and
 the magic-byte signature, and nothing else differs. Adding TIFF or WebP later is
 another two-line subclass.
 
-Honest limits, both recorded on the row as ``text_source='ocr'``: OCR garbles
-stylized lettering (logo art on the Mecatronics flyer reads as junk tokens like
-"SAUTTL"), and it can merge a stray graphic into an adjacent line. Low-confidence
-lines are dropped by the backend, but a confident misreading is still possible —
-which is why an image imported as evidence should have its OCR draft reviewed
-against the picture before it is quoted.
+OCR'd words are findable, never citable: they land in ``ocr_text`` (the
+machine-read tier) with ``text`` and ``text_source`` NULL, because measured
+line-exactness against ground truth is ~88% — a wrong-but-plausible reading
+(``1/16"`` for ``11/16"``) would survive quote verification and land in the
+catalog. To cite an image, open the blob and read the words off the picture;
+the only way an image acquires a citable text layer is a human transcription
+through ``web_import.py`` (``text_source='manual'``), where a person is
+answerable for the words. See docs/plans/pdf_ocr/PdfOcr.md.
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ def _extract_image(raw: bytes, url: str) -> ExtractedMeta:
     except web_ocr.OcrFailedError as exc:
         print(f"WARNING: OCR failed for {url}: {exc}", file=sys.stderr)
         return ExtractedMeta(title=None, last_updated=None, text=None, unavailable=True)
-    return ExtractedMeta(title=None, last_updated=None, text=text)
+    return ExtractedMeta(title=None, last_updated=None, text=None, ocr_text=text)
 
 
 class _ImageHandler(ContentHandler):
@@ -66,9 +68,14 @@ class _ImageHandler(ContentHandler):
 
     Not renderable — a headless browser can't read a JPEG any better than we
     can; OCR is the only path to text, so a thin result never escalates.
+
+    ``text_source = None``: OCR is this type's entire reading and it lands in
+    ``ocr_text``, so nothing derives a citable layer and stamping a label would
+    assert otherwise. Images keep OCRing inline at fetch time — one image is
+    one Vision call, with no batch to defer.
     """
 
-    text_source = "ocr"
+    text_source: str | None = None
     renderable = False
 
     @override

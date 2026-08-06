@@ -28,18 +28,14 @@ under the address that serves that JPEG. Filing image bytes under a viewer page
 ``content_sha`` describe a resource that URL does not return — a quiet lie that
 survives into every citation.
 
-Text is mandatory: a page with no text is dropped from flippatch's
-``evidence_pages`` and can't be indexed or quoted, so importing one would be a
-no-op dressed as evidence. Supply it with ``--text-file`` (recorded as
-``text_source='manual'``, or what ``--text-source`` declares) or let the file's
-own handler extract it. A **scanned PDF** is the case that needs the override:
-it has no text layer for its handler to read, so its words have to come from OCR run
-outside this tool, and ``--text-source ocr`` keeps ``manual`` meaning what it
-says — a person is answerable for those words. For an image, prefer
-reviewing the OCR draft (``--dry-run``) against the picture and importing the
-corrected text: OCR is faithful to pixels but garbles stylized lettering, and a
-correction should be justified by something visible in the document, never by
-what the text is expected to say.
+Words are mandatory: a page nothing can find is a no-op dressed as evidence.
+They come citable or findable. Citable text arrives with ``--text-file``
+(recorded as ``text_source='manual'`` — a person is answerable for it) or from
+the file's own handler (a PDF's text layer). Findable-only text is machine-read:
+an image's OCR lands in ``ocr_text``, searchable but never quotable — to cite
+an image, read the words off the picture itself. A scanned PDF needs neither
+``--text-file`` nor outside OCR to become findable: import it and run the OCR
+pass (``web_pdfocr.py``), which reads its sheets into ``ocr_text``.
 """
 
 from __future__ import annotations
@@ -63,8 +59,10 @@ from content_types import HANDLERS, ContentHandler, handler_for, sniff
 # What ``--text-source`` may declare: every provenance a handler can produce,
 # plus ``manual``. Derived from the registry rather than spelled out, so a new
 # handler's label is accepted here the moment it exists — and a typo is not.
+# A handler that declares None derives no citable layer (its words are
+# machine-read, landing in ocr_text), so it contributes no importable label.
 TEXT_SOURCES: frozenset[str] = frozenset(
-    {handler.text_source for handler in HANDLERS} | {"manual"}
+    {handler.text_source for handler in HANDLERS if handler.text_source} | {"manual"}
 )
 
 # A date the importer will accept: exactly one unambiguous form. A date is
@@ -193,22 +191,24 @@ def import_one(
     """Import one hand-obtained file into the cache under ``url``.
 
     ``text`` is supplied text and always wins over what the file's handler
-    extracts; it lands on ``text_source='manual'`` unless ``text_source`` says
-    which machine read it instead. That override exists for the document a
-    handler cannot read at all — a scanned PDF has no text layer, so OCR run
-    outside this tool is the only way to give it words,
-    and calling that a transcription would put a person's name on a machine's
-    reading. ``title``/``date`` likewise override extracted values — for an
-    image both are otherwise null, since OCR'd words are not a title and an
-    EXIF timestamp is not the document's date.
+    extracts; it lands on ``text_source='manual'`` — a person is answerable for
+    it (``text_source`` can name another citable label where one applies). A
+    machine reading is never imported as citable text: an image's OCR lands in
+    ``ocr_text``, findable but not quotable, alongside whatever transcription
+    was supplied. ``title``/``date`` override extracted values — for an image
+    both are otherwise null, since OCR'd words are not a title and an EXIF
+    timestamp is not the document's date.
 
-    Raises ``ImportRefusedError`` (before writing anything) on an unusable URL or
-    date, an unrecognized file type, text that is blank, a ``text_source``
-    outside :data:`TEXT_SOURCES` or given without ``text``, or an already-cached
-    URL without ``force``. ``dry_run`` prints what would be stored and writes
-    nothing — the review step for an OCR draft; it accepts ``con=None`` so a
-    fresh checkout can preview an import without a database being created as a
-    side effect of inspecting one.
+    Raises ``ImportRefusedError`` (before writing anything) on an unusable URL
+    or date, an unrecognized file type, a supplied text file that is blank, a
+    ``text_source`` outside :data:`TEXT_SOURCES` or given without ``text``, an
+    already-cached URL without ``force``, or a document that would be neither
+    citable nor findable — no text, no OCR, and no deferred OCR pass coming (a
+    scanned PDF passes: ``web_pdfocr.py`` reads its sheets after import).
+    ``dry_run`` prints what would be stored and writes nothing — the review
+    step for an OCR draft; it accepts ``con=None`` so a fresh checkout can
+    preview an import without a database being created as a side effect of
+    inspecting one.
     """
     if date is not None:
         _check_date(date)
@@ -250,7 +250,7 @@ def import_one(
         # CLI's --text-file reader. Handler-extracted text is untouched: an
         # imported PDF's form feeds are the real page markers.
         page_text: str | None = text.replace("\f", "\n")
-        stored_source = text_source or "manual"
+        stored_source: str | None = text_source or "manual"
     else:
         page_text = meta.text
         stored_source = handler.text_source
@@ -280,22 +280,34 @@ def import_one(
         print(f"    blob would be {blob}")
         print(f"    title        {page_title or '(none)'}")
         print(f"    date         {last_updated or '(none)'}")
-        print(f"    text_source  {stored_source}")
+        print(f"    text_source  {stored_source or '(none — no citable layer)'}")
         if page_text and page_text.strip():
             print(f"    text ({len(page_text):,} chars) — review against the original:")
             print("\n".join(f"      {line}" for line in page_text.splitlines()))
+        elif meta.ocr_text and meta.ocr_text.strip():
+            print(
+                f"    ocr_text ({len(meta.ocr_text):,} chars) — machine-read, "
+                f"findable but not citable:"
+            )
+            print("\n".join(f"      {line}" for line in meta.ocr_text.splitlines()))
+        elif handler.deferred_ocr:
+            print(
+                "    text         (none) — no text layer; after import, "
+                "web_pdfocr.py reads the sheets into ocr_text"
+            )
         else:
             print(
-                "    text         (none) — no text, so nothing to index or quote; "
-                "supply --text-file"
+                "    text         (none) — no text, so nothing can find or "
+                "quote it; supply --text-file"
             )
         return
 
-    if not page_text or not page_text.strip():
+    citable = bool(page_text and page_text.strip())
+    findable = bool(meta.ocr_text and meta.ocr_text.strip())
+    if not citable and not findable and not handler.deferred_ocr:
         raise ImportRefusedError(
-            f"no text for {normalized}: an untranscribed page can't be indexed or "
-            f"quoted (it is dropped from flippatch's evidence_pages). Supply "
-            f"--text-file, or run --dry-run to see what extraction found."
+            f"no text for {normalized}: nothing could find or quote this page. "
+            f"Supply --text-file, or run --dry-run to see what extraction found."
         )
 
     # Only a real import reaches here, so the writable connection is required;
@@ -318,6 +330,10 @@ def import_one(
         http_status=None,
         content_type=handler.canonical_mime or None,
         text=page_text,
+        # The machine-read tier rides along whether or not a transcription was
+        # supplied: a reviewed manual text makes the row citable, the OCR keeps
+        # it findable by the words a person didn't happen to transcribe.
+        ocr_text=meta.ocr_text,
         rendered=False,
         text_source=stored_source,
         imported=True,
@@ -333,7 +349,8 @@ def import_one(
         imported=True,
     )
     state = "new" if existing is None else ("changed" if changed else "unchanged")
-    print(f"imported [{stored_source}] ({state}): {normalized}\n    {blob}")
+    label = stored_source or ("ocr_text only" if findable else "no text yet")
+    print(f"imported [{label}] ({state}): {normalized}\n    {blob}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -362,8 +379,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(TEXT_SOURCES),
         help=(
             "How the --text-file text was derived, when it isn't a human "
-            "transcription: 'ocr' for pixels a machine read (a scanned PDF, "
-            "whose handler finds no text layer to extract)."
+            "transcription (machine-read text is never citable and has no "
+            "label here — it belongs in ocr_text via the OCR pass)."
         ),
     )
     parser.add_argument("--title", help="Title for the page row.")

@@ -106,7 +106,7 @@ The division of labor survives the move intact, and is shorter than the PDF's �
 
 What it costs: `quote()` never answers for an image again, and the reviewed-draft workflow in [WebCache.md](../../WebCache.md)'s Images section — OCR it, check it against the picture, then cite it — becomes read-the-picture-and-cite, which is the instruction PDFs already get. A hand-typed transcription is untouched: it arrives through `web_import.py` as `manual`, lands in `text`, and stays citable because a person is answerable for it. That is now the only way an image acquires a citable text layer, and it is the right one.
 
-Two mechanical consequences. `ExtractedMeta` gains an `ocr_text` field so a handler can return machine-read words without claiming a text layer — the image handler returns `text=None, ocr_text=…`, and images keep OCRing inline at fetch time, since one image is one Vision call with no batch to defer. And the registry's `assert handler.text_source` becomes conditional, since a handler that writes only `ocr_text` declares none; `web_import.py` builds `TEXT_SOURCES` from that same attribute and must drop the empty one rather than offer it as an importable label.
+Three mechanical consequences. `ExtractedMeta` gains an `ocr_text` field so a handler can return machine-read words without claiming a text layer — the image handler returns `text=None, ocr_text=…`, and images keep OCRing inline at fetch time, since one image is one Vision call with no batch to defer. The registry's `assert handler.text_source` becomes conditional, since a handler that writes only `ocr_text` declares none; `web_import.py` builds `TEXT_SOURCES` from that same attribute and must drop the empty one rather than offer it as an importable label. And the thin check must learn the new shape: `_thin_probe` measures `body_text ?? text`, so an image row whose words now live in `ocr_text` would read as thin on every fetch and fire "OCR found little/no text in image" even when Vision read a full flyer — the probe falls back to `ocr_text` when `text` is None and the handler produced one, so the warning keeps meaning what it says.
 
 #### The Jurassic Park row
 
@@ -133,6 +133,8 @@ We'd separate sheets with `\f`, just like `pages.text`.
 A fully dark document has page markers in `ocr_text` and none in `text`, making the two columns disagree about whether the document is paginated. `outline`/`section` need a rule for which column defines `page N`. The rule: `text` is primary. It comes from `text` when it contains markers, and only otherwise `ocr_text`.
 
 Incidentally, this gives those 13 dark documents a page map they don't have today.
+
+Which means `outline` and `section` start answering for documents that had nothing to say, and what they hand back is ink. **They label it `(ocr)`** — in the CLI output, and as a tier on the Python return, the same word and the same meaning `search` uses: machine-read, verify by rendering the sheet. A function whose contract is verbatim citable text must not quietly start returning something else, and the tier is the whole of the difference, so it rides the text rather than living only in the rung that found it. `_doc_of` takes the tier as a parameter to make this possible — it reads `rec["text"]` unconditionally today.
 
 #### Pages in non-dark documents
 
@@ -193,7 +195,8 @@ Here's the ways that OCR can get kicked off:
 
 1. We show a coverage line on `search` when the corpus has un-OCR'd PDFs, so a thin result set says so rather than implying completeness.
 2. We provide a manual command that consumers can run in ⬆️ that case. Default is to run against all outstanding docs, but there's also a way to run against 1 doc, which I think we'll use for testing more than anything else.
-3. `fetch` spawns detached process, if that is a simple thing to build
+
+A detached OCR process spawned by `fetch` was considered and rejected for v1: two runs racing on the same SQLite, partial writes, and no failure surface are exactly the machinery the retry section below declines to build, and the coverage line plus the manual command already close the loop. It can be added later without rework.
 
 #### Failed OCRs
 
@@ -207,11 +210,13 @@ For v1 we accept perpetual retry. YAGNI.
 
 Probing the outcome of every sheet individually — raster refused / Vision errored / nothing legible — found **no swallowed failures**. Elvis (185 sheets), Lord of the Rings (211) and the Centaur schematics (15) all came back clean despite logging those errors; the errors are noisy but fully recovered. The only empty sheets in the sample are Time Machine's p10, p34 and p78, which are the three genuinely blank pages `web_pdftext.py` already documents. So the measured 0.4% blank rate is real blankness, not hidden loss.
 
-That makes per-sheet outcome recording cheap insurance rather than a correctness fix. Worth doing — it costs a few lines and nothing at query time, and it is what lets the coverage line on `search` vouch for its own number if a future document does fail mid-run — but it is not a blocker.
+That makes per-sheet outcome recording insurance against a failure measured at zero, so **v1 does not record it**. The coverage line never needed it — un-OCR'd is `ocr_text IS NULL`, a question about the document — and a tally of sheets attempted against sheets that yielded text would today read "all clean" for all 58 documents.
+
+What v1 does keep is the distinction _in flight_. The three outcomes — raster refused, Vision errored, nothing legible — all leave the same empty run between two form feeds, so a sheet that failed and a sheet that is blank are indistinguishable once written. `web_ocr` already tells the last two apart for a single image, and the sheet loop must preserve that (see [Failure signals](#failure-signals)) and warn on stderr when a sheet errors. That way a mid-run failure is visible while the run is happening; what you give up is asking the row about it afterwards.
 
 ### Staleness
 
-When content is re-fetched, we re-OCR. However, OCR is macOS-only. A row can be refetched on a host that can't OCR — new bytes, text re-extracted. Probably the way to do this is that `ocr_text` clears when `content_sha` changes, then (only on Macs) re-OCR.
+When content is re-fetched, we re-OCR. However, OCR is macOS-only. A row can be refetched on a host that can't OCR — new bytes, text re-extracted. The mechanism is in `upsert_page`, whose `ON CONFLICT DO UPDATE` rewrites every column: it gains an `ocr_text` parameter. The image path supplies it inline. When a caller passes none (the PDF path — the fetch never OCRs a PDF), the SQL keeps the stored value if `content_sha` is unchanged and NULLs it when the sha changes — so a refetch on a host that can't OCR never strands stale OCR against new bytes, and an unchanged refetch never discards a Mac's work. The `unavailable`/`keep_manual` preserve path in `web_fetch` carries `ocr_text` through for the same reason. A cleared row rejoins the `ocr_text IS NULL` gap, and the next OCR pass on a Mac re-reads it.
 
 ## Implementation notes
 

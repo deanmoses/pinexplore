@@ -96,10 +96,19 @@ def _thin_probe(meta: ExtractedMeta) -> str | None:
     because crawlers don't run JS, so the assembled ``text`` (metadata block +
     body) reads fat where the page is empty. ``is None`` — not truthiness — an
     empty-string body is a real, thin answer that must not fall through to the
-    fat metadata block. Every other handler leaves ``body_text`` None and is
-    measured on ``text``, unchanged.
+    fat metadata block.
+
+    A handler whose words are machine-read leaves ``text`` None and fills
+    ``ocr_text`` (the image handlers), so the probe falls back to it: an image
+    Vision read a full flyer off is not thin, and measuring only ``text`` would
+    fire "OCR found little/no text" on every image ever fetched. Every other
+    handler fills neither extra field and is measured on ``text``, unchanged.
     """
-    return meta.body_text if meta.body_text is not None else meta.text
+    if meta.body_text is not None:
+        return meta.body_text
+    if meta.text is None and meta.ocr_text is not None:
+        return meta.ocr_text
+    return meta.text
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +173,12 @@ def _resolve_text(
                     else meta.last_updated or existing["last_updated"]
                 ),
                 text=existing["text"],
+                # Carry the stored OCR too, or an unavailable image refetch
+                # would read as thin (both meta fields empty) while the row it
+                # keeps holds a full reading. A fresh reading, when this run
+                # made one, still wins — the bytes are identical, so it can
+                # only be the same or newer Vision's.
+                ocr_text=meta.ocr_text or existing.get("ocr_text"),
                 unavailable=False,
                 # The fresh extraction's body was just discarded with the rest
                 # of it; None makes the thin check measure the stored text —
@@ -392,6 +407,10 @@ def fetch_one(
         http_status=resp.status,
         content_type=resp.content_type,
         text=meta.text,
+        # None for most types: a fetch never OCRs a PDF (that is web_pdfocr's
+        # separate pass), and upsert_page keeps or clears the stored tier by
+        # whether the bytes changed. The image handlers supply a value.
+        ocr_text=meta.ocr_text,
         rendered=rendered,
         text_source=text_source,
         imported=False,
@@ -507,6 +526,7 @@ def _fetch_video_one(
         http_status=200,
         content_type="text/vtt",
         text=meta.text,
+        ocr_text=meta.ocr_text,
         rendered=False,
         text_source=text_source,
         imported=False,

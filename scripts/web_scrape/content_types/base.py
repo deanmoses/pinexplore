@@ -25,6 +25,12 @@ class ExtractedMeta(NamedTuple):
     title: str | None
     last_updated: str | None
     text: str | None
+    # Machine-read (OCR) words, kept apart from ``text`` because they are
+    # findable but never citable: quotes verify against ``text`` alone (see
+    # docs/plans/pdf_ocr/PdfOcr.md). A handler whose content is pixels (an
+    # image) returns its OCR here with ``text=None`` — it read the document
+    # without claiming a citable text layer.
+    ocr_text: str | None = None
     # True when this run produced no *result* — the backend the type needs is
     # missing (image OCR on a non-macOS host) or it ran and failed (Vision
     # timing out, running out of memory, refusing the file). Distinct from
@@ -66,15 +72,16 @@ class ContentHandler:
     # verify (a PDF as ``.pdf``, not mislabeled ``.html``). No default — each type
     # states its own, or the registry rejects it. Required.
     extension: str = ""
-    # How this handler derives its text, stored on the page row as
+    # How this handler derives its *citable* text, stored on the page row as
     # ``text_source``. Not a restatement of the content type: it answers "how
-    # lossy is this text?", which is the question a patch author weighs before
-    # quoting. Machine transcription (``ocr``, ``vtt``) is materially less
-    # reliable than reading a document's own text layer (``html``, ``pdf``), and
-    # a human-typed transcription (``manual``, set by the importer rather than by
-    # a handler) is a different thing again. Required — the registry rejects a
-    # handler that leaves it blank.
-    text_source: str = ""
+    # was this text derived?" — a document's own text layer (``html``, ``pdf``),
+    # a caption track (``vtt``), or a human-typed transcription (``manual``, set
+    # by the importer rather than by a handler). ``None`` — deliberate, not a
+    # default — declares that this handler derives no citable layer at all: its
+    # words are machine-read and land in ``ocr_text`` (the image handlers).
+    # Required — the registry rejects a handler that leaves it at the unset
+    # sentinel ``""``, so forgetting it is still an import-time error.
+    text_source: str | None = ""
     # Whether a thin extraction should escalate to a headless render. HTML yes (an
     # SPA skeleton); a binary document like a PDF no — a browser can't read it
     # either (that needs OCR, out of scope).
@@ -85,6 +92,11 @@ class ContentHandler:
     # backend moves under us (Vision ships with the OS), so a bulk re-run would
     # churn reviewed evidence with no extractor change behind it.
     backfillable: bool = False
+    # Whether a later OCR pass (``web_pdfocr``) reads this type's stored blob
+    # into ``ocr_text``. True for a PDF: a scanned one extracts no text at
+    # fetch/import time yet still becomes findable once the pass runs, which is
+    # why the importer's words-are-mandatory gate lets such a document through.
+    deferred_ocr: bool = False
     # Largest response body this type may buffer, or None for the transport's
     # default. "Too big" is a fact about the format: a 15MB scanned manual is an
     # ordinary document, a 15MB HTML page is a bug.

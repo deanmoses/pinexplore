@@ -25,9 +25,12 @@ live on disk rather than in SQLite to keep the DB lean and the FTS index fast.
 Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
     search(term)          FTS5 BM25-ranked pages, each with its match count and
-                          how many sections it matched in. Units AND together
-                          and a double-quoted run is one phrase, so
-                          '"upper magnet" knocker' is phrase-and-word
+                          how many sections it matched in — per tier: `text`
+                          (the citable layer) and `ocr` (machine-read sheet
+                          images; findable, verified by rendering the sheet,
+                          never quoted). Units AND together and a double-quoted
+                          run is one phrase, so '"upper magnet" knocker' is
+                          phrase-and-word
     search_sections(url, term)
                           that document's matching sections, document order,
                           each with its count — where in a long document the
@@ -102,29 +105,41 @@ class PageRow(TypedDict):
     http_status: int | None
     content_type: str | None
     text: str | None
+    # Machine-read (OCR) text for the row's sheet/pixel content — the findability
+    # tier. Never citable: quotes verify against `text` only (see PdfOcr.md).
+    ocr_text: str | None
     rendered: int | None  # 1 if the blob is a headless-browser render, else 0/null
-    text_source: str | None  # how `text` was derived: html|pdf|vtt|ocr|manual
+    text_source: str | None  # how `text` was derived: html|pdf|vtt|manual
     imported: int | None  # 1 if a human handed these bytes over, else 0/null
 
 
 class SearchHit(TypedDict):
-    """One FTS5 search result row from ``search()`` — the global scope."""
+    """One document in ``search()``'s ranking — the global scope.
+
+    One row per document, both tiers presented together: the asymmetry between
+    a document's two counts (``95 (text) · 12 (ocr)``) is a triage signal that
+    two rows thirty ranks apart could never carry. Ranked by its better tier.
+    """
 
     url: NormalizedUrl
     title: str | None
     last_updated: str | None
     content_type: str | None  # what kind of document the hit is
-    text_source: str | None  # how the hit's text was derived (html|pdf|vtt|ocr|manual)
-    tier: str  # which text layer the counts describe; see _TEXT_TIER
-    snippet: str | None  # None on a row with no text to snippet
-    # Matched phrases plus matched loose words, and how many sections they fall
-    # in. None when the count could not be taken (see MarkerCollisionError).
+    text_source: str | None  # how the citable text was derived (html|pdf|vtt|manual)
+    snippet: str | None  # None on a row with nothing to snippet
+    snippet_tier: str  # which tier the snippet shows; "ocr" text is not citable
+    # Per tier: matched phrases plus matched loose words, and how many sections
+    # they fall in. None when the count could not be taken (a marker collision,
+    # see MarkerCollisionError); 0 when the tier exists but holds no match.
     matches: int | None
     sections: int | None
-    # False when the row holds no text at all. Told apart from a document whose
-    # text simply doesn't contain the term, which also counts 0 — see
+    ocr_matches: int | None
+    ocr_sections: int | None
+    # False when the row holds no text in that layer at all. Told apart from a
+    # layer that simply doesn't contain the term, which also counts 0 — see
     # ``_match_label`` for why the two must not print alike.
     has_text: bool
+    has_ocr: bool
 
 
 # Query params that are tracking noise, never content-bearing. Stripped on
@@ -256,8 +271,9 @@ CREATE TABLE IF NOT EXISTS pages (
   http_status      INTEGER,
   content_type     TEXT,               -- canonical MIME; the blob's extension derives from it
   text             TEXT,               -- extracted readable text (current version)
+  ocr_text         TEXT,               -- machine-read (OCR) text; findable, never citable
   rendered         INTEGER,            -- 1 if the blob is a headless-browser render
-  text_source      TEXT,               -- how `text` was derived: html|pdf|vtt|ocr|manual
+  text_source      TEXT,               -- how `text` was derived: html|pdf|vtt|manual
   imported         INTEGER             -- 1 if a human handed these bytes over
 );
 
@@ -293,6 +309,43 @@ CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
   VALUES ('delete', old.rowid, old.url, old.title, old.text);
   INSERT INTO pages_fts(rowid, url, title, text)
   VALUES (new.rowid, new.url, new.title, new.text);
+END;
+
+-- The OCR tier's own index — a second external-content table over the same
+-- rowid, NOT an ocr_text column on pages_fts: FTS5 normalizes bm25 by a row's
+-- total token count across every column, so a shared table would penalize a
+-- document's *text*-tier rank for having been OCR'd even at weight zero. Two
+-- tables give two independent bm25 spaces (see docs/plans/pdf_ocr/PdfOcr.md).
+-- ocr_text alone — url/title stay pages_fts's, or an address token would match
+-- a document once per tier.
+CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(
+  ocr_text, content='pages', content_rowid='rowid'
+);
+
+-- Guarded, unlike the pages_fts triggers above: FTS5's external-content
+-- 'delete' command corrupts the index ("database disk image is malformed")
+-- when issued for a rowid it never indexed, and most pages rows have no
+-- ocr_text — including every row written before this table existed. The
+-- guards keep the index holding exactly the rows with a non-NULL ocr_text,
+-- so a delete can only ever name a row that is in it. (pages_fts needs no
+-- guard: url is NOT NULL, so every row is indexed.) Deliberate side effect:
+-- the tier's bm25 statistics describe only documents that actually have OCR,
+-- instead of an average dragged to near zero by hundreds of empty rows. The
+-- cost of the partial mirror is that FTS5's own 'rebuild'/'integrity-check'
+-- commands assume a full one and must never be pointed at this table.
+CREATE TRIGGER IF NOT EXISTS ocr_ai AFTER INSERT ON pages BEGIN
+  INSERT INTO ocr_fts(rowid, ocr_text)
+  SELECT new.rowid, new.ocr_text WHERE new.ocr_text IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_ad AFTER DELETE ON pages BEGIN
+  INSERT INTO ocr_fts(ocr_fts, rowid, ocr_text)
+  SELECT 'delete', old.rowid, old.ocr_text WHERE old.ocr_text IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_au AFTER UPDATE ON pages BEGIN
+  INSERT INTO ocr_fts(ocr_fts, rowid, ocr_text)
+  SELECT 'delete', old.rowid, old.ocr_text WHERE old.ocr_text IS NOT NULL;
+  INSERT INTO ocr_fts(rowid, ocr_text)
+  SELECT new.rowid, new.ocr_text WHERE new.ocr_text IS NOT NULL;
 END;
 """
 
@@ -332,12 +385,30 @@ def init_schema(con: sqlite3.Connection) -> None:
     fetches_cols = {
         r[0] for r in con.execute("SELECT name FROM pragma_table_info('fetches')")
     }
+    # A pre-ocr_text cache may hold rows whose `text` is machine-read (labelled
+    # text_source='ocr'); moving that text to `ocr_text` below NULLs a text
+    # column on the system-of-record, so it counts as destructive too. The
+    # existence check needs the column to exist, hence the guard.
+    legacy_ocr_rows = "text_source" in pages_cols and bool(
+        con.execute(
+            "SELECT EXISTS(SELECT 1 FROM pages WHERE text_source = 'ocr')"
+        ).fetchone()[0]
+    )
     # One safety copy per run, taken before any migration touches the file and
-    # only when a destructive step (a column drop) is actually pending — never
-    # on a routine open. The file is consistent here: `executescript` committed
-    # and nothing below has run yet.
-    if "html_file" in pages_cols or "text_sha" in fetches_cols:
+    # only when a destructive step (a column drop, the ocr move) is actually
+    # pending — never on a routine open. The file is consistent here:
+    # `executescript` committed and nothing below has run yet.
+    if "html_file" in pages_cols or "text_sha" in fetches_cols or legacy_ocr_rows:
         _backup_before_destructive_migration()
+    # `ocr_text` arrived with PDF OCR (docs/plans/pdf_ocr/PdfOcr.md): the
+    # machine-read tier, stored apart from `text` because quotes verify against
+    # `text` alone and OCR is not character-exact enough to cite. First among
+    # the migrations because the ocr_* triggers _SCHEMA just created reference
+    # the column, and SQLite re-validates every trigger on a table during an
+    # ALTER ... DROP COLUMN — so on a legacy cache the drops below would fail
+    # with "no such column: new.ocr_text" until this has run.
+    if "ocr_text" not in pages_cols:
+        con.execute("ALTER TABLE pages ADD COLUMN ocr_text TEXT")
     # `rendered` was added with the headless-render fallback; ALTER it onto caches
     # created before it (a fresh DB already has it from _SCHEMA — guard skips it).
     if "rendered" not in pages_cols:
@@ -376,6 +447,18 @@ def init_schema(con: sqlite3.Connection) -> None:
     # a mid-migration state (the filename is second-resolution).
     if "text_sha" in fetches_cols:
         con.execute("ALTER TABLE fetches DROP COLUMN text_sha")
+    # With `ocr_text` in place, `text_source='ocr'` retires: machine-read words
+    # belong in `ocr_text` whatever produced them, and `text_source` goes back
+    # to answering one question — how the *citable* layer was derived. Moving
+    # rather than clearing, so a host that cannot OCR loses nothing: the old
+    # reading stands as the row's OCR tier until a Mac replaces it. Idempotent
+    # by construction (once run, nothing matches); the ocr_au/pages_au triggers
+    # keep both FTS indexes in step with the move.
+    if legacy_ocr_rows:
+        con.execute(
+            "UPDATE pages SET ocr_text = text, text = NULL, text_source = NULL "
+            "WHERE text_source = 'ocr'"
+        )
     con.commit()
 
 
@@ -396,6 +479,7 @@ def upsert_page(
     http_status: int | None = None,
     content_type: str | None = None,
     text: str | None = None,
+    ocr_text: str | None = None,
     rendered: bool | None = None,
     text_source: str | None = None,
     imported: bool | None = None,
@@ -407,20 +491,27 @@ def upsert_page(
     ``last_fetched_at`` while preserving ``first_fetched_at``.
 
     ``text_source`` records how ``text`` was derived (``html``/``pdf``/``vtt``
-    from the handler that extracted it, ``ocr`` for a machine-read image,
-    ``manual`` for a human transcription), so a consumer can weigh a quote by
-    how lossy its extraction path was.
+    from the handler that extracted it, ``manual`` for a human transcription),
+    so a consumer can weigh a quote by how lossy its extraction path was.
+
+    ``ocr_text`` is the machine-read tier and follows a different rule, because
+    most writers have no opinion about it (PDF OCR is a separate macOS-only
+    pass, never part of a fetch): a supplied value is stored, and ``None``
+    means *keep the stored value while it still describes these bytes* — kept
+    when ``content_sha`` is unchanged, cleared when the bytes changed. So a
+    refetch on a host that can't OCR never strands stale OCR against new
+    bytes, and an unchanged refetch never discards an OCR pass's work.
     """
     con.execute(
         """
         INSERT INTO pages (
           url, raw_url, content_sha, first_fetched_at, last_fetched_at,
-          last_updated, title, http_status, content_type, text, rendered,
-          text_source, imported
+          last_updated, title, http_status, content_type, text, ocr_text,
+          rendered, text_source, imported
         ) VALUES (
           :url, :raw_url, :content_sha, :fetched_at, :fetched_at,
           :last_updated, :title, :http_status, :content_type, :text,
-          :rendered, :text_source, :imported
+          :ocr_text, :rendered, :text_source, :imported
         )
         ON CONFLICT(url) DO UPDATE SET
           raw_url       = excluded.raw_url,
@@ -431,6 +522,11 @@ def upsert_page(
           http_status   = excluded.http_status,
           content_type  = excluded.content_type,
           text          = excluded.text,
+          ocr_text      = CASE
+            WHEN excluded.ocr_text IS NOT NULL THEN excluded.ocr_text
+            WHEN pages.content_sha = excluded.content_sha THEN pages.ocr_text
+            ELSE NULL
+          END,
           rendered      = excluded.rendered,
           text_source   = excluded.text_source,
           imported      = excluded.imported
@@ -445,6 +541,7 @@ def upsert_page(
             "http_status": http_status,
             "content_type": content_type,
             "text": text,
+            "ocr_text": ocr_text,
             "rendered": None if rendered is None else int(rendered),
             "text_source": text_source,
             "imported": None if imported is None else int(imported),
@@ -782,6 +879,21 @@ class OutlineEntry(TypedDict):
     heading: str
     chars: int
     count: int  # how many blocks this name opens (>1 on a repeated heading)
+    # Which layer the row maps: "text" (citable), or "ocr" on a dark document
+    # whose only page map is machine-read — verify by rendering the sheet.
+    tier: str
+
+
+class SectionBlock(TypedDict):
+    """One block ``section()`` returned, and which layer it came from.
+
+    The tier rides the text rather than living only in the rung that found it:
+    a function whose contract is verbatim citable text must not quietly start
+    returning machine-read ink, and the tier is the whole of the difference.
+    """
+
+    text: str
+    tier: str  # "text" (citable) or "ocr" (render the sheet to cite)
 
 
 class QuoteHit(TypedDict):
@@ -901,10 +1013,33 @@ def _page_block(doc: _Doc, n: int) -> str | None:
     return "\n".join(doc.lines[start:end]).strip()
 
 
-def _doc_of(rec: PageRow) -> _Doc:
+def _doc_of(rec: PageRow, tier: str = "text") -> _Doc:
     """A row's stored text parsed — the one place the ``assembled`` gate is
-    derived from ``text_source``, so the CLI can't disagree with the library."""
+    derived from ``text_source``, so the CLI can't disagree with the library.
+
+    ``tier`` picks the column: ``text`` (the default everywhere outside the
+    search scopes) or ``ocr`` for the machine-read layer, which is never
+    assembled — no extractor writes frontmatter into it."""
+    if tier == _OCR_TIER:
+        return _parse_doc(rec.get("ocr_text") or "", assembled=False)
     return _parse_doc(rec["text"] or "", assembled=rec["text_source"] == "html")
+
+
+def _page_doc(rec: PageRow) -> tuple[_Doc, str]:
+    """The parsed column that defines ``page N`` for this row, and its tier.
+
+    ``text`` is primary: its markers are the page map when it has any, and only
+    otherwise ``ocr_text``'s — which is what gives a fully dark document (no
+    text layer, OCR'd sheets) a page map at all. Falls back to the text parse
+    when neither column is paginated, so callers can test ``page_starts``
+    without caring which absence they got."""
+    doc = _doc_of(rec)
+    if doc.page_starts:
+        return doc, _TEXT_TIER
+    ocr_doc = _doc_of(rec, _OCR_TIER)
+    if ocr_doc.page_starts:
+        return ocr_doc, _OCR_TIER
+    return doc, _TEXT_TIER
 
 
 def _heading_block(doc: _Doc, k: int) -> str:
@@ -1236,10 +1371,31 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     time — the 206KB Houdini manual against a schema, sheet by sheet, instead
     of one whole-document read. It is a cruder division than headings (a
     credits list can straddle a sheet), and it is the only one available.
+
+    **A dark document is mapped by its OCR pages.** A row with no text layer
+    but an OCR'd blob answers with the machine-read page map, every row
+    ``tier='ocr'`` — what the sheets hold is ink, verified by rendering, but
+    where the sheets are is a fact the map can state.
     """
     rec = get(url, con=con)
-    if not rec or not rec.get("text"):
+    if not rec:
         return []
+    if not rec.get("text"):
+        # No citable layer at all: the OCR page map, or nothing. Text stays
+        # primary — a document with any stored text is mapped from it below.
+        ocr_doc = _doc_of(rec, _OCR_TIER)
+        if not ocr_doc.page_starts:
+            return []
+        return [
+            OutlineEntry(
+                level=0,
+                heading=f"page {n}",
+                chars=len(_page_block(ocr_doc, n) or ""),
+                count=1,
+                tier=_OCR_TIER,
+            )
+            for n in range(1, len(ocr_doc.page_starts) + 1)
+        ]
     doc = _doc_of(rec)
     if doc.page_starts:
         return [
@@ -1248,6 +1404,7 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
                 heading=f"page {n}",
                 chars=len(_page_block(doc, n) or ""),
                 count=1,
+                tier=_TEXT_TIER,
             )
             for n in range(1, len(doc.page_starts) + 1)
         ]
@@ -1255,11 +1412,17 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     meta_block, body_block = _metadata_block(doc), _body_block(doc)
     if meta_block is not None:
         entries.append(
-            OutlineEntry(level=0, heading="metadata", chars=len(meta_block), count=1)
+            OutlineEntry(
+                level=0, heading="metadata", chars=len(meta_block), count=1,
+                tier=_TEXT_TIER,
+            )
         )
     if body_block is not None:
         entries.append(
-            OutlineEntry(level=0, heading="body", chars=len(body_block), count=1)
+            OutlineEntry(
+                level=0, heading="body", chars=len(body_block), count=1,
+                tier=_TEXT_TIER,
+            )
         )
     # Collapse repeats of a name in the same place in the tree, held at first
     # appearance so the tree still reads top-down. Popping the closed ancestors
@@ -1283,12 +1446,16 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
             continue
         seen[path] = len(entries)
         entries.append(
-            OutlineEntry(level=h.level, heading=h.text, chars=chars, count=1)
+            OutlineEntry(
+                level=h.level, heading=h.text, chars=chars, count=1, tier=_TEXT_TIER
+            )
         )
     return entries
 
 
-def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> list[str]:
+def section(
+    url: str, heading: str, con: sqlite3.Connection | None = None
+) -> list[SectionBlock]:
     """The block(s) under a heading: from its line to the next heading at the
     same or a higher level, heading line included — so a session that navigated
     here can cite "in the <heading> section" for free. Case-insensitive exact
@@ -1296,6 +1463,8 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
     block is returned — ambiguity should surface, not silently pick one. On an
     assembled page two pseudo-sections are addressable too: ``"metadata"`` (the
     frontmatter's ``key: value`` lines) and ``"body"`` (everything after it).
+    Each block carries its ``tier``: ``text`` for everything above, ``ocr``
+    only on the dark-document page path below.
 
     On a paginated document ``"page <N>"`` names one PDF sheet — the name
     ``outline()`` prints and the axis ``quote`` reports, so walking a manual is
@@ -1315,33 +1484,44 @@ def section(url: str, heading: str, con: sqlite3.Connection | None = None) -> li
     headings on a PDF, which is what keeps a ``quote`` hit's ``[label]``
     resolvable here.
 
+    **A dark document answers ``page <N>`` from its OCR page map**, each block
+    ``tier='ocr'``: what comes back is machine-read ink, verified by rendering
+    the sheet, never quoted. Text stays primary — the OCR map defines the page
+    axis only when the text layer has no markers of its own.
+
     A sheet with no extracted text comes back ``[]``, like a name that is
     absent — the return is blocks of text, and such a sheet has none. The two
     are told apart by ``_section_miss_hint``, which is where every other reason
     for an empty result is already explained, and by ``outline()``, which lists
     such a sheet as a row with 0 chars."""
     rec = get(url, con=con)
-    if not rec or not rec.get("text"):
+    if not rec:
         return []
-    doc = _doc_of(rec)
     target = heading.strip().casefold()
     page_match = _PAGE_NAME.match(target)
-    if page_match is not None and doc.page_starts:
+    if page_match is not None:
         # Truthiness, not `is not None`: an out-of-range sheet and one that
         # yielded no text both give no block, and neither belongs in a list of
-        # text blocks. On an *unpaginated* document `page 2` reserves nothing
-        # and falls through, so a page with a heading by that name still
-        # answers to it.
-        page_block = _page_block(doc, int(page_match.group(1)))
-        return [page_block] if page_block else []
-    blocks: list[str] = []
+        # text blocks. On a document where *neither* column is paginated,
+        # `page 2` reserves nothing and falls through, so a page with a
+        # heading by that name still answers to it.
+        page_doc, page_tier = _page_doc(rec)
+        if page_doc.page_starts:
+            page_block = _page_block(page_doc, int(page_match.group(1)))
+            return (
+                [SectionBlock(text=page_block, tier=page_tier)] if page_block else []
+            )
+    if not rec.get("text"):
+        return []
+    doc = _doc_of(rec)
+    blocks: list[SectionBlock] = []
     pseudo = {"metadata": _metadata_block, "body": _body_block}.get(target)
     if pseudo is not None:
         block = pseudo(doc)
         if block is not None:
-            blocks.append(block)
+            blocks.append(SectionBlock(text=block, tier=_TEXT_TIER))
     blocks.extend(
-        _heading_block(doc, k)
+        SectionBlock(text=_heading_block(doc, k), tier=_TEXT_TIER)
         for k, h in enumerate(doc.headings)
         if h.text.casefold() == target
     )
@@ -1362,9 +1542,17 @@ _MARK_CLOSE = "\ue001"
 if len(_MARK_OPEN) != 1 or len(_MARK_CLOSE) != 1:  # pragma: no cover - import guard
     raise AssertionError("highlight markers must be exactly one character each")
 
-# Which text layer the counts describe. PDF OCR will add "ocr" as a second
-# value, so results carry the field now rather than growing one later.
+# Which text layer a hit's counts and windows describe. `text` is the citable
+# layer quotes verify against; `ocr` is machine-read ink — findable, verified
+# by rendering the sheet, never by quoting. The tier says where the words came
+# from, not which reading is more accurate: on the mojibake manuals the text
+# layer is a cipher and the OCR is the faithful reading.
 _TEXT_TIER = "text"
+_OCR_TIER = "ocr"
+
+# The pages column each tier reads. The one mapping, so the roundtrip check,
+# the document parse, and the FTS joins cannot disagree about what a tier is.
+_TIER_COLUMN = {_TEXT_TIER: "text", _OCR_TIER: "ocr_text"}
 
 # Shared by the CLI and the library so a scripted read and a typed one agree.
 _DEFAULT_SURROUNDING_WORDS = 30
@@ -1440,14 +1628,17 @@ class _MatchSpan(NamedTuple):
     last: int
 
 
-def _match_spans(rec: PageRow, highlighted: str) -> list[_MatchSpan]:
-    """Every match's line extent in a row's highlighted text column.
+def _match_spans(
+    rec: PageRow, highlighted: str, tier: str = _TEXT_TIER
+) -> list[_MatchSpan]:
+    """Every match's line extent in a row's highlighted tier column.
 
     ``highlight()`` inserts markers instead of eliding like ``snippet()``, so
     line i here is line i of the stored text — which is what lets a match be
-    placed by line index alone. The roundtrip check proves that per document."""
+    placed by line index alone. The roundtrip check proves that per document,
+    against the tier's own column."""
     stripped = highlighted.replace(_MARK_OPEN, "").replace(_MARK_CLOSE, "")
-    if stripped != (rec["text"] or ""):
+    if stripped != (rec.get(_TIER_COLUMN[tier]) or ""):
         raise MarkerCollisionError(rec["url"])
     opens: list[int] = []
     closes: list[int] = []
@@ -1493,52 +1684,154 @@ def _matched_regions(
     return found
 
 
+# One tier's scoped highlight query: the same index the global scope ranks,
+# filtered to one document, so all scopes count a term identically.
+_SCOPED_SQL = {
+    _TEXT_TIER: """
+        SELECT p.*, highlight(pages_fts, 2, ?, ?) AS hl
+        FROM pages_fts
+        JOIN pages p ON p.rowid = pages_fts.rowid
+        WHERE pages_fts MATCH ? AND p.url = ?
+    """,
+    _OCR_TIER: """
+        SELECT p.*, highlight(ocr_fts, 0, ?, ?) AS hl
+        FROM ocr_fts
+        JOIN pages p ON p.rowid = ocr_fts.rowid
+        WHERE ocr_fts MATCH ? AND p.url = ?
+    """,
+}
+
+
 def _scoped(
     url: str, term: str, con: sqlite3.Connection | None = None
-) -> tuple[PageRow, list[_MatchSpan]] | None:
-    """One document's row and its match spans, or None if it doesn't match.
+) -> tuple[PageRow, dict[str, list[_MatchSpan]]] | None:
+    """One document's row and its match spans per tier, or None if no tier
+    matches.
 
-    One query, so the narrower scopes filter the same index the global scope
-    ranks and all three count a term identically. ``highlight()`` over a NULL
-    text column is NULL, which is no spans rather than an error."""
+    Each tier filters its own index — the very one the global scope ranks it
+    by. ``highlight()`` over a NULL text column is NULL, which is no spans
+    rather than an error (a url/title-only match); a tier whose index holds no
+    match for this document simply contributes no key."""
     query = _fts_query(term)
     if not query:
         return None
     own = con is None
     con = con or connect(read_only=True)
     try:
-        row = con.execute(
-            """
-            SELECT p.*, highlight(pages_fts, 2, ?, ?) AS hl
-            FROM pages_fts
-            JOIN pages p ON p.rowid = pages_fts.rowid
-            WHERE pages_fts MATCH ? AND p.url = ?
-            """,
-            (_MARK_OPEN, _MARK_CLOSE, query, normalize_url(url)),
-        ).fetchone()
+        rec: PageRow | None = None
+        spans: dict[str, list[_MatchSpan]] = {}
+        for tier, sql in _SCOPED_SQL.items():
+            try:
+                row = con.execute(
+                    sql, (_MARK_OPEN, _MARK_CLOSE, query, normalize_url(url))
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # A cache pulled before the OCR tier existed (no ocr_fts), read
+                # through a read-only connection that can't migrate it. The
+                # text tier still answers; the first writable open migrates.
+                continue
+            if row is None:
+                continue
+            rec = _row_minus(row, "hl")
+            if row["hl"] is not None:
+                spans[tier] = _match_spans(rec, row["hl"], tier)
     finally:
         if own:
             con.close()
-    if row is None:
+    if rec is None:
         return None
-    rec = _row_minus(row, "hl")
-    highlighted = row["hl"]
-    if highlighted is None:
-        return rec, []
-    return rec, _match_spans(rec, highlighted)
+    return rec, spans
+
+
+# One tier's global-scope ranking query. Two independent bm25 spaces — see the
+# ocr_fts comment in _SCHEMA for why the tiers must not share a table.
+_SEARCH_SQL = {
+    _TEXT_TIER: """
+        SELECT p.*, bm25(pages_fts) AS score,
+               snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet,
+               highlight(pages_fts, 2, ?, ?) AS hl
+        FROM pages_fts
+        JOIN pages p ON p.rowid = pages_fts.rowid
+        WHERE pages_fts MATCH ?
+        ORDER BY bm25(pages_fts)
+        LIMIT ?
+    """,
+    _OCR_TIER: """
+        SELECT p.*, bm25(ocr_fts) AS score,
+               snippet(ocr_fts, 0, '[', ']', ' … ', 12) AS snippet,
+               highlight(ocr_fts, 0, ?, ?) AS hl
+        FROM ocr_fts
+        JOIN pages p ON p.rowid = ocr_fts.rowid
+        WHERE ocr_fts MATCH ?
+        ORDER BY bm25(ocr_fts)
+        LIMIT ?
+    """,
+}
+
+
+# The backfill read for a document one tier ranked and the other didn't: the
+# scoped highlight plus a snippet, so the merged row is whole either way.
+_BACKFILL_SQL = {
+    _TEXT_TIER: """
+        SELECT snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet,
+               highlight(pages_fts, 2, ?, ?) AS hl
+        FROM pages_fts
+        JOIN pages p ON p.rowid = pages_fts.rowid
+        WHERE pages_fts MATCH ? AND p.url = ?
+    """,
+    _OCR_TIER: """
+        SELECT snippet(ocr_fts, 0, '[', ']', ' … ', 12) AS snippet,
+               highlight(ocr_fts, 0, ?, ?) AS hl
+        FROM ocr_fts
+        JOIN pages p ON p.rowid = ocr_fts.rowid
+        WHERE ocr_fts MATCH ? AND p.url = ?
+    """,
+}
+
+
+class _TierData(NamedTuple):
+    """One tier's answer about one document, before counting."""
+
+    score: float | None  # bm25; None when this tier was backfilled, not ranked
+    snippet: str | None
+    hl: str | None
+
+
+def _tier_counts(
+    rec: PageRow, data: _TierData | None, tier: str
+) -> tuple[int | None, int | None]:
+    """(matches, sections) for one tier of one document. None/None on a marker
+    collision — that one tier of that one document, never the result set."""
+    if data is None or data.hl is None:
+        return 0, 0
+    try:
+        spans = _match_spans(rec, data.hl, tier)
+    except MarkerCollisionError:
+        return None, None
+    regions = _matched_regions(_doc_of(rec, tier), spans)
+    # Distinct names: two blocks sharing a heading are one address.
+    return len(spans), len({region.name for region, _ in regions})
 
 
 def search(
     term: str, limit: int = 20, con: sqlite3.Connection | None = None
 ) -> list[SearchHit]:
-    """FTS5 BM25-ranked pages matching ``term`` — the global scope.
+    """BM25-ranked documents matching ``term`` — the global scope, both tiers.
 
     Units AND together; a double-quoted run is one phrase
     (``'"upper magnet" knocker'``). Returns ``SearchHit`` dicts, best match
     first — or none at all when ``term`` holds nothing searchable. ``limit <= 0``
     returns every hit.
 
-    The match count is the triage signal a snippet cannot carry: it says
+    Each tier ranks in its own index and the results merge to one row per
+    document, ordered by its better tier; each tier is over-fetched at twice
+    the limit, which loses nothing — a document in neither tier's top can't be
+    in the merged top. A document selected through one tier still reports the
+    other tier's counts (backfilled with a scoped query), so the row's
+    asymmetry is always real. The snippet comes from the citable tier when it
+    has matches, else from the OCR tier, labelled so.
+
+    The match counts are the triage signal a snippet cannot carry: they say
     whether the snippet shown is representative or one of hundreds. Counting
     costs a whole-column read and a parse per hit, so it scales with ``limit``,
     never with the corpus."""
@@ -1548,78 +1841,150 @@ def search(
     own = con is None
     con = con or connect(read_only=True)
     try:
-        rows = con.execute(
-            """
-            SELECT p.*,
-                   snippet(pages_fts, 2, '[', ']', ' … ', 12) AS snippet,
-                   highlight(pages_fts, 2, ?, ?) AS hl
-            FROM pages_fts
-            JOIN pages p ON p.rowid = pages_fts.rowid
-            WHERE pages_fts MATCH ?
-            ORDER BY bm25(pages_fts)
-            LIMIT ?
-            """,
-            # SQLite reads a negative LIMIT as no limit, which is the shape
-            # `--limit 0` asks for at every scope.
-            (_MARK_OPEN, _MARK_CLOSE, query, limit if limit > 0 else -1),
-        ).fetchall()
+        # SQLite reads a negative LIMIT as no limit, which is the shape
+        # `--limit 0` asks for at every scope.
+        fetch = limit * 2 if limit > 0 else -1
+        recs: dict[NormalizedUrl, PageRow] = {}
+        tiers: dict[NormalizedUrl, dict[str, _TierData]] = {}
+        arrival: dict[NormalizedUrl, int] = {}  # ranked-order tiebreak
+        for tier, sql in _SEARCH_SQL.items():
+            try:
+                rows = con.execute(
+                    sql, (_MARK_OPEN, _MARK_CLOSE, query, fetch)
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # A cache pulled before the OCR tier existed (no ocr_fts), read
+                # through a read-only connection that can't migrate it. The
+                # text tier still answers; the first writable open migrates.
+                continue
+            for row in rows:
+                rec = _row_minus(row, "score", "snippet", "hl")
+                url = rec["url"]
+                recs[url] = rec
+                arrival.setdefault(url, len(arrival))
+                tiers.setdefault(url, {})[tier] = _TierData(
+                    row["score"], row["snippet"], row["hl"]
+                )
+        ranked = sorted(
+            recs,
+            key=lambda url: (
+                min(
+                    data.score
+                    for data in tiers[url].values()
+                    if data.score is not None
+                ),
+                arrival[url],
+            ),
+        )
+        if limit > 0:
+            ranked = ranked[:limit]
+        # A document one tier ranked may still hold the other tier's matches
+        # past that tier's over-fetch cutoff; backfill so its row is whole.
+        for url in ranked:
+            for tier in _SEARCH_SQL:
+                if tier in tiers[url]:
+                    continue
+                try:
+                    row = con.execute(
+                        _BACKFILL_SQL[tier], (_MARK_OPEN, _MARK_CLOSE, query, url)
+                    ).fetchone()
+                except sqlite3.OperationalError:  # pre-OCR cache, as above
+                    continue
+                if row is not None:
+                    tiers[url][tier] = _TierData(None, row["snippet"], row["hl"])
     finally:
         if own:
             con.close()
+
     hits: list[SearchHit] = []
-    for row in rows:
-        rec = _row_minus(row, "snippet", "hl")
-        matches: int | None = 0
-        sections: int | None = 0
-        if row["hl"] is not None:
-            try:
-                spans = _match_spans(rec, row["hl"])
-            except MarkerCollisionError:
-                # This one document cannot be counted; the other hits still can.
-                matches = sections = None
-            else:
-                regions = _matched_regions(_doc_of(rec), spans)
-                # Distinct names: two blocks sharing a heading are one address.
-                matches = len(spans)
-                sections = len({region.name for region, _ in regions})
+    for url in ranked:
+        rec = recs[url]
+        text_data = tiers[url].get(_TEXT_TIER)
+        ocr_data = tiers[url].get(_OCR_TIER)
+        matches, sections = _tier_counts(rec, text_data, _TEXT_TIER)
+        ocr_matches, ocr_sections = _tier_counts(rec, ocr_data, _OCR_TIER)
+        # The citable tier's snippet leads whenever it has something to show —
+        # a reader trained onto OCR snippets is being trained off the one habit
+        # keeping machine readings out of the catalog.
+        if text_data is not None and (matches is None or matches > 0):
+            snippet, snippet_tier = text_data.snippet, _TEXT_TIER
+        elif ocr_data is not None and ocr_data.snippet is not None:
+            snippet, snippet_tier = ocr_data.snippet, _OCR_TIER
+        elif text_data is not None:
+            snippet, snippet_tier = text_data.snippet, _TEXT_TIER
+        else:
+            snippet, snippet_tier = None, _TEXT_TIER
         hits.append(
             SearchHit(
-                url=rec["url"],
+                url=url,
                 title=rec["title"],
                 last_updated=rec["last_updated"],
                 content_type=rec["content_type"],
                 text_source=rec["text_source"],
-                tier=_TEXT_TIER,
-                snippet=row["snippet"],
+                snippet=snippet,
+                snippet_tier=snippet_tier,
                 matches=matches,
                 sections=sections,
+                ocr_matches=ocr_matches,
+                ocr_sections=ocr_sections,
                 has_text=bool((rec["text"] or "").strip()),
+                has_ocr=bool((rec.get("ocr_text") or "").strip()),
             )
         )
     return hits
 
 
+def _sheet_ordinal(name: str | None) -> int | None:
+    """A section name's sheet number, or None when it isn't a page address."""
+    match = _PAGE_NAME.match(name or "")
+    return int(match.group(1)) if match else None
+
+
+def _interleave[T](rows: list[tuple[str | None, int, int, T]]) -> list[T]:
+    """Order two tiers' rows as one list: by sheet where both speak in sheets.
+
+    ``rows`` is ``(section_name, tier_index, doc_order, item)``. When every name
+    is a page address — the case where two tiers genuinely share an axis, since
+    the write-time sheet-count assertion makes their ordinals mean the same
+    sheet — rows sort by sheet, text tier first within one. Any other mix has
+    no shared axis to merge on, so tiers keep their own document order, text
+    first. A single-tier list is unchanged either way."""
+    if all(_sheet_ordinal(name) is not None for name, _, _, _ in rows):
+        ordered = sorted(rows, key=lambda r: (_sheet_ordinal(r[0]), r[1], r[2]))
+    else:
+        ordered = sorted(rows, key=lambda r: (r[1], r[2]))
+    return [item for _, _, _, item in ordered]
+
+
 def search_sections(
     url: str, term: str, con: sqlite3.Connection | None = None
 ) -> list[SectionHit]:
-    """The sections of one document that match ``term``, in document order.
+    """The sections of one document that match ``term``, both tiers interleaved
+    in sheet order.
 
     Unranked, because ranking would need BM25 at section grain and HTML leaf
-    blocks are short enough that nav fragments would win. One row per **name**,
-    summing that name's blocks, so this list and ``search_matches`` describe the
-    same thing. Raises ``MarkerCollisionError``."""
+    blocks are short enough that nav fragments would win. One row per **name
+    per tier**, summing that name's blocks — a sheet matching in both layers is
+    two rows, and the asymmetry between their counts is the thing worth
+    reading. Raises ``MarkerCollisionError``."""
     scoped = _scoped(url, term, con=con)
     if scoped is None:
         return []
-    rec, spans = scoped
-    totals: dict[str | None, int] = {}
-    for region, region_spans in _matched_regions(_doc_of(rec), spans):
-        totals[region.name] = totals.get(region.name, 0) + len(region_spans)
-    # dict order is insertion order, and regions arrive in document order.
-    return [
-        SectionHit(section=name, matches=n, tier=_TEXT_TIER)
-        for name, n in totals.items()
-    ]
+    rec, spans_by_tier = scoped
+    rows: list[tuple[str | None, int, int, SectionHit]] = []
+    for tier_idx, tier in enumerate((_TEXT_TIER, _OCR_TIER)):
+        spans = spans_by_tier.get(tier)
+        if not spans:
+            continue
+        totals: dict[str | None, int] = {}
+        for region, region_spans in _matched_regions(_doc_of(rec, tier), spans):
+            totals[region.name] = totals.get(region.name, 0) + len(region_spans)
+        # dict order is insertion order, and regions arrive in document order.
+        rows.extend(
+            (name, tier_idx, order, SectionHit(section=name, matches=n, tier=tier))
+            for order, (name, n) in enumerate(totals.items())
+        )
+    return _interleave(rows)
 
 
 class _Window(NamedTuple):
@@ -1706,49 +2071,65 @@ def search_matches(
     the unheaded region); ``pages`` is an inclusive sheet range. Two names for
     one thing, so pass at most one; with neither, every match comes back.
 
-    Overlapping windows merge and report how many matches they absorbed. Every
-    window is returned — capping is the caller's job, so it can say what it
-    withheld. Raises ``MarkerCollisionError``."""
+    Both tiers answer, interleaved in sheet order like ``search_sections``; a
+    window's ``tier`` says whether its text is citable (``text``) or machine-read
+    ink to verify by rendering the sheet (``ocr``). Overlapping windows merge
+    within their tier and report how many matches they absorbed. Every window
+    is returned — capping is the caller's job, so it can say what it withheld.
+    Raises ``MarkerCollisionError``."""
     if section is not None and pages is not None:
         raise ValueError("section and pages name the same thing; pass at most one")
     scoped = _scoped(url, term, con=con)
     if scoped is None:
         return []
-    rec, spans = scoped
-    doc = _doc_of(rec)
+    rec, spans_by_tier = scoped
     target = None if section is None else section.strip().casefold()
     words = max(surrounding_words, 0)
-    hits: list[MatchHit] = []
-    for region, region_spans in _matched_regions(doc, spans):
-        if not _addresses(region, target, pages):
+    rows: list[tuple[str | None, int, int, MatchHit]] = []
+    for tier_idx, tier in enumerate((_TEXT_TIER, _OCR_TIER)):
+        spans = spans_by_tier.get(tier)
+        if not spans:
             continue
-        # Merged as they are laid down: the matches arrive in document order, so
-        # an overlap can only ever be with the window just placed.
-        windows: list[_Window] = []
-        for span in region_spans:
-            closes_in = region if span.last < region.end else _region_of(doc, span.last)
-            name = region.name if closes_in == region else None
-            start, end = _window_extent(doc, region, closes_in, span, words)
-            last = windows[-1] if windows else None
-            if last is not None and start <= last.end and last.section == name:
-                windows[-1] = last._replace(
-                    end=max(last.end, end),
-                    matches=last.matches + 1,
-                    straddles=last.straddles or closes_in != region,
+        doc = _doc_of(rec, tier)
+        order = 0
+        for region, region_spans in _matched_regions(doc, spans):
+            if not _addresses(region, target, pages):
+                continue
+            # Merged as they are laid down: the matches arrive in document
+            # order, so an overlap can only ever be with the window just placed.
+            windows: list[_Window] = []
+            for span in region_spans:
+                closes_in = (
+                    region if span.last < region.end else _region_of(doc, span.last)
                 )
-            else:
-                windows.append(_Window(start, end, 1, name, closes_in != region))
-        hits.extend(
-            MatchHit(
-                text=_window_text(doc, w.start, w.end),
-                section=w.section,
-                straddles=w.straddles,
-                matches=w.matches,
-                tier=_TEXT_TIER,
-            )
-            for w in windows
-        )
-    return hits
+                name = region.name if closes_in == region else None
+                start, end = _window_extent(doc, region, closes_in, span, words)
+                last = windows[-1] if windows else None
+                if last is not None and start <= last.end and last.section == name:
+                    windows[-1] = last._replace(
+                        end=max(last.end, end),
+                        matches=last.matches + 1,
+                        straddles=last.straddles or closes_in != region,
+                    )
+                else:
+                    windows.append(_Window(start, end, 1, name, closes_in != region))
+            for w in windows:
+                rows.append(
+                    (
+                        region.name,
+                        tier_idx,
+                        order,
+                        MatchHit(
+                            text=_window_text(doc, w.start, w.end),
+                            section=w.section,
+                            straddles=w.straddles,
+                            matches=w.matches,
+                            tier=tier,
+                        ),
+                    )
+                )
+                order += 1
+    return _interleave(rows)
 
 
 class Holding(TypedDict):
@@ -1900,11 +2281,12 @@ def _render_handoff_line(rec: PageRow) -> str | None:
 
     Qualifying is a property of the content type, not of the extraction method:
     a PDF with a reviewed manual transcription renders as well as one poppler
-    read, and an OCR'd image displays too. An HTML blob is left out because the
-    stored markdown is the better read of it — ``get`` calls ``_blob_line``
-    directly, a full-record dump withholding nothing.
+    read, and an image displays whatever its OCR found. An HTML blob is left
+    out because the stored markdown is the better read of it — ``get`` calls
+    ``_blob_line`` directly, a full-record dump withholding nothing.
     """
-    if rec["content_type"] == "application/pdf" or rec["text_source"] == "ocr":
+    content_type = rec["content_type"] or ""
+    if content_type == "application/pdf" or content_type.startswith("image/"):
         return _blob_line(rec)
     return None
 
@@ -1942,16 +2324,28 @@ def _row_facts(rec: PageRow) -> list[str]:
     if line is not None:
         facts.append(line)
     text = rec["text"] or ""
+    ocr = rec.get("ocr_text") or ""
     if not text.strip():
-        facts.append(
-            "no stored text, so nothing can match it — the document may be "
-            "image-only, or extraction may have been unavailable when it was "
-            "fetched; read the blob to find out which"
-            if blob_shown
-            else "no stored text, so nothing can match it"
-        )
-    elif is_pdf and not _doc_of(rec).page_starts:
+        if ocr.strip():
+            facts.append(
+                "no citable text layer — matches here are OCR (machine-read); "
+                "cite by rendering the sheet, never by quoting"
+            )
+        else:
+            facts.append(
+                "no stored text, so nothing can match it — the document may be "
+                "image-only, or extraction may have been unavailable when it "
+                "was fetched; read the blob to find out which"
+                if blob_shown
+                else "no stored text, so nothing can match it"
+            )
+    elif is_pdf and not _page_doc(rec)[0].page_starts:
         facts.append("pdf document pages: unavailable")
+    if is_pdf and rec.get("ocr_text") is None:
+        facts.append(
+            "not yet OCR'd: sheet-image content is invisible to search "
+            "(scripts/web_scrape/web_pdfocr.py reads it)"
+        )
     return facts
 
 
@@ -1973,27 +2367,86 @@ def _warn_unbalanced(term: str) -> None:
         )
 
 
-def _match_label(hit: SearchHit) -> str:
-    """One global-scope hit's count line.
+def _tier_segment(matches: int | None, sections: int | None, tier: str) -> str:
+    """One tier's piece of a count line, tier-labelled."""
+    if matches is None:
+        return f"count unavailable ({tier}): the text contains a highlight marker"
+    return (
+        f"{matches} in {_plural(sections or 0, 'section', 'sections')} ({tier})"
+    )
 
-    The index covers url and title too, so a document can match with no text
-    match. The two ways that happens differ: no text layer at all (what OCR
-    will fix) versus text that just lacks the term. `0 in 0 sections` for
-    either would read as a broken counter."""
-    if hit["matches"] is None:
-        return "count unavailable: this document's text contains a highlight marker"
+
+def _match_label(hit: SearchHit) -> str:
+    """One global-scope hit's count line, a segment per tier that has matches.
+
+    A document without an OCR tier keeps the old single-count shape — a tier
+    label on every HTML hit would be noise about a distinction those rows
+    don't have. The pages_fts index covers url and title too, so a document
+    can match with no text match; the ways that happens differ (no text layer
+    at all, a layer that lacks the term, no OCR yet) and `0 in 0 sections` for
+    any of them would read as a broken counter."""
+    segments: list[str] = []
+    if hit["matches"] is None or hit["matches"]:
+        segments.append(_tier_segment(hit["matches"], hit["sections"], _TEXT_TIER))
+    if hit["ocr_matches"] is None or hit["ocr_matches"]:
+        segments.append(
+            _tier_segment(hit["ocr_matches"], hit["ocr_sections"], _OCR_TIER)
+        )
+    if segments:
+        if not hit["has_ocr"] and len(segments) == 1 and hit["matches"] is not None:
+            # No second tier exists: today's plain shape, unlabelled.
+            return (
+                f"{hit['matches']} in "
+                f"{_plural(hit['sections'] or 0, 'section', 'sections')}"
+            )
+        return " · ".join(segments)
     if not hit["has_text"]:
+        if hit["has_ocr"]:
+            return "url/title match, no text layer, 0 ocr matches"
         return "url/title match, no text layer"
-    if not hit["matches"]:
-        return "url/title match, 0 text matches"
-    return f"{hit['matches']} in {_plural(hit['sections'] or 0, 'section', 'sections')}"
+    if hit["has_ocr"]:
+        return "url/title match, 0 matches in either tier"
+    return "url/title match, 0 text matches"
+
+
+def _ocr_coverage_note(con: sqlite3.Connection | None = None) -> str | None:
+    """A stderr line when the corpus holds un-OCR'd PDFs, else None.
+
+    So a thin result set says so rather than implying completeness: an
+    un-OCR'd PDF's image-only sheets are invisible to every scope."""
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        n = con.execute(
+            "SELECT count(*) FROM pages "
+            "WHERE content_type = 'application/pdf' AND ocr_text IS NULL"
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        # A pre-OCR cache has no ocr_text column and nothing OCR'd: the whole
+        # PDF shelf is un-read, which is exactly what the note should say.
+        n = con.execute(
+            "SELECT count(*) FROM pages WHERE content_type = 'application/pdf'"
+        ).fetchone()[0]
+    finally:
+        if own:
+            con.close()
+    if not n:
+        return None
+    return (
+        f"{_plural(n, 'cached PDF is', 'cached PDFs are')} not yet OCR'd — "
+        f"their image-only sheets are invisible to this search "
+        f"(scripts/web_scrape/web_pdfocr.py reads them)"
+    )
 
 
 def _cmd_search(term: str, limit: int) -> int:
     _warn_unbalanced(term)
     hits = search(term, limit=limit)
+    coverage = _ocr_coverage_note()
     if not hits:
         print(f"no pages match: {term}", file=sys.stderr)
+        if coverage:
+            print(coverage, file=sys.stderr)
         return 1
     for i, hit in enumerate(hits):
         if i:
@@ -2009,13 +2462,19 @@ def _cmd_search(term: str, limit: int) -> int:
             print(f"type: {type_label}")
         if hit["text_source"] not in (None, "html"):
             # Flag hits whose text isn't a web page's own words — a PDF's text
-            # layer, a caption track, OCR or a transcription — so the reader
-            # knows to weigh (and for ocr, review) before quoting.
+            # layer, a caption track, or a transcription — so the reader knows
+            # to weigh it before quoting.
             print(f"text_source: {hit['text_source']}")
         print(f"matches: {_match_label(hit)}")
         if hit["snippet"]:
-            # The snippet spans stored line breaks; collapse for one line.
-            print(f"snippet: {' '.join(hit['snippet'].split())}")
+            # The snippet spans stored line breaks; collapse for one line. The
+            # (ocr) label is the machine-read flag: such a hit is verified by
+            # rendering the sheet, and its wording is never quoted.
+            label = "snippet (ocr)" if hit["snippet_tier"] == _OCR_TIER else "snippet"
+            print(f"{label}: {' '.join(hit['snippet'].split())}")
+    if coverage:
+        sys.stdout.flush()
+        print(coverage, file=sys.stderr)
     return 0
 
 
@@ -2024,12 +2483,23 @@ def _cmd_search(term: str, limit: int) -> int:
 _SECTION_COLUMN = 24
 
 
+# The one-line meaning of an (ocr) marker, printed once per command whose
+# output carries any — on stderr, so stdout stays the data.
+_OCR_TIER_NOTE = (
+    "(ocr) = machine-read from the sheet image; not citable — render the "
+    "sheet and cite what you read off it"
+)
+
+
 def _print_sections(sections: list[SectionHit]) -> None:
     for entry in sections:
         name = entry["section"] or NO_HEADING
-        print(
-            f"{name:<{_SECTION_COLUMN}}  {_plural(entry['matches'], 'match', 'matches')}"
-        )
+        count = _plural(entry["matches"], "match", "matches")
+        tier = f"  ({entry['tier']})" if entry["tier"] != _TEXT_TIER else ""
+        print(f"{name:<{_SECTION_COLUMN}}  {count}{tier}")
+    if any(e["tier"] == _OCR_TIER for e in sections):
+        sys.stdout.flush()
+        print(_OCR_TIER_NOTE, file=sys.stderr)
 
 
 def _print_matches(hits: list[MatchHit], limit: int) -> None:
@@ -2041,15 +2511,20 @@ def _print_matches(hits: list[MatchHit], limit: int) -> None:
         label = hit["section"] or (
             "section boundary" if hit["straddles"] else NO_HEADING
         )
+        if hit["tier"] != _TEXT_TIER:
+            label += f" ({hit['tier']})"
         if hit["matches"] > 1:
             # Merged neighbours — say so, or the window count reads as the match
             # count and silently disagrees with the section list.
             label += f"  {_plural(hit['matches'], 'match', 'matches')}"
         print(f"[{label}]")
         print(hit["text"])
+    # stdout is block-buffered when redirected while stderr is not, so these
+    # would otherwise print above the windows they are qualifying.
+    if any(hit["tier"] == _OCR_TIER for hit in shown):
+        sys.stdout.flush()
+        print(_OCR_TIER_NOTE, file=sys.stderr)
     if len(shown) < len(hits):
-        # stdout is block-buffered when redirected while stderr is not, so this
-        # would otherwise print above the windows it is qualifying.
         sys.stdout.flush()
         withheld = len(hits) - len(shown)
         noun = "window" if withheld == 1 else "windows"
@@ -2085,7 +2560,7 @@ def _cmd_search_document(
     _warn_unbalanced(term)
     for line in _row_facts(rec):
         print(line, file=sys.stderr)
-    if pages is not None and not _doc_of(rec).page_starts:
+    if pages is not None and not _page_doc(rec)[0].page_starts:
         print(
             "no page markers in this document; --pages names PDF sheets",
             file=sys.stderr,
@@ -2157,7 +2632,7 @@ def _cmd_quote(url: str, needle: str, context: int) -> int:
 
 def _cmd_outline(url: str, min_chars: int) -> int:
     rec = _require_page(url)
-    paginated = bool(_doc_of(rec).page_starts)
+    paginated = bool(_page_doc(rec)[0].page_starts)
     # Before the empty check: a PDF with nothing to map is when going to look
     # at the blob is the only move left.
     handoff = _render_handoff_line(rec)
@@ -2170,7 +2645,7 @@ def _cmd_outline(url: str, min_chars: int) -> int:
         # the cached PDFs are image-only scans — and blaming page markers
         # there would send a reader to re-extract a document that has none to
         # find. `quote` draws the same line; these reads must not disagree.
-        if not (rec["text"] or "").strip():
+        if not (rec["text"] or "").strip() and not (rec.get("ocr_text") or "").strip():
             print(f"no stored text in {url}", file=sys.stderr)
         elif rec["content_type"] == "application/pdf":
             print(f"no page markers in {url}", file=sys.stderr)
@@ -2194,7 +2669,11 @@ def _cmd_outline(url: str, min_chars: int) -> int:
     for entry in shown:
         indent = "  " * entry["level"]
         repeat = f"  x{entry['count']}" if entry["count"] > 1 else ""
-        print(f"{indent}{entry['heading']}{repeat}  [{entry['chars']} chars]")
+        tier = f"  ({entry['tier']})" if entry["tier"] != _TEXT_TIER else ""
+        print(f"{indent}{entry['heading']}{repeat}  [{entry['chars']} chars]{tier}")
+    if any(e["tier"] == _OCR_TIER for e in shown):
+        sys.stdout.flush()
+        print(_OCR_TIER_NOTE, file=sys.stderr)
     if len(shown) < len(entries):
         # Say what was withheld rather than letting a filtered map read as the
         # whole one.
@@ -2247,15 +2726,21 @@ def _section_miss_hint(url: str, heading: str) -> str | None:
     doc = _doc_of(rec)
     page_match = _PAGE_NAME.match(target)
     if page_match is not None and (
-        doc.page_starts or rec["content_type"] == "application/pdf"
+        _page_doc(rec)[0].page_starts or rec["content_type"] == "application/pdf"
     ):
+        # The page-defining column (text when it has markers, else the OCR
+        # tier) — the same resolution `section()` just used to miss.
+        page_doc = _page_doc(rec)[0]
         n = int(page_match.group(1))
-        if not (rec["text"] or "").strip():
+        if (
+            not (rec["text"] or "").strip()
+            and not (rec.get("ocr_text") or "").strip()
+        ):
             return "no stored text in this row, so no page holds any"
-        if not doc.page_starts:
+        if not page_doc.page_starts:
             return "no page markers in this document; `page N` names a PDF sheet"
-        if _page_block(doc, n) is None:
-            return f"out of range; this document has {len(doc.page_starts)} pages"
+        if _page_block(page_doc, n) is None:
+            return f"out of range; this document has {len(page_doc.page_starts)} pages"
         return f"page {n} has no extracted text; the sheet itself may still hold ink"
     if doc.page_starts:
         # The rows of a page map are sheets, not headings. Offering "did you
@@ -2294,7 +2779,12 @@ def _cmd_section(url: str, heading: str) -> int:
     if len(blocks) > 1:
         # The note goes to stderr so stdout stays pure page text.
         print(f"{len(blocks)} sections match {heading!r}", file=sys.stderr)
-    print("\n\n".join(blocks))
+    if any(b["tier"] == _OCR_TIER for b in blocks):
+        # Before the text, unlike the other commands' trailing note: stdout
+        # here is often piped straight into a quote draft, and the reader must
+        # meet the warning before the ink.
+        print(_OCR_TIER_NOTE, file=sys.stderr)
+    print("\n\n".join(b["text"] for b in blocks))
     return 0
 
 
@@ -2392,6 +2882,8 @@ def _cmd_have(urls: list[str], from_file: str | None) -> int:
             continue
         # Size in chars, because that is what a read of this page will cost.
         facts = [f"{len(page['text'] or '')} chars"]
+        if page.get("ocr_text"):
+            facts.append(f"{len(page['ocr_text'] or '')} ocr chars")
         content_type = page["content_type"]
         if content_type is None:
             # The column is nullable, and "html" is the wrong guess to print
@@ -2424,10 +2916,21 @@ def _cmd_have(urls: list[str], from_file: str | None) -> int:
 
 def _cmd_get(url: str) -> int:
     # Row metadata on stderr, text on stdout — so `get <url> > page.md` lands
-    # just the document.
+    # just the document. ocr_text is summarized rather than dumped with the
+    # metadata: it is a second document-sized column, not a row fact.
     rec = _require_page(url)
+    ocr_chars = len(rec.get("ocr_text") or "")
     for key, value in rec.items():
-        if key != "text":
+        if key == "ocr_text":
+            if ocr_chars:
+                print(
+                    f"ocr_text: {ocr_chars:,} chars (machine-read; render the "
+                    f"blob to cite)",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ocr_text: {value}", file=sys.stderr)
+        elif key != "text":
             print(f"{key}: {value}", file=sys.stderr)
     # Derived, so it follows the stored columns — and printed for every type,
     # since a full-record read withholds nothing.
@@ -2436,6 +2939,12 @@ def _cmd_get(url: str) -> int:
         print(line, file=sys.stderr)
     if rec["text"]:
         print(rec["text"])
+    elif rec.get("ocr_text"):
+        # The row's only readable content; a full-record read withholds
+        # nothing, and the note above stdout says what this is.
+        print("text: (none); printing ocr_text — machine-read, never citable",
+              file=sys.stderr)
+        print(rec["ocr_text"])
     return 0
 
 

@@ -22,6 +22,8 @@ web_fetch.py --from-file urls.tsv                           # batch, from url<TA
 web_fetch.py --from-file urls.tsv --max-age 99999           # …fetch only what's missing (plain refetches >30d)
 web_cache.py have --from-file urls.tsv                      # which of these do we already hold?
 web_import.py <file> --url <url>                            # hand-saved copy, for a site that refuses the fetcher
+web_pdfocr.py                                               # OCR cached PDFs' sheet images into the searchable ocr tier (macOS)
+web_pdfocr.py --url <url> [--force]                         # …one document; --force re-reads one already OCR'd
 
 # --- narrow by query ---
 web_cache.py search "haggis closed"                         # relevance-ranked: url, title, match count, sections, snippet
@@ -175,17 +177,11 @@ The rules that bind an import:
 
 - **An imported row never pretends to be a fetch.** `imported = 1` on the document row and its audit row, and `http_status` stays NULL — no request was made. Query fetched-only evidence with `WHERE imported IS DISTINCT FROM 1`.
 - **Store the bytes under the URL that serves them** — the image URL, not the viewer page that displays it. The file type is taken from the magic bytes, not the filename.
-- **Text is mandatory.** An import with nothing to quote is refused: supply a transcription with `--text-file` (recorded as `text_source = 'manual'`) or let the file's handler extract it.
+- **Words are mandatory — citable or findable.** A document nothing can find or quote is refused. Citable text comes from `--text-file` (recorded as `text_source = 'manual'` — a person is answerable for it) or the file's own handler (a PDF's text layer). An image is findable without a transcription: its OCR lands in `ocr_text`, searchable but never quotable. A scanned PDF imports with no text at all — `web_pdfocr.py` reads its sheets afterwards.
 - **A reviewed transcription outranks a later re-extraction.** A refetch never replaces `manual` text while the bytes are unchanged; when the bytes did change, the new extraction wins loudly. Changing a transcription is a deliberate act through `web_import.py --force`.
-- **`--text-source` labels machine-read text** that a machine, not a person, produced — the scanned-PDF case, where the words come from OCR run outside this tool. It keeps `manual` meaning "a person is answerable for these words".
+- **Machine-read text is never imported as citable.** OCR run outside this tool used to come in under a `text_source = 'ocr'` label; that label is retired — machine readings belong in `ocr_text`, and the OCR pass produces them from the blob itself.
 
-The intended flow for an image, and the reason `--dry-run` exists:
-
-1. **Draft** — run with `--dry-run` to see exactly what would be stored, including the full OCR text. Nothing is written.
-2. **Review** — compare the draft against the picture. Correct only what the document itself contradicts — never "correct" toward what the text is expected to say.
-3. **Import** — pass the reviewed text with `--text-file`.
-
-Keep the document's line structure in a transcription; the quote gate's whitespace collapsing handles the rest.
+To cite an image, open the blob and read the words off the picture (`--dry-run` previews the import, including its OCR draft, writing nothing). A hand-typed transcription via `--text-file` is what makes an image quotable; keep the document's line structure — the quote gate's whitespace collapsing handles the rest.
 
 ## Finding & reading
 
@@ -212,13 +208,15 @@ A **match count is matched phrases plus matched loose words**: `'"camel toes" ba
 
 Match windows are **stored lines verbatim and unmarked**, so any part of one can be lifted into a cite's `quote` — unlike the global snippet, which elides with `…` and brackets its matches. `--surrounding-words` sizes a window in words rather than lines (a PDF sheet's lines are short and irregular, so ±3 lines means something different on every document) but whole lines still come out, keeping table rows intact. N is a cap on lines either side too, which only ever bites on blank runs: a blank line holds no words, so without it two matches a page apart would merge into one window of mostly whitespace. A window's padding never leaves the section it is filed under, so a window that sits inside one carries its locator. The exception is a match that itself runs past the section's end: that comes back whole and labelled `section boundary` rather than truncated, since a span missing the words it was found for would be worse than one without a locator. Overlapping windows merge and say how many matches they absorbed. `--limit` caps how many are shown and reports what it withheld.
 
-Two documents can both match with no text match at all, since the index covers url and title as well: `url/title match, no text layer` is a document whose bytes are cached but unreadable — a scanned PDF, until [OCR](#images) reaches it — while `url/title match, 0 text matches` is an ordinary document that simply doesn't say the word.
+**Search reads two tiers.** `text` is the citable layer (a document's own words); `ocr` is machine-read sheet ink from [the OCR pass](#pdfs) — findable, verified by rendering the sheet, never quoted. Every scope keeps the tiers apart: a document row carries each tier's own counts (`95 in 35 sections (text) · 12 in 4 (ocr)` — the asymmetry says whether OCR found anything the text layer missed), section lists and match windows interleave both in sheet order with each row labelled, and a `snippet (ocr)` label means the snippet is machine-read. The tier says where the words came from, not which is more accurate: on manuals whose text layer is mojibake (seven Stern manuals store headings as a cipher), the `ocr` tier is the only readable one. When any un-OCR'd PDFs remain, `search` says so on stderr rather than implying completeness.
+
+Two documents can both match with no text match at all, since the index covers url and title as well: `url/title match, no text layer` is a document whose bytes are cached but unreadable — a scanned PDF the OCR pass hasn't reached — while `url/title match, 0 text matches` is an ordinary document that simply doesn't say the word.
 
 ### Search syntax
 
 Units of a term AND together, and a **double-quoted run is one phrase**: `'"upper magnet" knocker'` asks for the phrase and the loose word, where `upper magnet` asks only that both words appear somewhere in the document. On this corpus that is 1 hit against 28 — worth reaching for whenever you know one exact caption and are guessing at the rest. The shell has to be told to keep the double quotes, hence the surrounding single ones. Every unit is sent as a quoted phrase, so FTS5 operator syntax in a term (`AND`, `OR`, `NEAR(…)`, `*`) is searched for literally rather than obeyed, and no term can raise a query error; an unbalanced quote runs to the end of the term, and the CLI shows the expression it ran.
 
-`search` spans **every cached type** — one index over web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its text was derived (`text_source:`), so you know to weigh (and for `ocr`, review) before quoting; web pages are the unlabeled common case:
+`search` spans **every cached type** — web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its citable text was derived (`text_source:`), so you know to weigh before quoting; web pages are the unlabeled common case:
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py search "mecatronics"
@@ -326,13 +324,9 @@ The label names the **match**, never the widened window around it, so **a hit ne
 
 ### Weighing a quote: text_source
 
-Every document row carries a **`text_source`** label saying what turned the bytes into text: `html` (the markdown conversion), `pdf` (the document's own text layer), `vtt` (a caption track), `ocr` (machine-read pixels), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, OCR is a guess about pixels, captions a guess about audio — so weigh a quote by its label:
+Every document row carries a **`text_source`** label saying what turned the bytes into its _citable_ text: `html` (the markdown conversion), `pdf` (the document's own text layer), `vtt` (a caption track), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, captions a guess about audio — so weigh a quote by its label. Machine-read pixels carry no label because they are never citable text at all: they live in the separate `ocr_text` column, and a row holding only OCR (an image, a fully scanned PDF) has `text_source` NULL.
 
-```sql
-SELECT url, title FROM web_pages WHERE text_source = 'ocr';  -- read the picture before quoting
-```
-
-`text_source` is independent of `rendered` (which says where the **bytes** came from): a rendered page is still `text_source = 'html'`. Rows cached before the column existed are NULL.
+`text_source` is independent of `rendered` (which says where the **bytes** came from): a rendered page is still `text_source = 'html'`. Rows cached before the column existed are NULL too.
 
 ### Quote-less cites: when the fact is only in pixels
 
@@ -377,17 +371,15 @@ For these, look at the page visually. Claude Code can render a single page strai
 
 A hit whose `--context` window spans multiple pages lists every page the shown text touches (`pdf document pages: 26, 27`).
 
-**A miss on a PDF is not evidence of absence.** Only the document's own text layer is searchable, and a word drawn as artwork — a table cell, a diagram callout, a label baked into a figure — was never in it. Such a needle returns `no matches`, indistinguishable from a document that genuinely never says it. So `quote` prints the blob path on a miss too: the miss is when the go-look-at-the-page step matters most.
+**A word drawn as artwork is found through the OCR tier.** A table cell, a diagram callout, a label baked into a figure — none of it is in the text layer, and before the OCR pass such a needle returned `no matches`, indistinguishable from a document that never says it. Now `web_pdfocr.py` rasterizes every sheet (Quartz) and reads it (macOS Vision) into `pages.ocr_text`, so `search` finds the ink and names the sheet: in the Galactic Tank Force manual, `UPPER MAGNET` lives only inside a diagram image, and a scoped search returns `page 41 (ocr)` where the text tier returns nothing. The division of labor: **OCR provides findability, not citability** — measured line-exactness against ground truth is ~88%, and a wrong-but-plausible reading (`1/16"` for `11/16"`) would survive quote verification. So an `(ocr)` hit's payoff step is `Read(<blob>, pages="41")`: render the sheet, read the ink, and cite what you read — a quote-less cite (`ref`, a `locator` naming the sheet, a `note` recording what was seen). `quote` never answers from the OCR tier. `page N` counts sheets from the front of the file in both tiers — the two columns are asserted to agree at write time — but the folio printed on the sheet is different ink.
 
-Captions and table titles are usually real text even when their contents aren't, which makes them the reliable way in. In the Galactic Tank Force manual, `Table 3-18 Coil Positions` is text and every coil name under it is artwork — quote the caption, take its page, render the sheet. `UPPER MAGNET` and `KNOCKER`, printed on that same page, cannot be found any other way.
-
-A scanned or image-only PDF has no text layer at all: the blob caches, no text is extracted, and the fetch warns. We don't OCR PDFs yet. A row holding no text quotes as `no stored text, so no needle can match it` rather than a bare `no matches` — but it stops there, because the row cannot say whether the document is image-only or whether extraction was merely unavailable on the host that fetched it (a missing poppler, a document poppler couldn't read). Only the fetch's own warning drew that line. Read the blob to find out which.
+A fully scanned PDF has no text layer at all: the blob caches, no text is extracted, and the fetch warns — but once OCR'd it gets a page map (`outline`/`section` answer from the OCR tier, labelled `(ocr)`) and every scope finds its words. `quote` on such a row says the matches are OCR and to render rather than quote. Until the pass runs, the row cannot say whether the document is image-only or whether extraction was merely unavailable on the host that fetched it (a missing poppler, a document poppler couldn't read); `search` prints a coverage line while any PDF remains un-OCR'd. OCR is macOS-only and separate from fetching: a refetch on any host keeps the stored OCR while the bytes are unchanged, and clears it when they changed so the next pass re-reads them.
 
 ### Images
 
-Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and its text comes from **OCR** via macOS Vision — no system binary, no model download, no network. A picture with no legible text prints a loud warning rather than silently caching a blank document.
+Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and OCR (macOS Vision — no system binary, no model download, no network) reads them at fetch time into `ocr_text`: findable by every search scope, labelled `(ocr)`, never citable. To cite an image, open the blob and read the words off the picture — the same render-and-cite step a PDF sheet gets, except the blob already is the picture. A picture with no legible text prints a loud warning rather than silently caching a blank document.
 
-OCR is deliberately deterministic, not smart: it garbles stylized lettering but never invents fluent sentences that would sail through the verbatim quote gate — and it cannot tell you when it _is_ wrong. So OCR'd text is a **draft**: fine to index and search, but review it against the picture before citing (see [Import](#import-when-fetching-fails)). The image's `title` and `last_updated` stay null. OCR is macOS-only; on another platform the bytes still cache with a warning and the text comes in by hand — and a host that can't OCR never blanks text a Mac already stored.
+The only way an image acquires a citable text layer is a human transcription through `web_import.py` (`text_source = 'manual'`), where a person is answerable for the words. The image's `title` and `last_updated` stay null unless the importer supplies them. OCR is macOS-only; on another platform the bytes still cache with a warning — and a host that can't OCR never blanks a reading a Mac already stored.
 
 ### Video transcripts (YouTube)
 
@@ -407,7 +399,7 @@ Every capability is also a function in `web_cache.py`.
 | `quote`                                | `quote()` — plain spans; `quote_hits()` adds each hit's `heading` and `pdf_document_page_numbers` |
 | `outline` / `section` / `get` / `have` | `outline()` / `section()` / `get()` / `have()`                                                    |
 
-The CLI prints; functions return structured data.
+The CLI prints; functions return structured data. The OCR tier rides that data rather than living only in the CLI: a `SearchHit` carries each tier's own counts (`matches`/`sections` and `ocr_matches`/`ocr_sections`) plus `snippet_tier`; `SectionHit`, `MatchHit` and `OutlineEntry` each carry a scalar `tier`; and `section()` returns `{text, tier}` blocks, so a caller always knows whether it is holding citable text or machine-read ink.
 
 ## Architecture
 
@@ -428,6 +420,8 @@ scripts/web_scrape/
   content_types/             one handler per document type (the registry)
   web_ocr.py                 OCR backend for images (macOS Vision)
   web_pdftext.py             PDF text backend (poppler pdftotext, reading order)
+  web_pdfocr.py              CLI + backend: OCR PDF sheets into ocr_text
+                             (Quartz raster + Vision, macOS-only)
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
   web_import.py              CLI: file a hand-obtained file as evidence
@@ -436,7 +430,7 @@ sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
 ```
 
-Two tables plus an FTS index (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)). **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. Blobs are content-addressed, so every distinct version of a document stays on disk.
+Two tables plus two FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)). The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. Blobs are content-addressed, so every distinct version of a document stays on disk.
 
 ### Sync
 

@@ -449,9 +449,11 @@ def test_image_stored_as_jpg_blob_with_ocr_text(cache, monkeypatch):
     _run(cache, "https://x.com/flyer.jpg")
     row = _page(cache, "https://x.com/flyer.jpg")
     assert row["content_type"] == "image/jpeg"
-    assert "O MELHOR FLIPPER" in (row["text"] or "")
-    # The text came out of an OCR engine, and the row says so.
-    assert row["text_source"] == "ocr"
+    # Machine-read words land in the findable tier; no citable layer is
+    # derived, and text_source stays NULL rather than asserting one.
+    assert "O MELHOR FLIPPER" in (row["ocr_text"] or "")
+    assert row["text"] is None
+    assert row["text_source"] is None
     assert not row["rendered"]
     assert extension_for(row["content_type"]) == "jpg"
     assert wc.blob_path(row["content_sha"], ext="jpg").exists()
@@ -546,10 +548,9 @@ def test_refetch_without_ocr_backend_keeps_the_stored_text(cache, monkeypatch):
     _run(cache, "https://x.com/flyer.jpg", force=True)
 
     row = _page(cache, "https://x.com/flyer.jpg")
-    assert row["text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
-    assert row["text_source"] == "ocr"
+    assert row["ocr_text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
     assert [r[3] for r in _fetches(cache)] == [1, 0]  # new, then unchanged
-    # Still searchable — the FTS entry survived too.
+    # Still searchable — the OCR-tier FTS entry survived too.
     assert [h["url"] for h in wc.search("flipper", con=cache)] == [
         "https://x.com/flyer.jpg"
     ]
@@ -575,6 +576,9 @@ def test_changed_bytes_without_ocr_backend_do_not_keep_stale_text(cache, monkeyp
 
     row = _page(cache, "https://x.com/flyer.jpg")
     assert row["text"] is None
+    # The staleness rule: changed bytes clear the machine-read tier too, even
+    # when this host couldn't produce a replacement reading.
+    assert row["ocr_text"] is None
     assert [r[3] for r in _fetches(cache)] == [1, 1]  # new, then changed
 
 
@@ -639,8 +643,11 @@ def test_changed_bytes_supersede_manual_text_but_warn(cache, monkeypatch, capsys
     _run(cache, url, force=True)
 
     row = _page(cache, url)
-    assert row["text_source"] == "ocr"
-    assert TRANSCRIPTION not in (row["text"] or "")
+    # The new version's reading is machine-read, so it lands in ocr_text and
+    # the row no longer claims a citable layer at all.
+    assert row["text"] is None
+    assert row["text_source"] is None
+    assert "text of the new version" in (row["ocr_text"] or "")
     err = capsys.readouterr().err
     assert "transcription" in err.lower()
     # Tells the reviewer what to do about it.
@@ -703,8 +710,7 @@ def test_failed_ocr_request_keeps_stored_text_on_unchanged_bytes(cache, monkeypa
     _run(cache, url, force=True)
 
     row = _page(cache, url)
-    assert row["text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
-    assert row["text_source"] == "ocr"
+    assert row["ocr_text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
 
 
 # --------------------------------------------------------------------------- #
@@ -844,3 +850,15 @@ def test_too_large_stays_readable_when_no_length_was_declared():
 
 def test_too_large_reports_each_types_own_cap():
     assert "4MB cap for text/html" in _too_large("text/html", 4 * 1024 * 1024, None)
+
+
+def test_image_with_rich_ocr_is_not_thin(cache, monkeypatch, capsys):
+    # The thin probe falls back to ocr_text when a handler derives no citable
+    # layer: an image Vision read a full flyer off must not warn "OCR found
+    # little/no text" just because `text` is (by design) NULL.
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO. " * 10)
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+    assert "OCR found little/no text" not in capsys.readouterr().err

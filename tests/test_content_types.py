@@ -103,16 +103,23 @@ def test_image_alias_mime_canonicalizes_to_one_extension():
 
 def test_each_handler_declares_how_its_text_was_derived():
     # Stored on the page row so a consumer can weigh a quote by its extraction
-    # path — OCR and speech-to-text are lossier than reading a PDF's text layer.
+    # path. An image declares None: its words are machine-read, land in
+    # ocr_text, and no citable layer is derived — stamping a label would
+    # assert otherwise.
     assert ct.handler_for("text/html").text_source == "html"
     assert ct.handler_for("application/pdf").text_source == "pdf"
     assert ct.handler_for("text/vtt").text_source == "vtt"
-    assert ct.handler_for("image/jpeg").text_source == "ocr"
+    assert ct.handler_for("image/jpeg").text_source is None
+    assert ct.handler_for("image/png").text_source is None
 
 
 def test_every_registered_handler_declares_a_text_source():
+    # None is a declaration (no citable layer); "" is the unset default the
+    # registry rejects at import.
     for handler in ct.HANDLERS:
-        assert handler.text_source, f"{type(handler).__name__} declares no text_source"
+        assert handler.text_source != "", (
+            f"{type(handler).__name__} declares no text_source"
+        )
 
 
 def test_sniffed_canonical_mime_round_trips_to_a_handler():
@@ -785,9 +792,12 @@ def _extract_jpeg(monkeypatch, ocr_result):
     return JpegHandler().extract(b"\xff\xd8\xff fake jpeg", None, "http://x/f.jpg")
 
 
-def test_extract_image_uses_ocr_for_text(monkeypatch):
+def test_extract_image_puts_ocr_in_the_machine_read_tier(monkeypatch):
+    # OCR'd words are findable, never citable: they land in ocr_text and the
+    # citable text stays None — quotes verify against `text` alone.
     meta = _extract_jpeg(monkeypatch, "MECATRONICS INDUSTRIA E COMERCIO LTDA.")
-    assert meta.text == "MECATRONICS INDUSTRIA E COMERCIO LTDA."
+    assert meta.text is None
+    assert meta.ocr_text == "MECATRONICS INDUSTRIA E COMERCIO LTDA."
 
 
 def test_extract_image_has_no_title_or_date(monkeypatch):

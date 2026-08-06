@@ -41,7 +41,9 @@ def _validate(handlers: tuple[ContentHandler, ...]) -> None:
         name = type(handler).__name__
         assert handler.mime_types, f"{name} declares no mime_types"
         assert handler.extension, f"{name} sets no blob extension"
-        assert handler.text_source, f"{name} declares no text_source"
+        # None is a declaration (this type derives no citable layer — its words
+        # are machine-read, landing in ocr_text); "" is the unset default.
+        assert handler.text_source != "", f"{name} declares no text_source"
         if handler.signature is not None:
             assert handler.canonical_mime in handler.mime_types, (
                 f"{name}.canonical_mime must be one of its own mime_types"

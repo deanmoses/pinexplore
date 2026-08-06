@@ -122,6 +122,7 @@ def _seed(
     url: str,
     raw_url: str | None = None,
     text: str | None = None,
+    ocr_text: str | None = None,
     title: str | None = None,
     content: str | bytes = "x",
     content_type: str | None = None,
@@ -136,6 +137,7 @@ def _seed(
         fetched_at=wc.now_iso(),
         title=title,
         text=text,
+        ocr_text=ocr_text,
         content_type=content_type,
         text_source=text_source,
     )
@@ -552,7 +554,7 @@ def test_outline_collapses_repeated_headings_with_summed_size(cache):
     assert repeated["count"] == 2
     # The collapsed size is what section() returns for that name, all blocks.
     blocks = wc.section(url, "Machine List", con=cache)
-    assert repeated["chars"] == sum(len(b) for b in blocks)
+    assert repeated["chars"] == sum(len(b["text"]) for b in blocks)
     # A name appearing once is unremarkable — count 1, not absent.
     assert all(e["count"] == 1 for e in entries if e["heading"] != "Machine List")
 
@@ -584,7 +586,7 @@ def test_outline_does_not_collapse_same_name_under_different_parents(cache):
     blocks = wc.section(url, "Specs", con=cache)
     assert len(blocks) == 2
     assert sum(e["chars"] for e in entries if e["heading"] == "Specs") == sum(
-        len(b) for b in blocks
+        len(b["text"]) for b in blocks
     )
 
 
@@ -621,6 +623,7 @@ def test_outline_without_frontmatter_is_plain_headings(cache):
             "heading": "Section A",
             "chars": len("## Section A\n\ncontent"),
             "count": 1,
+            "tier": "text",
         }
     ]
 
@@ -632,11 +635,11 @@ def test_section_returns_block_until_same_or_higher_heading(cache):
     assert len(blocks) == 2
     # The first block leads with its heading line and includes its subsection,
     # stopping at the page's own "## body" (same level).
-    assert blocks[0].startswith("## Machine List")
-    assert "### Sub List" in blocks[0]
-    assert "deep item" in blocks[0]
-    assert "own h2 named body" not in blocks[0]
-    assert blocks[1] == "## Machine List\n\nSecond list section."
+    assert blocks[0]["text"].startswith("## Machine List")
+    assert "### Sub List" in blocks[0]["text"]
+    assert "deep item" in blocks[0]["text"]
+    assert "own h2 named body" not in blocks[0]["text"]
+    assert blocks[1]["text"] == "## Machine List\n\nSecond list section."
 
 
 def test_section_body_pseudo_spans_whole_document_body(cache):
@@ -646,10 +649,10 @@ def test_section_body_pseudo_spans_whole_document_body(cache):
     # and the page's own h2 named "body" — ambiguity surfaces rather than
     # silently picking one.
     assert len(blocks) == 2
-    body_block = blocks[0]
+    body_block = blocks[0]["text"]
     assert body_block.startswith("# Intro")  # no marker line, just the body
     assert "Second list section." in body_block  # spans to EOF
-    own_h2_block = blocks[1]
+    own_h2_block = blocks[1]["text"]
     assert own_h2_block.startswith("## body")
     assert "own h2 named body" in own_h2_block
     assert "Second list section." not in own_h2_block  # closed by ## Machine List
@@ -659,7 +662,7 @@ def test_section_metadata_is_frontmatter_lines_without_delimiters(cache):
     url = _seed_structured(cache)
     blocks = wc.section(url, "metadata", con=cache)
     assert len(blocks) == 1
-    assert blocks[0] == "title: Structured Doc\nog:description: A test document."
+    assert blocks[0]["text"] == "title: Structured Doc\nog:description: A test document."
 
 
 def test_quote_context_zero_matches_sentence_behavior(cache):
@@ -674,7 +677,8 @@ def test_quote_hits_name_the_enclosing_section(cache):
     # The nearest heading at or above the line — the h3, not the h2 it nests in.
     assert hit["heading"] == "Sub List"
     # And the name round-trips: it is what section() takes.
-    assert wc.section(url, hit["heading"], con=cache)[0].startswith("### Sub List")
+    first = wc.section(url, hit["heading"], con=cache)[0]
+    assert first["text"].startswith("### Sub List")
 
 
 def test_quote_hits_name_frontmatter_metadata(cache):
@@ -693,7 +697,7 @@ def test_quote_hits_are_contained_by_the_section_they_name(cache):
                 if hit["heading"] is None:
                     continue
                 blocks = wc.section(url, hit["heading"], con=cache)
-                assert any(hit["text"] in b for b in blocks), (
+                assert any(hit["text"] in b["text"] for b in blocks), (
                     f"{needle!r} at context={context} escaped {hit['heading']!r}"
                 )
 
@@ -1153,27 +1157,33 @@ def test_cli_quote_pdf_prints_pages_and_blob_path(cache, capsys):
         "needle closer\n"
         "pdf document pages: 2\n"
     )
-    assert captured.err == f"blob: {wc.blob_path(sha, 'pdf')}\n"
+    assert captured.err == (
+        f"blob: {wc.blob_path(sha, 'pdf')}\n"
+        "not yet OCR'd: sheet-image content is invisible to search "
+        "(scripts/web_scrape/web_pdfocr.py reads it)\n"
+    )
 
 
-def test_cli_quote_ocr_pdf_prints_path_and_pages_unavailable(cache, capsys):
-    # OCR text has no markers, but the blob is a PDF and renders fine — the
-    # row whose text most needs the go-look-at-the-page step. Silence about
-    # pages would read as "one page"; like the blob, it is a fact about the
-    # page and prints once, on stderr.
+def test_cli_quote_transcribed_pdf_prints_path_and_pages_unavailable(cache, capsys):
+    # A hand-typed transcription has no markers, but the blob is a PDF and
+    # renders fine — the row whose text most needs the go-look-at-the-page
+    # step. Silence about pages would read as "one page"; like the blob, it is
+    # a fact about the page and prints once, on stderr.
     url = wc.normalize_url("https://pdf.example/scan.pdf")
     sha = _seed(
         cache,
         url=url,
-        text="ocr text of a scanned manual",
+        text="typed text of a scanned manual",
         content_type="application/pdf",
-        text_source="ocr",
+        text_source="manual",
     )
     assert wc.main(["quote", url, "scanned manual"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == "ocr text of a scanned manual\n"
+    assert captured.out == "typed text of a scanned manual\n"
     assert captured.err == (
         f"blob: {wc.blob_path(sha, 'pdf')}\npdf document pages: unavailable\n"
+        "not yet OCR'd: sheet-image content is invisible to search "
+        "(scripts/web_scrape/web_pdfocr.py reads it)\n"
     )
 
 
@@ -1192,6 +1202,8 @@ def test_cli_quote_pdf_without_markers_says_pages_unavailable(cache, capsys):
     assert captured.out == "pre-marker extraction text\n"
     assert captured.err == (
         f"blob: {wc.blob_path(sha, 'pdf')}\npdf document pages: unavailable\n"
+        "not yet OCR'd: sheet-image content is invisible to search "
+        "(scripts/web_scrape/web_pdfocr.py reads it)\n"
     )
 
 
@@ -1202,13 +1214,13 @@ def test_cli_quote_ocr_image_prints_path_without_page_noise(cache, capsys):
     sha = _seed(
         cache,
         url=url,
-        text="flyer text via ocr",
+        text="flyer text via a reviewed transcription",
         content_type="image/jpeg",
-        text_source="ocr",
+        text_source="manual",
     )
     assert wc.main(["quote", url, "flyer text"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == "flyer text via ocr\n"
+    assert captured.out == "flyer text via a reviewed transcription\n"
     assert captured.err == f"blob: {wc.blob_path(sha, 'jpg')}\n"
 
 
@@ -1228,6 +1240,8 @@ def test_cli_quote_miss_on_a_pdf_still_prints_the_blob_path(cache, capsys):
     assert captured.out == ""
     assert captured.err == (
         f"no matches for 'upper magnet' in {url}\nblob: {wc.blob_path(sha, 'pdf')}\n"
+        "not yet OCR'd: sheet-image content is invisible to search "
+        "(scripts/web_scrape/web_pdfocr.py reads it)\n"
     )
 
 
@@ -1683,14 +1697,17 @@ def test_outline_page_map_wins_over_a_heading_misparse(cache):
 
 def test_section_returns_one_page_without_its_marker(cache):
     url = _seed_paged(cache)
-    assert wc.section(url, "page 3", con=cache) == ["third sheet has more words"]
-    assert "\f" not in wc.section(url, "page 1", con=cache)[0]
+    assert wc.section(url, "page 3", con=cache) == [
+        {"text": "third sheet has more words", "tier": "text"}
+    ]
+    assert "\f" not in wc.section(url, "page 1", con=cache)[0]["text"]
 
 
 def test_section_page_name_is_case_insensitive_like_every_other_name(cache):
     url = _seed_paged(cache)
-    assert wc.section(url, "Page 3", con=cache) == ["third sheet has more words"]
-    assert wc.section(url, "  page 3  ", con=cache) == ["third sheet has more words"]
+    expected = [{"text": "third sheet has more words", "tier": "text"}]
+    assert wc.section(url, "Page 3", con=cache) == expected
+    assert wc.section(url, "  page 3  ", con=cache) == expected
 
 
 @pytest.mark.parametrize("name", ["page 03", "page 3a", "page 0", "page -1", "page"])
@@ -1712,6 +1729,7 @@ def test_section_textless_page_returns_no_blocks(cache):
         "heading": "page 2",
         "chars": 0,
         "count": 1,
+        "tier": "text",
     }
 
 
@@ -1719,7 +1737,9 @@ def test_section_page_name_is_reserved_on_a_paginated_document(cache):
     # A heading block runs to the next heading at its level, so composing it
     # with the sheet would answer "give me sheet 2" with other sheets' text.
     url = _seed_paged(cache, "# page 2\nheading body\n\f\nsecond sheet\n\f")
-    assert wc.section(url, "page 2", con=cache) == ["second sheet"]
+    assert wc.section(url, "page 2", con=cache) == [
+        {"text": "second sheet", "tier": "text"}
+    ]
 
 
 def test_section_out_of_range_page_is_not_rescued_by_a_heading(cache):
@@ -1734,7 +1754,9 @@ def test_section_page_name_matches_a_heading_when_unpaginated(cache):
     # `quote` hit labelled "page 2" on such a page stays resolvable.
     url = wc.normalize_url("https://plain.example/paged-looking")
     _seed(cache, url=url, text="# page 2\nheading body", text_source="html")
-    assert wc.section(url, "page 2", con=cache) == ["# page 2\nheading body"]
+    assert wc.section(url, "page 2", con=cache) == [
+        {"text": "# page 2\nheading body", "tier": "text"}
+    ]
 
 
 def test_section_out_of_range_page_is_a_miss_not_a_clamp(cache):
@@ -1939,8 +1961,9 @@ def test_search_counts_matches_and_the_sections_they_fall_in(cache):
     url = _seed_paged(cache, COIL_PAGES)
     (hit,) = wc.search("coil", con=cache)
     assert (hit["matches"], hit["sections"]) == (3, 2)
-    assert hit["tier"] == "text"
+    assert (hit["ocr_matches"], hit["ocr_sections"]) == (0, 0)
     assert hit["has_text"] is True
+    assert hit["has_ocr"] is False
     # The two scopes must not disagree about how spread out a term is.
     assert hit["sections"] == len(wc.search_sections(url, "coil", con=cache))
 
@@ -2301,3 +2324,218 @@ def test_cli_search_rejects_two_addresses_and_a_backwards_range(cache):
         with pytest.raises(SystemExit) as exc:
             wc.main(argv)
         assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# The OCR tier — machine-read sheet text: findable, interleaved, never citable
+# --------------------------------------------------------------------------- #
+
+# Two sheets in each column, sheet counts agreeing, with `magnet` printed once
+# as text-layer ink on sheet 1 and once as diagram ink (OCR-only) on sheet 2.
+TWO_TIER_TEXT = "fuse table magnet\n\f\ncaption only\n\f"
+TWO_TIER_OCR = "coil chart\n\f\nUPPER MAGNET Q12\n\f"
+
+
+def _seed_two_tier(con) -> str:
+    url = wc.normalize_url("https://pdf.example/two-tier.pdf")
+    _seed(
+        con,
+        url=url,
+        text=TWO_TIER_TEXT,
+        ocr_text=TWO_TIER_OCR,
+        content_type="application/pdf",
+        text_source="pdf",
+    )
+    return url
+
+
+def _seed_dark(con) -> str:
+    url = wc.normalize_url("https://pdf.example/dark.pdf")
+    _seed(
+        con,
+        url=url,
+        text=None,
+        ocr_text="dark sheet words\n\f\nmagnet on sheet two\n\f",
+        content_type="application/pdf",
+        text_source=None,
+    )
+    return url
+
+
+def test_search_reports_each_tier_own_counts_on_one_row(cache):
+    url = _seed_two_tier(cache)
+    (hit,) = wc.search("magnet", con=cache)
+    assert hit["url"] == url
+    # One physical word per tier — never summed, never double-counted.
+    assert (hit["matches"], hit["sections"]) == (1, 1)
+    assert (hit["ocr_matches"], hit["ocr_sections"]) == (1, 1)
+    assert hit["has_text"]
+    assert hit["has_ocr"]
+    # The citable tier's snippet leads when it has matches.
+    assert hit["snippet_tier"] == "text"
+
+
+def test_search_finds_a_dark_document_through_its_ocr_tier(cache):
+    url = _seed_dark(cache)
+    (hit,) = wc.search("magnet", con=cache)
+    assert hit["url"] == url
+    assert (hit["matches"], hit["sections"]) == (0, 0)
+    assert (hit["ocr_matches"], hit["ocr_sections"]) == (1, 1)
+    assert hit["has_text"] is False
+    assert hit["snippet_tier"] == "ocr"
+    assert hit["snippet"] is not None
+
+
+def test_search_backfills_the_tier_that_did_not_rank(cache):
+    # A term matching only the ocr tier of one document and only the text tier
+    # of another: each merged row still reports both tiers' counts.
+    _seed_two_tier(cache)
+    _seed_dark(cache)
+    hits = {h["url"]: h for h in wc.search("magnet", con=cache)}
+    assert len(hits) == 2
+    for hit in hits.values():
+        assert hit["ocr_matches"] is not None
+
+
+def test_search_sections_interleaves_tiers_in_sheet_order(cache):
+    url = _seed_two_tier(cache)
+    rows = wc.search_sections(url, "magnet", con=cache)
+    assert [(r["section"], r["tier"], r["matches"]) for r in rows] == [
+        ("page 1", "text", 1),
+        ("page 2", "ocr", 1),
+    ]
+
+
+def test_search_matches_windows_carry_their_tier(cache):
+    url = _seed_two_tier(cache)
+    hits = wc.search_matches(url, "magnet", con=cache)
+    assert [(h["section"], h["tier"]) for h in hits] == [
+        ("page 1", "text"),
+        ("page 2", "ocr"),
+    ]
+    assert hits[1]["text"] == "UPPER MAGNET Q12"
+
+
+def test_search_matches_pages_range_reaches_the_ocr_tier(cache):
+    url = _seed_two_tier(cache)
+    hits = wc.search_matches(url, "magnet", pages=(2, 2), con=cache)
+    assert [(h["section"], h["tier"]) for h in hits] == [("page 2", "ocr")]
+
+
+def test_ocr_only_terms_never_rank_the_text_tier(cache):
+    # The two-index design: a term only the OCR holds must not surface a text
+    # count, and vice versa.
+    url = _seed_two_tier(cache)
+    (hit,) = wc.search('"upper magnet"', con=cache)
+    assert hit["url"] == url
+    assert (hit["matches"], hit["ocr_matches"]) == (0, 1)
+    assert hit["snippet_tier"] == "ocr"
+
+
+def test_outline_maps_a_dark_document_by_its_ocr_pages(cache):
+    url = _seed_dark(cache)
+    assert wc.outline(url, con=cache) == [
+        {"level": 0, "heading": "page 1", "chars": len("dark sheet words"),
+         "count": 1, "tier": "ocr"},
+        {"level": 0, "heading": "page 2", "chars": len("magnet on sheet two"),
+         "count": 1, "tier": "ocr"},
+    ]
+
+
+def test_outline_prefers_the_text_layer_when_it_has_markers(cache):
+    url = _seed_two_tier(cache)
+    entries = wc.outline(url, con=cache)
+    assert all(e["tier"] == "text" for e in entries)
+
+
+def test_section_answers_page_names_from_the_ocr_map_on_a_dark_document(cache):
+    url = _seed_dark(cache)
+    assert wc.section(url, "page 2", con=cache) == [
+        {"text": "magnet on sheet two", "tier": "ocr"}
+    ]
+
+
+def test_section_never_reads_ocr_when_the_text_layer_is_paginated(cache):
+    # Text is primary: on a mixed document `page N` is the citable sheet, and
+    # the machine-read sheet never masquerades as it.
+    url = _seed_two_tier(cache)
+    assert wc.section(url, "page 2", con=cache) == [
+        {"text": "caption only", "tier": "text"}
+    ]
+
+
+def test_quote_never_answers_from_the_ocr_tier(cache):
+    # The architecture's line: quote verification happens against `text` only.
+    url = _seed_dark(cache)
+    assert wc.quote(url, "magnet on sheet two", con=cache) == []
+
+
+def test_cli_search_labels_ocr_sections_and_windows(cache, capsys):
+    url = _seed_two_tier(cache)
+    assert wc.main(["search", "magnet", "--url", url]) == 0
+    captured = capsys.readouterr()
+    assert "page 2" in captured.out
+    assert "(ocr)" in captured.out
+    assert "machine-read" in captured.err  # the one-line tier note
+
+
+def test_cli_search_prints_a_coverage_line_for_unocrd_pdfs(cache, capsys):
+    _seed(
+        cache,
+        url=wc.normalize_url("https://pdf.example/unread.pdf"),
+        text=None,
+        content_type="application/pdf",
+    )
+    assert wc.main(["search", "zzz-no-such-term"]) == 1
+    err = capsys.readouterr().err
+    assert "not yet OCR'd" in err
+    assert "web_pdfocr" in err
+
+
+def test_upsert_keeps_ocr_text_while_the_bytes_are_unchanged(cache):
+    url = wc.normalize_url("https://pdf.example/stale.pdf")
+    _seed(cache, url=url, text="layer", content="v1", content_type="application/pdf")
+    cache.execute("UPDATE pages SET ocr_text = 'a reading' WHERE url = ?", (url,))
+    cache.commit()
+    # Same bytes, writer with no opinion: the reading survives.
+    _seed(cache, url=url, text="layer", content="v1", content_type="application/pdf")
+    assert _page(cache, url)["ocr_text"] == "a reading"
+    # Changed bytes: the reading no longer describes them and clears.
+    _seed(cache, url=url, text="layer2", content="v2", content_type="application/pdf")
+    assert _page(cache, url)["ocr_text"] is None
+
+
+def test_legacy_ocr_text_source_rows_move_to_the_ocr_tier(tmp_path, monkeypatch):
+    # The pre-ocr_text shape: machine-read words stored as `text` and labelled
+    # text_source='ocr' (the imported Jurassic Park manual). Migration moves
+    # the words to the tier built for them — and NULLing a text column on the
+    # system-of-record takes the same safety copy a column drop does.
+    web_dir = tmp_path / "web"
+    web_dir.mkdir(parents=True)
+    monkeypatch.setattr(wc, "WEB_DIR", web_dir)
+    monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
+    monkeypatch.setattr(wc, "RAW_DIR", web_dir / "raw")
+    con = wc.connect()
+    wc.init_schema(con)
+    url = wc.normalize_url("https://www.ipdb.org/files/1343/jp.pdf")
+    _seed(
+        con,
+        url=url,
+        text="imported ocr words",
+        content_type="application/pdf",
+        text_source="ocr",
+    )
+    wc.init_schema(con)  # a later open runs the migration
+
+    row = wc.get(url, con=con)
+    assert row is not None
+    assert row["text"] is None
+    assert row["ocr_text"] == "imported ocr words"
+    assert row["text_source"] is None
+    assert len(list(web_dir.glob(".cache.sqlite.bak-*"))) == 1
+    # Idempotent: nothing matches any more, so no second backup.
+    wc.init_schema(con)
+    assert len(list(web_dir.glob(".cache.sqlite.bak-*"))) == 1
+    # Both FTS indexes followed the move.
+    assert wc.search("imported", con=con)[0]["ocr_matches"] == 1
+    con.close()

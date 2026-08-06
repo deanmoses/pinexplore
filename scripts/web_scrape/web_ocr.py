@@ -13,8 +13,8 @@ asked to "read this flyer" will. That property is the whole point here: a page
 in this cache is quoted verbatim downstream, so a fluent wrong transcription
 would be far more damaging than obviously-broken text. Low-confidence lines are
 dropped (``MIN_CONFIDENCE``) so the junk doesn't reach the FTS index; whatever
-survives is still machine output, recorded on the row as ``text_source='ocr'``
-so a reader can weigh it accordingly.
+survives is still machine output, stored in ``pages.ocr_text`` — the findable,
+never-citable tier — rather than as a text layer.
 
 Imported lazily by the image content handler — a batch with no images never
 loads pyobjc, and a non-macOS host only fails if it actually meets an image.
@@ -71,6 +71,42 @@ def filter_lines(lines: list[OcrLine], min_confidence: float) -> str | None:
     return "\n".join(kept) or None
 
 
+def recognize_lines(handler: object) -> list[OcrLine]:
+    """Run one Vision text-recognition request against a ``VNImageRequestHandler``.
+
+    The one place the recognition settings live, so the image path (bytes in)
+    and the PDF-sheet path (``web_pdfocr``, a ``CGImage`` in) cannot drift
+    apart. Raises ``OcrFailedError`` when Vision runs but refuses the input; a
+    successful run over pixels with no legible text returns an empty list —
+    the two must stay distinct, or a failure becomes indistinguishable from a
+    genuinely blank page.
+
+    ``usesLanguageCorrection`` is ON deliberately: measured on a Portuguese
+    flyer, turning it off degraded real prose ("Unrted States", "NAO" losing
+    its tilde) without making proper nouns any more faithful — and an A/B on
+    parts pages dense with alphanumeric part numbers recovered identically
+    either way. No recognition languages are set — Vision's own detection
+    matched a hand-pinned Portuguese+English list exactly, so there is no
+    language config to keep current as the corpus grows.
+    """
+    import Vision
+
+    request = Vision.VNRecognizeTextRequest.alloc().init()
+    request.setRecognitionLevel_(0)  # 0 = accurate (1 = fast)
+    request.setUsesLanguageCorrection_(True)
+    ok, error = handler.performRequests_error_([request], None)  # type: ignore[attr-defined]
+    if not ok:
+        # Vision loaded fine and refused this input — the input's problem, not
+        # the host's, so it must not masquerade as a missing backend.
+        raise OcrFailedError(f"Vision could not read this image: {error}")
+    lines: list[OcrLine] = []
+    for observation in request.results() or []:
+        candidates = observation.topCandidates_(1)
+        if candidates:
+            lines.append((candidates[0].confidence(), candidates[0].string()))
+    return lines
+
+
 def _recognize(raw: bytes) -> list[OcrLine]:
     """Run macOS Vision text recognition over an image's bytes.
 
@@ -78,13 +114,6 @@ def _recognize(raw: bytes) -> list[OcrLine]:
     macOS, or pyobjc not installed), and ``OcrFailedError`` when Vision runs but
     rejects these bytes (corrupt, truncated, or not an image at all). A
     successful run over an image with no legible text returns an empty list.
-
-    ``usesLanguageCorrection`` is ON deliberately: measured on a Portuguese
-    flyer, turning it off degraded real prose ("Unrted States", "NAO" losing its
-    tilde) without making proper nouns any more faithful. No recognition
-    languages are set — Vision's own detection matched a hand-pinned
-    Portuguese+English list exactly, so there is no language config to keep
-    current as the corpus grows.
     """
     try:
         import Vision
@@ -98,20 +127,7 @@ def _recognize(raw: bytes) -> list[OcrLine]:
 
     data = NSData.dataWithBytes_length_(raw, len(raw))
     handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
-    request = Vision.VNRecognizeTextRequest.alloc().init()
-    request.setRecognitionLevel_(0)  # 0 = accurate (1 = fast)
-    request.setUsesLanguageCorrection_(True)
-    ok, error = handler.performRequests_error_([request], None)
-    if not ok:
-        # Vision loaded fine and refused this input — the file's problem, not the
-        # host's, so it must not masquerade as a missing backend.
-        raise OcrFailedError(f"Vision could not read this image: {error}")
-    lines: list[OcrLine] = []
-    for observation in request.results() or []:
-        candidates = observation.topCandidates_(1)
-        if candidates:
-            lines.append((candidates[0].confidence(), candidates[0].string()))
-    return lines
+    return recognize_lines(handler)
 
 
 def ocr_text(raw: bytes, min_confidence: float = MIN_CONFIDENCE) -> str | None:

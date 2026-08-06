@@ -117,9 +117,10 @@ class PdfHandler(ContentHandler):
     canonical_mime = "application/pdf"
     signature: bytes | None = b"%PDF-"
     extension = "pdf"
-    text_source = "pdf"
+    text_source: str | None = "pdf"
     renderable = False
     backfillable = True
+    deferred_ocr = True
     # Scanned manuals run to tens of megabytes — the cached Stern Transformers
     # manual and a 15.5MB quick reference both sit above the shared default — so
     # PDFs carry their own cap. This is the only place its value is stated.

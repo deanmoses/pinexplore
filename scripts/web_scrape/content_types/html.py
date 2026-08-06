@@ -575,7 +575,7 @@ class HtmlHandler(ContentHandler):
     canonical_mime = "text/html"
     signature: bytes | None = None
     extension = "html"
-    text_source = "html"
+    text_source: str | None = "html"
     renderable = True
     # Markdown conversion is a pure function of the blob; re-running it is how the
     # corpus stays on one extractor.
