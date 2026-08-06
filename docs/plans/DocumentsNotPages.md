@@ -22,6 +22,9 @@ Rename the URL sense to **document**. The sheet sense keeps `page`, which is wha
 | `upsert_page()`                      | `upsert_document()`                              |
 | `_require_page()`                    | `_require_document()`                            |
 | `web_pages` (DuckDB)                 | `web_documents`                                  |
+| `have()`'s `"page"` record key       | `"document"`                                     |
+
+That last one is the only **breaking return shape** in the list: `have()` yields `{"asked", "page", "stored_url", "error"}` per URL, and WebCache.md documents it as the programmatic contract. Renaming it is what consistency asks for — the alternative is leaving `page` sitting inside the one API that outlives the rename. Nothing outside this repo reads the key today, so the cost is a doc update and the CLI's own `h["page"]` uses.
 
 ## What does not change
 
@@ -55,6 +58,15 @@ The migration therefore has to be:
 
 It belongs in `init_schema()` beside the existing column migrations, guarded on the old table's presence so it is a no-op on a fresh or already-migrated database. The rebuild is over 478 rows and 10.5M chars, so it costs seconds, once.
 
+### Nothing on a read path will trigger it
+
+`init_schema()` runs on the writer path only. `connect()` never calls it, and every read — `get`, `search`, `quote`, `outline`, `section`, `have` — opens `read_only=True`, where a migration could not run even if it were reached. So the migration fires the first time someone **fetches or imports**, and not before.
+
+That means a session that pulls the new code and runs `search` against an unmigrated cache gets a bare `no such table: documents` from SQLite, with nothing saying a migration is pending and no way to self-heal on a read-only connection. Two additions close it:
+
+- A `make migrate-web-cache` target that opens the cache writable and calls `init_schema()`, so migrating is a thing you can do on purpose rather than a side effect of fetching.
+- A check on the read path: if `documents` is absent and `pages` is present, fail with "web cache needs migrating: run `make migrate-web-cache`". This is the one an agent mid-task actually hits, so the message matters more than the target does.
+
 ## Blast radius
 
 Measured across `*.py`, `*.sql` and `*.md`:
@@ -66,19 +78,32 @@ upsert_page         16      pages_fts  13      _require_page    5
 
 26 files. The bulk is `scripts/web_scrape/web_cache.py`; the rest is a line or two each across the other `web_scrape` modules, `scripts/rebuild_explore.py`, `sql/03_raw_web.sql`, and the tests.
 
-Docs carry it too: `docs/WebCache.md`, `docs/AGENTS.src.md` (which regenerates `CLAUDE.md` and `AGENTS.md` — never edit those directly), and the three plan docs. **flippatch has zero references to `web_pages`** and reaches the cache only through `get()`, so nothing there breaks; its prose mentions of `pages.text` want updating for consistency, not correctness.
+Docs carry it too, like `docs/AGENTS.src.md`.
+
+### flippatch: four campaign scripts break
+
+flippatch reaches the module by path (`sys.path.insert(0, PINEXPLORE_DIR / "scripts" / "web_scrape")`), not a vendored copy, so its `get()` and `quote()` callers follow the rename for free. It holds no reference to `web_pages` at all.
+
+But it has four scripts that run raw SQL against the SQLite table, and every one of them fails with `no such table: pages` after the rename:
+
+```text
+campaigns/0181-bingo-years/extract_cdyn.py:84    SELECT text FROM pages WHERE url = ?
+campaigns/0079-italian-makers/gen.py:357         SELECT text FROM pages WHERE url IN (?, ?)
+campaigns/0079-italian-makers/classify.py:275    SELECT url, content_sha FROM pages WHERE url LIKE ?
+campaigns/0079-italian-makers/phase4_gen.py:111  SELECT text FROM pages WHERE url IN (?, ?)
+```
+
+These are finished campaigns whose patches have shipped, so we are not going to update them. If for whatever reason Flippatch does run them again, the failure is loud and the fix is a one-word edit.
+
+### prose
 
 The one judgement call in the sweep: `\bpages\b` has 173 hits and not all are the table. Prose like "JS-only pages" and "cached pages" means web pages in the ordinary sense and reads fine either way — rename identifiers mechanically, read prose individually.
-
-## Sequencing
-
-**Land this before [SearchScopes.md](SearchScopes.md).** That work is the heaviest user of both senses of the word, and it introduces "section" as the name for a sheet — writing it in the old vocabulary means writing it twice. Doing the rename first also keeps the search diff free of rename noise, so it can be reviewed for what it actually does.
-
-It makes a good standalone commit: mechanical, no behavior change, and one real migration with a test that proves `highlight()` still works afterwards.
 
 ## Verification
 
 - `make test` green, plus a new case that migrates a pre-rename database and asserts `highlight()`, `snippet()` and `rebuild` all work — the three things a bare `ALTER TABLE` breaks silently.
+- The same case asserts the index is **complete**, not merely functional: record a known term's hit count before the migration and assert it is unchanged after. All three checks above pass against a correctly-structured but under-populated index, and step 6 repopulates from scratch, so this is the one that catches a bad rebuild.
+- A read against an unmigrated cache raises the "needs migrating" error rather than a bare `no such table`.
 - Open the real `cache.sqlite`, confirm the migration runs once, then re-open and confirm it is a no-op.
 - `make explore` produces `web_documents`, and `SELECT count(*)` matches the SQLite row count.
 - `grep -rn '\bpages\b' scripts/ sql/` returns only the sheet sense and ordinary prose.
