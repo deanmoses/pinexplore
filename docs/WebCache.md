@@ -231,6 +231,9 @@ cache() { uv run python scripts/web_scrape/web_cache.py "$@"; }   # shorthand fo
                                            # block only — and a function, because zsh
                                            # won't word-split a CACHE="…" variable
 cache search "haggis closed"               # 1. FTS5 BM25-ranked: url, title, snippet
+cache search '"upper magnet" knocker'      #    …a double-quoted run is one phrase
+                                           #    (single-quote the whole term so the
+                                           #    shell keeps the double quotes)
 cache quote <url> "2024"                   # 2. text containing a needle (matching
                                            #    ignores case, smart quotes, and line
                                            #    breaks; on a PDF each hit names its
@@ -249,6 +252,8 @@ cache get <url>                            # 5. full page record — the last re
 ```
 
 The same five reads are Python functions in `web_cache.py` (`search()`, `quote()`, `outline()`, `section()`, `get()`) — flippatch's quote gate imports them directly. `quote_hits()` is `quote()` with each hit's section and PDF pages attached (`{"text": …, "heading": …, "pdf_document_page_numbers": …}`); `quote()` stays the plain-span form the gate consumes. Matching collapses whitespace runs, straightens smart quotes, and ignores case — so a phrase spanning a stored line break is still found — while the returned text is always the stored lines verbatim, which is why every hit still verifies.
+
+**Search syntax.** Units of a term AND together, and a **double-quoted run is one phrase**: `'"upper magnet" knocker'` asks for the phrase and the loose word, where `upper magnet` asks only that both words appear somewhere on the page. On this corpus that is 1 hit against 28 — worth reaching for whenever you know one exact caption and are guessing at the rest. The shell has to be told to keep the double quotes, hence the surrounding single ones. Every unit is sent as a quoted phrase, so FTS5 operator syntax in a term (`AND`, `OR`, `NEAR(…)`, `*`) is searched for literally rather than obeyed, and no term can raise a query error; an unbalanced quote runs to the end of the term, and the CLI shows the expression it ran.
 
 `search` spans **every cached type** — one index over web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its text was derived (`text_source:`), so you know to weigh (and for `ocr`, review) before quoting; web pages are the unlabeled common case:
 

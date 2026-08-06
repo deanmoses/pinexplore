@@ -56,9 +56,59 @@ def test_content_sha_matches_sha256_and_is_content_addressed():
     assert wc.content_sha(b"abc") != wc.content_sha(b"abd")
 
 
-def test_fts_query_quotes_each_token_and_escapes_quotes():
+def test_fts_query_ands_bare_words_as_quoted_tokens():
     assert wc._fts_query("foo bar") == '"foo" "bar"'
-    assert wc._fts_query('a"b') == '"a""b"'
+    assert wc._fts_query("  foo   bar  ") == '"foo" "bar"'
+
+
+def test_fts_query_keeps_a_quoted_run_as_one_phrase():
+    # The bug this syntax fixes: splitting on whitespace turned a phrase into an
+    # AND of its words, which matches strictly more documents with no signal.
+    assert wc._fts_query('"upper magnet" knocker') == '"upper magnet" "knocker"'
+    assert (
+        wc._fts_query('"upper magnet" "coil positions" knocker')
+        == '"upper magnet" "coil positions" "knocker"'
+    )
+
+
+def test_fts_query_keeps_operator_characters_inert():
+    # Every unit goes out quoted, so FTS5 syntax in user input is never syntax.
+    assert wc._fts_query("foo AND bar") == '"foo" "AND" "bar"'
+    assert wc._fts_query("NEAR(a b) OR c*") == '"NEAR(a" "b)" "OR" "c*"'
+    assert wc._fts_query('"a OR b"') == '"a OR b"'
+
+
+def test_fts_query_consumes_a_quote_as_a_separator_not_as_nothing():
+    # unicode61 reads '"' as a separator, so a"b is the two tokens "a b".
+    # Deleting the quote instead of standing a space in for it would make that
+    # the single token "ab" — a different document — so this is the assertion
+    # that keeps consuming the quote from quietly changing what was asked.
+    assert wc._fts_query('a"b') == '"a b"'
+    assert wc._fts_query('say ""hi""') == '"say" "hi"'
+    # Whitespace normalization keeps the substituted spaces out of the output.
+    assert wc._fts_query('  "upper   magnet" \t knocker ') == '"upper magnet" "knocker"'
+    assert wc._fts_query('""') == ""
+    assert wc._fts_query("") == ""
+
+
+def test_fts_query_substitutes_nul_the_way_it_substitutes_a_quote():
+    # FTS5 scans its query as a C string, so a NUL truncates it mid-token and
+    # raises "unterminated string" — the one other character the guard cannot
+    # pass through. unicode61 reads it as a separator, so a space is lossless.
+    assert wc._fts_query("a\0b") == '"a b"'
+    assert wc._fts_query("\0") == ""
+    # It is not a quote, though: it must not toggle the phrase state.
+    assert wc._fts_units('"a\0b" c') == (["a b", "c"], False)
+
+
+def test_fts_query_runs_an_unbalanced_quote_to_end_of_string():
+    assert wc._fts_query('the "upper magnet') == '"the" "upper magnet"'
+    assert wc._fts_units('the "upper magnet') == (["the", "upper magnet"], True)
+    assert wc._fts_units('"upper magnet"') == (["upper magnet"], False)
+    assert wc._fts_units('"') == ([], True)
+    # An open quote need not own a whole unit, or any of one.
+    assert wc._fts_units('foo"bar') == (["foo bar"], True)
+    assert wc._fts_units('foo "') == (["foo"], True)
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +161,25 @@ def test_get_search_quote_roundtrip(cache):
     hits = wc.search("haggis", con=cache)
     assert [h["url"] for h in hits] == [url]
     assert wc.quote(url, "2024", con=cache) == ["Haggis Pinball closed in 2024."]
+
+
+def test_search_phrase_excludes_a_page_holding_only_the_words(cache):
+    both = wc.normalize_url("https://a.com/both")
+    apart = wc.normalize_url("https://a.com/apart")
+    _seed(cache, url=both, text="The upper magnet holds the ball.")
+    _seed(cache, url=apart, text="The upper playfield has no magnet.")
+    # Bare words AND anywhere in the page, so both match…
+    assert {h["url"] for h in wc.search("upper magnet", con=cache)} == {both, apart}
+    # …while the quoted phrase asks for the words adjacent, and only one is.
+    assert [h["url"] for h in wc.search('"upper magnet"', con=cache)] == [both]
+
+
+def test_search_returns_no_hits_for_a_term_with_nothing_to_match(cache):
+    # An empty FTS expression is a syntax error, not an empty result — so these
+    # have to be caught before the query rather than raised at the caller.
+    _seed(cache, url=wc.normalize_url("https://a.com/x"), text="anything")
+    assert wc.search("", con=cache) == []
+    assert wc.search('  ""  ', con=cache) == []
 
 
 def test_get_normalizes_lookup(cache):
@@ -1522,6 +1591,25 @@ def test_cli_misses_exit_nonzero_with_stderr_message(cache, capsys):
     with pytest.raises(SystemExit, match="1"):
         wc.main(["quote", "https://absent.example/x", "needle"])
     assert "no cached page" in capsys.readouterr().err
+
+
+def test_cli_search_names_the_phrase_it_read_from_an_unbalanced_quote(cache, capsys):
+    url = wc.normalize_url("https://a.com/both")
+    _seed(cache, url=url, text="The upper magnet holds the ball.")
+    # The search still runs — the library never raises on user input — but
+    # reinterpreting a query silently is the failure the syntax exists to fix,
+    # so the shell face has to show what it ran.
+    assert wc.main(["search", 'the "upper magnet']) == 0
+    captured = capsys.readouterr()
+    assert 'unbalanced quote; searched "the" "upper magnet"' in captured.err
+    assert url in captured.out
+    # The open quote owns no unit here, so naming one as "the" phrase would
+    # report a bare word as something the user had quoted.
+    assert wc.main(["search", 'magnet "']) == 0
+    assert 'unbalanced quote; searched "magnet"' in capsys.readouterr().err
+    # …and when it owns nothing at all there is no expression to show.
+    assert wc.main(["search", '"']) == 1
+    assert "unbalanced quote; searched nothing" in capsys.readouterr().err
 
 
 def test_cli_search_labels_non_html_text_sources(cache, capsys):

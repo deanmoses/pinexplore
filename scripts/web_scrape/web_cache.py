@@ -24,7 +24,9 @@ live on disk rather than in SQLite to keep the DB lean and the FTS index fast.
 
 Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
-    search(term)          FTS5 BM25-ranked pages (url, title, snippet)
+    search(term)          FTS5 BM25-ranked pages (url, title, snippet). Units
+                          AND together and a double-quoted run is one phrase,
+                          so '"upper magnet" knocker' is phrase-and-word
     quote(url, needle)    sentence(s) in a page's text containing a needle —
                           matching ignores case, smart quotes, and whitespace
                           runs (so a phrase spanning a line break still hits);
@@ -520,25 +522,85 @@ def get_by_raw_url(
             con.close()
 
 
-def _fts_query(term: str) -> str:
-    """Turn a plain search term into an FTS5 AND-of-quoted-tokens expression.
+def _fts_units(term: str) -> tuple[list[str], bool]:
+    """Split a search term into units on whitespace *outside* double quotes,
+    plus whether a quote was left open.
 
-    Each whitespace token is wrapped in double quotes (a literal phrase) so FTS5
-    operator characters in user input can't break the query; multiple tokens AND
-    together. Note this re-quotes every token, so it does not preserve a
-    hand-written FTS expression — pass plain search words.
+    A double-quoted run is one unit however much whitespace it contains, which
+    is what lets a caller ask for a phrase; bare words split as they always did.
+    A quote is consumed rather than escaped into the output, so no quote
+    character ever reaches the FTS parser — but it is replaced by a space, not
+    deleted. That is the difference between preserving a term's meaning and
+    changing it: ``unicode61`` reads a quote as a separator, so ``a"b`` is the
+    two tokens ``a b``, and deleting the quote would silently make it the one
+    token ``ab`` — a different document. Units are whitespace-normalized after
+    the substitution, so the extra spaces leave no trace, and a run that holds
+    no content (``""``) contributes no unit.
+
+    A NUL is substituted the same way, and for the same reason: FTS5 scans its
+    query as a C string, so a NUL truncates it mid-token and raises
+    ``unterminated string`` — the one character besides ``"`` that this guard
+    cannot let through. ``unicode61`` reads it as a separator too, so a space
+    stands in for it losslessly. It is not a quote, though, and does not toggle.
+
+    An unbalanced quote runs its unit to the end of the string — the guard here
+    exists so no input raises, and rejecting would reintroduce exactly the error
+    path it removes. The flag lets the CLI say what it ran.
     """
-    tokens = term.split()
-    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    units: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    for ch in term:
+        if ch == '"':
+            in_quote = not in_quote
+            buf.append(" ")  # a space, never nothing — see the docstring
+        elif ch == "\0":
+            buf.append(" ")  # likewise, but delimits nothing
+        elif ch.isspace() and not in_quote:
+            units.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    units.append("".join(buf))
+    normalized = (" ".join(u.split()) for u in units)
+    return [u for u in normalized if u], in_quote
+
+
+def _fts_expr(units: list[str]) -> str:
+    """Already-split units as an FTS5 expression: each one a quoted phrase,
+    ANDed by juxtaposition. Split out so the CLI can show what it ran without
+    re-parsing the term."""
+    return " ".join(f'"{u}"' for u in units)
+
+
+def _fts_query(term: str) -> str:
+    """Turn a search term into an FTS5 AND-of-phrases expression.
+
+    Each unit from ``_fts_units`` goes out as one double-quoted FTS5 phrase, so
+    ``"upper magnet" knocker`` searches for the phrase *and* the word, while
+    ``upper magnet`` ANDs two words as before. Quoting every unit is the
+    injection guard: FTS5 operator characters inside one stay inert, so no user
+    input can reach the parser as syntax.
+
+    Returns ``""`` for a term holding no unit at all. FTS5 rejects an empty match
+    expression, so callers must treat that as "no hits" rather than pass it on.
+    """
+    units, _unbalanced = _fts_units(term)
+    return _fts_expr(units)
 
 
 def search(
     term: str, limit: int = 20, con: sqlite3.Connection | None = None
 ) -> list[SearchHit]:
-    """FTS5 BM25-ranked pages matching ``term`` (AND across whitespace tokens).
+    """FTS5 BM25-ranked pages matching ``term``.
 
-    Returns ``SearchHit`` dicts, best match first.
+    Units AND together; a double-quoted run is one phrase
+    (``'"upper magnet" knocker'``). Returns ``SearchHit`` dicts, best match
+    first — or none at all when ``term`` holds nothing searchable.
     """
+    query = _fts_query(term)
+    if not query:
+        return []
     own = con is None
     con = con or connect(read_only=True)
     try:
@@ -552,7 +614,7 @@ def search(
             ORDER BY bm25(pages_fts)
             LIMIT ?
             """,
-            (_fts_query(term), limit),
+            (query, limit),
         ).fetchall()
         return [cast("SearchHit", dict(r)) for r in rows]
     finally:
@@ -1416,6 +1478,19 @@ _TYPE_LABELS = {
 
 
 def _cmd_search(term: str, limit: int) -> int:
+    units, unbalanced = _fts_units(term)
+    if unbalanced:
+        # search() reads the open quote to end of term rather than raising. That
+        # is the charitable reading — the usual cause is shell quoting, not
+        # intent — but reinterpreting a query without saying so is the failure
+        # this syntax exists to fix, so show the expression that actually ran.
+        # Naming one phrase as "the" open quote's would misreport: the quote can
+        # own part of a unit (`foo"bar` is one unit, half bare word) or none of
+        # one (`foo "` leaves the trailing phrase empty).
+        print(
+            f"unbalanced quote; searched {_fts_expr(units) or 'nothing'}",
+            file=sys.stderr,
+        )
     hits = search(term, limit=limit)
     if not hits:
         print(f"no pages match: {term}", file=sys.stderr)
@@ -1799,7 +1874,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_search = sub.add_parser("search", help="FTS5 BM25-ranked pages matching a term")
-    p_search.add_argument("term")
+    p_search.add_argument(
+        "term",
+        help="words AND together; a double-quoted run is one phrase. Wrap the "
+        "whole term in single quotes so the shell keeps the double ones: "
+        "search '\"upper magnet\" knocker'",
+    )
     p_search.add_argument("--limit", type=int, default=20)
 
     p_quote = sub.add_parser(
