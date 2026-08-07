@@ -50,15 +50,19 @@ previous one wasn't enough):
     section(url, heading) one heading's block(s), without the whole page
     get(url)              the full page record — the last resort
 
-Plus one read that isn't a rung, because it asks about the corpus rather than
-about a page:
+Plus two reads that aren't rungs, because they ask where to go rather than what
+a page says:
     have(urls)            which of these URLs are already cached — the
                           planning question, before any of the above
+    links(url)            the documents a cached page links to, each with its
+                          anchor text, deduplicated and normalized to cache
+                          keys — what PDFs a manufacturer's support page holds.
+                          Re-parsed from the blob per call; nothing persisted
 
 These are also a CLI (``python web_cache.py search|quote|outline|section|
-have|get``), so pulling a quote from a shell is one command just like caching
-a page is. The three search scopes are one command there too, narrowed by
-``--url`` and ``--section``/``--pages``.
+links|have|get``), so pulling a quote from a shell is one command just like
+caching a page is. The three search scopes are one command there too, narrowed
+by ``--url`` and ``--section``/``--pages``.
 """
 
 from __future__ import annotations
@@ -227,6 +231,22 @@ def blob_path(sha: str, ext: str = "html") -> Path:
     pass ``content_types.extension_for(row["content_type"])``.
     """
     return RAW_DIR / f"{sha}.{ext}"
+
+
+def blob_for(rec: PageRow) -> Path | None:
+    """Where a stored row's blob lives, or None when its type maps to nowhere.
+
+    The row-shaped face of ``blob_path``: a row carries ``content_sha`` but not
+    the extension, so reaching its file also takes the content-type-to-extension
+    mapping. Existence is the caller's question — a missing blob is a real
+    state, and callers report it differently.
+    """
+    # Function-level: the module's top level is stdlib-only.
+    from content_types import extension_for
+
+    content_type = rec["content_type"]
+    ext = extension_for(content_type) if content_type is not None else None
+    return None if ext is None else blob_path(rec["content_sha"], ext)
 
 
 def now_iso() -> str:
@@ -2298,6 +2318,87 @@ def have(urls: list[str], con: sqlite3.Connection | None = None) -> list[Holding
             con.close()
 
 
+class LinkRecord(TypedDict):
+    """One outbound link from a page — ``links()``'s answer."""
+
+    url: NormalizedUrl  # normalized, so it is a cache key: feeds have()/web_fetch
+    anchor: str  # "" when the anchor wrapped only an image
+    # What the path *says*, not what the server would serve — only a fetch
+    # settles that, which is why the CLI shows every bucket alongside a filter.
+    ext: str
+
+
+# Bounded and anchored, so a dotted path that is not an extension — Wikipedia's
+# ``/wiki/Atari,_Inc.`` — contributes no bucket rather than a junk one.
+_LINK_EXT_RE = re.compile(r"\.([a-z0-9]{1,5})$")
+
+
+def _link_ext(url: NormalizedUrl) -> str:
+    path = urllib.parse.urlsplit(url).path.lower()
+    match = _LINK_EXT_RE.search(path.rpartition("/")[2])
+    return match.group(1) if match else ""
+
+
+def _resolution_base(rec: PageRow) -> str:
+    """The address relative links in this row's blob resolve against."""
+    raw_url = rec["raw_url"]
+    # Prefer raw_url, which keeps the trailing slash normalization strips:
+    # `manual.pdf` means something different under /support/ than under
+    # /support. Absolute only — a scheme-less base would resolve a
+    # root-relative href to a host-less `https:///manuals/x.pdf`.
+    if raw_url and raw_url.lower().startswith(("http://", "https://")):
+        try:
+            if normalize_url(raw_url) == rec["url"]:  # i.e. nothing redirected
+                return raw_url
+        except ValueError:
+            pass  # unparseable tells us nothing
+    # A redirected row falls back to the slash-stripped key, so a
+    # document-relative href on one can resolve wrongly.
+    return rec["url"]
+
+
+def links(url: str, con: sqlite3.Connection | None = None) -> list[LinkRecord]:
+    """The documents a cached page links to, in document order.
+
+    [] for three cases the CLI separates: not cached, blob missing from disk,
+    and a type that has no links.
+    """
+    from content_types import handler_for
+
+    rec = get(url, con=con)
+    if rec is None:
+        return []
+    content_type = rec["content_type"]
+    handler = handler_for(content_type) if content_type else None
+    if handler is None:
+        return []
+
+    # pages.text carries no hrefs, so links come from the blob, not the row.
+    blob = blob_for(rec)
+    if blob is None or not blob.exists():
+        return []
+    raw = blob.read_bytes()
+    # The header charset was never stored, so the handler re-derives it from
+    # the bytes, as in web_backfill.
+    pairs = handler.links(raw, handler.decode(raw, None), _resolution_base(rec))
+
+    seen: dict[NormalizedUrl, LinkRecord] = {}
+    for href, anchor in pairs:
+        try:
+            target = normalize_url(href)
+        except ValueError:
+            continue  # one bad href costs the page's other links nothing
+        parts = urllib.parse.urlsplit(target)
+        # The scheme drops mailto:/tel:/javascript:; the host is a backstop, so
+        # a fetchable-looking `https:///x.pdf` can never reach the fetcher.
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            continue
+        if target == rec["url"] or target in seen:
+            continue
+        seen[target] = LinkRecord(url=target, anchor=anchor, ext=_link_ext(target))
+    return list(seen.values())
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -2327,21 +2428,9 @@ _TYPE_LABELS = {
 
 
 def _blob_line(rec: PageRow) -> str | None:
-    """``blob: <path>`` for a row, or None when its type maps to no extension.
-
-    Assembled here because a row carries only ``content_sha``, and reaching the
-    file from that also takes the ``raw/<sha>.<ext>`` layout and the
-    content-type-to-extension mapping.
-    """
-    # Function-level: the handler registry is needed nowhere else here, and
-    # web_cache's readers import it for sqlite-backed reads alone.
-    from content_types import extension_for
-
-    content_type = rec["content_type"]
-    ext = extension_for(content_type) if content_type is not None else None
-    if ext is None:
-        return None
-    return f"blob: {blob_path(rec['content_sha'], ext)}"
+    """``blob: <path>`` for a row, or None when its type maps to no extension."""
+    path = blob_for(rec)
+    return None if path is None else f"blob: {path}"
 
 
 def _render_handoff_line(rec: PageRow) -> str | None:
@@ -2909,14 +2998,17 @@ def _validated_pages(
 
 
 def _read_url_list(path: str) -> list[str]:
-    """URLs from a file. Blank and ``#`` lines skipped.
+    """URLs from a file, or from stdin when ``path`` is ``-``. Blank and ``#``
+    lines skipped.
 
     Reads the same file ``web_fetch.py --from-file`` takes — its
     ``url<TAB>query`` TSV — taking the URL column, so one list drives both:
-    check what you hold, then fetch what you don't.
+    check what you hold, then fetch what you don't. ``links`` emits that shape
+    too, so ``-`` makes discovery-then-check a pipe rather than a temp file.
     """
+    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     urls: list[str] = []
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -2983,6 +3075,86 @@ def _cmd_have(urls: list[str], from_file: str | None) -> int:
         tally += f", {len(invalid)} unparseable"
     print(tally, file=sys.stderr)
     return 1 if missing or invalid else 0
+
+
+_NO_EXT = "(none)"
+
+
+def _ext_histogram(found: list[LinkRecord]) -> str:
+    """``pdf:132  (none):35`` — every bucket, commonest first.
+
+    Always printed: ``--ext`` can only guess from the address (a PDF served
+    from ``/download?id=7`` has no extension), so what it set aside stays
+    visible rather than reading as a complete answer.
+    """
+    tally: dict[str, int] = {}
+    for link in found:
+        key = link["ext"] or _NO_EXT
+        tally[key] = tally.get(key, 0) + 1
+    ranked = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    return "  ".join(f"{ext}:{count}" for ext, count in ranked)
+
+
+def _cmd_links(
+    url: str, exts: str | None, host: str | None, external: bool, limit: int
+) -> int:
+    rec = _require_page(url)
+    found = links(url)
+    if not found:
+        # Only one of these is about the page; "no links" would send a reader
+        # off to grep a blob that isn't there or was never link-bearing.
+        blob = blob_for(rec)
+        if blob is not None and not blob.exists():
+            print(f"blob missing, cannot read links: {blob}", file=sys.stderr)
+        else:
+            label = _TYPE_LABELS.get(rec["content_type"] or "")
+            kind = f" ({label} documents carry no links)" if label else ""
+            print(f"no links in {url}{kind}", file=sys.stderr)
+        return 1
+
+    # Before filtering: the histogram describes the document, not the slice.
+    print(f"{len(found)} unique outbound links", file=sys.stderr)
+    print(f"by extension: {_ext_histogram(found)}", file=sys.stderr)
+
+    shown = found
+    if exts is not None:
+        wanted = {e.strip().lower() for e in exts.split(",") if e.strip()}
+        # How a shell names the bucket the histogram prints as "(none)".
+        wanted = {"" if e in ("none", _NO_EXT) else e for e in wanted}
+        shown = [link for link in shown if link["ext"] in wanted]
+    page_host = urllib.parse.urlsplit(rec["url"]).hostname or ""
+    if host is not None:
+        target_host = host.strip().lower()
+        shown = [
+            link
+            for link in shown
+            if (urllib.parse.urlsplit(link["url"]).hostname or "") == target_host
+        ]
+    if external:
+        shown = [
+            link
+            for link in shown
+            if (urllib.parse.urlsplit(link["url"]).hostname or "") != page_host
+        ]
+    if len(shown) < len(found):
+        print(f"{len(shown)} shown after filtering", file=sys.stderr)
+
+    truncated = limit > 0 and len(shown) > limit
+    for link in shown[:limit] if truncated else shown:
+        # Two columns and nothing else, so the URL pipes into `have`/web_fetch.
+        print(f"{link['url']}\t{link['anchor']}")
+    if truncated:
+        # stdout is block-buffered when redirected while stderr is not.
+        sys.stdout.flush()
+        print(
+            f"showing {limit} of {len(shown)} (--limit 0 for all; --ext/--host "
+            f"narrow better than truncation)",
+            file=sys.stderr,
+        )
+    if not shown:
+        print("nothing matched the filter", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_get(url: str) -> int:
@@ -3115,10 +3287,42 @@ def main(argv: list[str] | None = None) -> int:
     p_section.add_argument("url")
     p_section.add_argument("heading")
 
+    p_links = sub.add_parser(
+        "links",
+        help="documents a cached page links to (url<TAB>anchor text on stdout)",
+        description=(
+            "Outbound links, deduplicated and normalized to cache keys, so the "
+            "URL column pipes straight into `have --from-file -` or web_fetch. "
+            "The extension histogram always prints to stderr: --ext can only "
+            "guess from the address (a PDF served from /download?id=7 has no "
+            "extension), so what it set aside stays visible."
+        ),
+    )
+    p_links.add_argument("url")
+    p_links.add_argument(
+        "--ext",
+        help="keep only these path extensions, comma-separated (e.g. pdf,zip). "
+        '"none" selects the extensionless bucket',
+    )
+    p_links.add_argument("--host", help="keep only links to this exact host")
+    p_links.add_argument(
+        "--external", action="store_true", help="keep only links off this page's host"
+    )
+    p_links.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="rows to print (default %(default)s; 0 for all). The guardrail "
+        "against a 600-link encyclopedia page, not the way to narrow — "
+        "--ext and --host are",
+    )
+
     p_have = sub.add_parser("have", help="which of these URLs are already cached")
     p_have.add_argument("urls", nargs="*", help="URLs to check")
     p_have.add_argument(
-        "--from-file", help="file of URLs, one per line (web_fetch's TSV works too)"
+        "--from-file",
+        help="file of URLs, one per line (web_fetch's TSV works too); "
+        "- reads stdin, so `links <url> --ext pdf | have --from-file -` works",
     )
     p_get = sub.add_parser("get", help="full page record (text on stdout)")
     p_get.add_argument("url")
@@ -3143,6 +3347,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_outline(args.url, args.min_chars)
         case "section":
             return _cmd_section(args.url, args.heading)
+        case "links":
+            return _cmd_links(args.url, args.ext, args.host, args.external, args.limit)
         case "have":
             return _cmd_have(args.urls, args.from_file)
         case "get":

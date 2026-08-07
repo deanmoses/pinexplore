@@ -21,6 +21,10 @@ web_fetch.py <url> --force                                  # …refetch even th
 web_fetch.py --from-file urls.tsv                           # batch, from url<TAB>query rows (query optional, logged)
 web_fetch.py --from-file urls.tsv --max-age 99999           # …fetch only what's missing (plain refetches >30d)
 web_cache.py have --from-file urls.tsv                      # which of these do we already hold?
+web_cache.py links <url>                                    # what documents does a cached page point at?
+web_cache.py links <url> --ext pdf                          # …just the PDFs
+web_cache.py links <url> --ext pdf --limit 0 | cut -f1 | web_cache.py have --from-file -  # …which does cache already hold
+
 web_import.py <file> --url <url>                            # hand-saved copy, for a site that refuses the fetcher
 web_pdfocr.py                                               # OCR cached PDFs' sheet images into the searchable ocr tier (macOS)
 web_pdfocr.py --url <url> [--force]                         # …one document; --force re-reads one already OCR'd
@@ -163,6 +167,17 @@ The fetcher skips on **freshness**, not presence — `--max-age` defaults to 30 
 A URL that doesn't parse is reported as `INVALID` rather than missing, because it was never looked up. One malformed entry never aborts the run.
 
 The tally goes to stderr and the exit status is non-zero when anything is missing or unparseable, so `have` also works as a precondition in a script. For a programmatic answer use `have()` in Python, which returns one `{"asked", "page", "stored_url", "error"}` record per URL in the order asked — the CLI prints for people, the functions return data, as with every other read here.
+
+### `links`: a document's outbound links
+
+```console
+$ uv run python scripts/web_scrape/web_cache.py links https://www.sternpinball.com/manuals --ext pdf
+159 unique outbound links
+by extension: pdf:132  (none):27
+132 shown after filtering
+https://wp.sternpinball.com/…/ACDC_Pro_web.pdf    AC/DC Pro Manual Download File
+…
+```
 
 ### Import: when fetching fails
 
@@ -391,13 +406,14 @@ A video with **no captions at all** (common for livestream archives) logs a loud
 
 Every capability is also a function in `web_cache.py`.
 
-| CLI                                    | Python                                                                                            |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `search "<term>"`                      | `search()`                                                                                        |
-| `search --url`                         | `search_sections()`                                                                               |
-| `search --url --section`               | `search_matches()`                                                                                |
-| `quote`                                | `quote()` — plain spans; `quote_hits()` adds each hit's `heading` and `pdf_document_page_numbers` |
-| `outline` / `section` / `get` / `have` | `outline()` / `section()` / `get()` / `have()`                                                    |
+| CLI                      | Python                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| `search "<term>"`        | `search()`                                                                                        |
+| `search --url`           | `search_sections()`                                                                               |
+| `search --url --section` | `search_matches()`                                                                                |
+| `quote`                  | `quote()` — plain spans; `quote_hits()` adds each hit's `heading` and `pdf_document_page_numbers` |
+
+The rest have the same name in both.
 
 The CLI prints; functions return structured data. The OCR tier rides that data rather than living only in the CLI: a `SearchHit` carries each tier's own counts (`matches`/`sections` and `ocr_matches`/`ocr_sections`) plus `snippet_tier`; `SectionHit`, `MatchHit` and `OutlineEntry` each carry a scalar `tier`; and `section()` returns `{text, tier}` blocks, so a caller always knows whether it is holding citable text or machine-read ink.
 

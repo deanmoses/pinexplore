@@ -560,6 +560,50 @@ def _extract_html(html: str) -> ExtractedMeta:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Links
+# --------------------------------------------------------------------------- #
+
+# Matched on the tag, not on the href attribute: ``<link rel="stylesheet">``
+# carries one too, and outnumbers the PDFs on a manufacturer's support page.
+_LINK_TAGS = ("a", "area")
+
+
+def _extract_links(html: str, url: str) -> list[tuple[str, str]]:
+    """``(absolute href, anchor text)`` pairs, in document order."""
+    import contextlib
+    from urllib.parse import urljoin
+
+    tree = _parse_tree(html)
+    if tree is None:
+        return []
+
+    # The first ``<base>`` *carrying an href* sets the document base; one with
+    # only a ``target`` does not, and a malformed one costs the page nothing.
+    base = url
+    for el in tree.iter("base"):
+        href = (el.get("href") or "").strip()
+        if not href:
+            continue
+        with contextlib.suppress(ValueError):
+            base = urljoin(url, href)
+        break
+
+    found: list[tuple[str, str]] = []
+    for el in tree.iter(*_LINK_TAGS):
+        href = (el.get("href") or "").strip()
+        # Both address this document rather than another one.
+        if not href or href.startswith("#"):
+            continue
+        try:
+            absolute = urljoin(base, href)
+        except ValueError:
+            continue  # one bad href costs its own row, not the page's
+        # Collapsed, so anchor text can never carry the tab the CLI prints on.
+        found.append((absolute, _collapse_ws(el.text_content())))
+    return found
+
+
 class HtmlHandler(ContentHandler):
     """Web pages: charset-decoded, converted whole to markdown, render-eligible.
 
@@ -589,6 +633,11 @@ class HtmlHandler(ContentHandler):
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:
         assert text is not None  # HTML always carries decoded text (or a render's)
         return _extract_html(text)
+
+    @override
+    def links(self, raw: bytes, text: str | None, url: str) -> list[tuple[str, str]]:
+        assert text is not None
+        return _extract_links(text, url)
 
     @override
     def thin_warning(

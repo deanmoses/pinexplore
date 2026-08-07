@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import web_cache
-from content_types import extension_for, handler_for
+from content_types import handler_for
 
 
 def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
@@ -88,12 +88,15 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                 tally[key] += 1
                 print(f"skip ({source}): {row['url']}")
                 continue
-            ext = extension_for(row["content_type"]) or "html"
-            blob = web_cache.blob_path(row["content_sha"], ext=ext)
-            if not blob.exists():
+            # None means a type no handler claims, which ``handler_for`` above
+            # has already ruled out for this row — but it lands in the same
+            # tally as a blob that isn't there: either way nothing to re-extract.
+            blob = web_cache.blob_for(row)
+            if blob is None or not blob.exists():
                 tally["skipped (missing blob)"] += 1
+                name = blob.name if blob is not None else f"<{row['content_type']}>"
                 print(
-                    f"WARNING: blob missing: {blob.name} for {row['url']}",
+                    f"WARNING: blob missing: {name} for {row['url']}",
                     file=sys.stderr,
                 )
                 continue

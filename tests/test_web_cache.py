@@ -2642,3 +2642,304 @@ def test_outline_withholds_page_shaped_headings_the_ocr_map_reserves(cache):
     assert wc.section(url, "Rules", con=cache) == [
         {"text": "# Rules\n\ntyped rules", "tier": "text"}
     ]
+
+
+# --------------------------------------------------------------------------- #
+# links: the navigation read — outbound links derived from the stored blob
+# --------------------------------------------------------------------------- #
+
+
+def _seed_html(
+    con: sqlite3.Connection, url: str, html: str, *, raw_url: str | None = None
+) -> str:
+    """Seed a page and write its blob, which `_seed` alone does not."""
+    body = html.encode()
+    normalized = wc.normalize_url(url)
+    _seed(
+        con,
+        url=normalized,
+        raw_url=raw_url or url,
+        content=body,
+        content_type="text/html",
+        text_source="html",
+    )
+    path = wc.blob_path(wc.content_sha(body), ext="html")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    return normalized
+
+
+def test_links_resolves_relative_hrefs_and_normalizes_to_cache_keys(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<a href="/manuals/x.pdf">X Manual</a>'
+        '<a href="https://other.com/y.pdf?utm_source=nav">Y Manual</a>',
+    )
+    found = wc.links(url, con=cache)
+    assert [(link["url"], link["anchor"], link["ext"]) for link in found] == [
+        ("https://a.com/manuals/x.pdf", "X Manual", "pdf"),
+        ("https://other.com/y.pdf", "Y Manual", "pdf"),
+    ]
+
+
+def test_links_resolve_against_the_unnormalized_fetch_address(cache):
+    # normalize_url strips a trailing slash, and `manual.pdf` means something
+    # different with and without it — so resolution uses raw_url, not the key.
+    url = _seed_html(
+        cache,
+        "https://a.com/support/",
+        '<a href="manual.pdf">Manual</a>',
+        raw_url="https://a.com/support/",
+    )
+    assert url == "https://a.com/support"  # the key really did lose the slash
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/support/manual.pdf"
+    ]
+
+
+def test_links_never_resolve_against_a_scheme_less_stored_address(cache):
+    # normalize_url accepts a scheme-less address and web_fetch stores raw_url
+    # verbatim, so such a base would resolve "/manuals/x.pdf" host-less.
+    url = _seed_html(
+        cache,
+        "https://a.com/support/",
+        '<a href="/manuals/x.pdf">X</a>',
+        raw_url="a.com/support/",
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/manuals/x.pdf"
+    ]
+
+
+def test_links_fall_back_to_the_stored_url_when_the_page_redirected(cache):
+    # raw_url holds what was requested, which on a redirect is another page.
+    url = _seed_html(
+        cache,
+        "https://a.com/final/page",
+        '<a href="manual.pdf">Manual</a>',
+        raw_url="https://a.com/old/address",
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/final/manual.pdf"
+    ]
+
+
+def test_links_honor_a_base_href(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<head><base href="https://cdn.a.com/docs/"></head>'
+        '<body><a href="manual.pdf">Manual</a></body>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://cdn.a.com/docs/manual.pdf"
+    ]
+
+
+def test_links_take_the_first_base_that_carries_an_href(cache):
+    # `<base target=_blank>` is legal and common; the href-bearing one wins.
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<head><base target="_blank"><base href="https://cdn.a.com/docs/"></head>'
+        '<body><a href="manual.pdf">Manual</a></body>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://cdn.a.com/docs/manual.pdf"
+    ]
+
+
+def test_links_survive_a_malformed_base_href(cache):
+    # urljoin raises on an invalid IPv6 literal, which would otherwise abort
+    # extraction for the whole page.
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<head><base href="http://[::1"></head>'
+        '<body><a href="/manual.pdf">Manual</a></body>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/manual.pdf"
+    ]
+
+
+def test_links_ignore_stylesheets_and_images_but_keep_image_maps(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<head><link rel="stylesheet" href="/site.css"></head>'
+        '<body><img src="/logo.png">'
+        '<map><area href="/manuals/a.pdf" alt="A"></map>'
+        '<a href="/manuals/b.pdf">B</a></body>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/manuals/a.pdf",
+        "https://a.com/manuals/b.pdf",
+    ]
+
+
+def test_links_drop_non_web_schemes_and_addresses_of_the_page_itself(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<a href="mailto:x@a.com">Mail</a>'
+        '<a href="tel:+1">Call</a>'
+        '<a href="javascript:void(0)">Menu</a>'
+        '<a href="#top">Back to top</a>'
+        '<a href="">Empty</a>'
+        '<a href="https://a.com/support">This page</a>'
+        '<a href="/real.pdf">Real</a>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/real.pdf"
+    ]
+
+
+def test_links_dedupe_by_target_keeping_the_first_anchor_text(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<a href="/manual.pdf">Operations Manual</a>'
+        '<a href="/manual.pdf?utm_source=footer">click here</a>',
+    )
+    found = wc.links(url, con=cache)
+    assert [(link["url"], link["anchor"]) for link in found] == [
+        ("https://a.com/manual.pdf", "Operations Manual")
+    ]
+
+
+def test_links_survive_an_unparseable_href(cache):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<a href="https://a.com:999999999/x.pdf">Bad</a><a href="/good.pdf">Good</a>',
+    )
+    assert [link["url"] for link in wc.links(url, con=cache)] == [
+        "https://a.com/good.pdf"
+    ]
+
+
+def test_links_returns_empty_when_the_blob_is_missing(cache):
+    # `_seed` writes no blob, so this row's bytes are gone from disk.
+    url = wc.normalize_url("https://a.com/support")
+    _seed(cache, url=url, content="<a href='/x.pdf'>X</a>", content_type="text/html")
+    assert wc.links(url, con=cache) == []
+
+
+def _seed_pdf(con: sqlite3.Connection, url: str, body: bytes) -> str:
+    """Seed a PDF row and its blob — a type whose handler yields no links."""
+    normalized = wc.normalize_url(url)
+    _seed(con, url=normalized, content=body, content_type="application/pdf")
+    path = wc.blob_path(wc.content_sha(body), ext="pdf")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    return normalized
+
+
+def test_links_returns_empty_for_a_type_with_no_link_structure(cache, make_pdf):
+    url = _seed_pdf(cache, "https://a.com/manual.pdf", make_pdf())
+    assert wc.links(url, con=cache) == []
+
+
+def test_cli_links_ext_filter_still_reports_the_buckets_it_excluded(cache, capsys):
+    url = _seed_html(
+        cache,
+        "https://a.com/support",
+        '<a href="/a.pdf">A</a><a href="/b.pdf">B</a>'
+        '<a href="/download?id=7">Hidden manual</a><a href="/c.zip">C</a>',
+    )
+    assert wc.main(["links", url, "--ext", "pdf"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("\n") == 2
+    assert "pdf:2" in captured.err
+    assert "(none):1" in captured.err  # the extensionless one it did NOT show
+    assert "zip:1" in captured.err
+
+
+def test_cli_links_stdout_is_pure_tsv(cache, capsys):
+    url = _seed_html(cache, "https://a.com/s", '<a href="/a.pdf">A Manual</a>')
+    assert wc.main(["links", url]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "https://a.com/a.pdf\tA Manual\n"
+    assert "unique outbound links" in captured.err
+
+
+def test_cli_links_anchor_text_cannot_break_the_tsv(cache, capsys):
+    url = _seed_html(
+        cache, "https://a.com/s", '<a href="/a.pdf">Operations\tManual\n(rev B)</a>'
+    )
+    assert wc.main(["links", url]) == 0
+    out = capsys.readouterr().out
+    assert out == "https://a.com/a.pdf\tOperations Manual (rev B)\n"
+    assert out.count("\t") == 1
+
+
+def test_cli_links_host_keeps_only_that_host(cache, capsys):
+    url = _seed_html(
+        cache,
+        "https://a.com/s",
+        '<a href="/in.pdf">In</a>'
+        '<a href="https://cdn.a.com/x.pdf">CDN</a>'
+        '<a href="https://b.com/out.pdf">Out</a>',
+    )
+    assert wc.main(["links", url, "--host", "cdn.a.com"]) == 0
+    # An exact host match, not a suffix one: a.com must not sweep in cdn.a.com.
+    assert capsys.readouterr().out == "https://cdn.a.com/x.pdf\tCDN\n"
+
+
+def test_cli_links_selects_the_extensionless_bucket_by_name(cache, capsys):
+    url = _seed_html(
+        cache, "https://a.com/s", '<a href="/a.pdf">A</a><a href="/dl?id=7">B</a>'
+    )
+    assert wc.main(["links", url, "--ext", "none"]) == 0
+    assert capsys.readouterr().out == "https://a.com/dl?id=7\tB\n"
+
+
+def test_cli_links_truncates_at_limit_and_says_so(cache, capsys):
+    url = _seed_html(
+        cache,
+        "https://a.com/s",
+        "".join(f'<a href="/{i}.pdf">Doc {i}</a>' for i in range(5)),
+    )
+    assert wc.main(["links", url, "--limit", "2"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("\n") == 2
+    assert "showing 2 of 5" in captured.err
+
+
+def test_cli_links_external_keeps_only_offsite_targets(cache, capsys):
+    url = _seed_html(
+        cache,
+        "https://a.com/s",
+        '<a href="/inside.pdf">In</a><a href="https://b.com/out.pdf">Out</a>',
+    )
+    assert wc.main(["links", url, "--external"]) == 0
+    assert capsys.readouterr().out == "https://b.com/out.pdf\tOut\n"
+
+
+def test_cli_links_on_a_pdf_names_the_type_rather_than_claiming_none(
+    cache, capsys, make_pdf
+):
+    url = _seed_pdf(cache, "https://a.com/manual.pdf", make_pdf())
+    assert wc.main(["links", url]) == 1
+    assert "pdf documents carry no links" in capsys.readouterr().err
+
+
+def test_cli_links_reports_a_missing_blob_apart_from_an_empty_page(cache, capsys):
+    # `_seed` writes no blob — a broken checkout, not a page without links.
+    url = wc.normalize_url("https://a.com/support")
+    _seed(cache, url=url, content="<a href='/x.pdf'>X</a>", content_type="text/html")
+    assert wc.main(["links", url]) == 1
+    assert "blob missing" in capsys.readouterr().err
+
+
+def test_cli_have_reads_urls_from_stdin(cache, capsys, monkeypatch):
+    import io
+
+    url = _seed_html(cache, "https://a.com/held.pdf", "<a href='/x'>x</a>")
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{url}\nhttps://a.com/absent\n"))
+    assert wc.main(["have", "--from-file", "-"]) == 1
+    captured = capsys.readouterr()
+    assert f"cached   {url}" in captured.out
+    assert "MISSING  https://a.com/absent" in captured.out

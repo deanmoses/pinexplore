@@ -126,6 +126,15 @@ class ContentHandler:
         """
         raise NotImplementedError
 
+    def links(self, raw: bytes, text: str | None, url: str) -> list[tuple[str, str]]:
+        """Outbound links as ``(absolute href, anchor text)`` pairs, or [].
+
+        Handlers resolve relative addresses against ``url``, since only they
+        can see a document's own ``<base>``; filtering, normalizing and dedup
+        are the caller's.
+        """
+        return []
+
     def thin_warning(
         self, url: str, *, rendered: bool, render_attempted: bool
     ) -> str | None:
