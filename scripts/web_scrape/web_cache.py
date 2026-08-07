@@ -501,6 +501,18 @@ def upsert_page(
     when ``content_sha`` is unchanged, cleared when the bytes changed. So a
     refetch on a host that can't OCR never strands stale OCR against new
     bytes, and an unchanged refetch never discards an OCR pass's work.
+
+    Deliberate conflation, worth naming: a Vision run that *succeeded and
+    found nothing* also arrives as ``None``, and on unchanged bytes it
+    preserves too. That inverts the text layer's rule, where successful-empty
+    is a finding that overwrites — and the inversion is the point. ``text``
+    is the citable record of what extraction currently yields and the quote
+    gate verifies against it, so it must track the current extractor;
+    ``ocr_text`` is a recall-only tier nothing may cite, the stored reading
+    came from these very bytes via a deterministic recognizer (so it is never
+    stale while the sha holds), and keeping the richer of two readings of
+    identical bytes can mislead no one. A supplied/result flag here would
+    exist only to let a weaker rerun delete evidence the bytes still support.
     """
     con.execute(
         """
@@ -1380,7 +1392,10 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     rows are ``tier='ocr'``: what the sheets hold is ink, verified by
     rendering, but where the sheets are is a fact the map can state. On a
     transcription the heading rows still lead — they map the citable text,
-    which is this read's first job — with the sheet rows appended after.
+    which is this read's first job — with the sheet rows appended after. A
+    page-shaped heading in the transcription (``# Page 1``) is withheld: the
+    map that owns the namespace reserves it, as on a text-paginated document,
+    and listing a name that resolves to different text would be a false map.
     """
     rec = get(url, con=con)
     if not rec:
@@ -1416,6 +1431,12 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
                 tier=_TEXT_TIER,
             )
         )
+    # The text layer has no markers (or this branch wouldn't run), so if the
+    # OCR tier has a page map it is the one defining `page N` — it must be
+    # listed below, or the addresses section()/search answer to would be
+    # missing from the map. Computed before the heading loop because owning
+    # the namespace also *reserves* it there.
+    ocr_entries = _ocr_page_entries(rec)
     # Collapse repeats of a name in the same place in the tree, held at first
     # appearance so the tree still reads top-down. Popping the closed ancestors
     # first leaves `stack` as this heading's own path, which is the key.
@@ -1425,6 +1446,15 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
         while stack and stack[-1].level >= h.level:
             stack.pop()
         stack.append(h)
+        if ocr_entries and _PAGE_NAME.match(h.text.strip().casefold()):
+            # A page-shaped heading in the transcription ("# Page 1") names
+            # something `section()` will never resolve to it — the page
+            # namespace is reserved for the map that owns it, exactly as on a
+            # text-paginated document, where such headings are deliberately
+            # unaddressable and never listed. Printing the row would show an
+            # address that resolves to different text. It stays on the stack:
+            # its children are real sections and keep their tree identity.
+            continue
         path: _TreePath = tuple((a.level, a.text.casefold()) for a in stack)
         chars = len(_heading_block(doc, k))
         # A deeper next heading is this occurrence's child; collapsing such an
@@ -1442,10 +1472,7 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
                 level=h.level, heading=h.text, chars=chars, count=1, tier=_TEXT_TIER
             )
         )
-    # The text layer has no markers (or this branch wouldn't run), so if the
-    # OCR tier has a page map it is the one defining `page N` — list it, or
-    # the addresses section()/search answer to would be missing from the map.
-    entries.extend(_ocr_page_entries(rec))
+    entries.extend(ocr_entries)
     return entries
 
 

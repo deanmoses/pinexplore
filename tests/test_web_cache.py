@@ -2612,3 +2612,33 @@ def test_search_tolerates_a_cache_from_before_the_ocr_tier(tmp_path, monkeypatch
         {"section": None, "matches": 1, "tier": "text"}
     ]
     con.close()
+
+
+def test_outline_withholds_page_shaped_headings_the_ocr_map_reserves(cache):
+    # A transcription's "# Page 1" heading names something section() will
+    # never resolve to it once the OCR map owns the page namespace — listing
+    # it would show an address that resolves to different text. Same rule as
+    # a text-paginated document, where such headings are never listed either.
+    url = wc.normalize_url("https://pdf.example/transcribed-paged.pdf")
+    _seed(
+        cache,
+        url=url,
+        text="# Page 1\n\ntyped first page\n\n# Rules\n\ntyped rules",
+        ocr_text="sheet one ink\n\f\nsheet two ink\n\f",
+        content_type="application/pdf",
+        text_source="manual",
+    )
+    entries = wc.outline(url, con=cache)
+    assert [(e["heading"], e["tier"]) for e in entries] == [
+        ("Rules", "text"),
+        ("page 1", "ocr"),
+        ("page 2", "ocr"),
+    ]
+    # The invariant the filter protects: every listed name resolves to the
+    # text it was listed for.
+    assert wc.section(url, "page 1", con=cache) == [
+        {"text": "sheet one ink", "tier": "ocr"}
+    ]
+    assert wc.section(url, "Rules", con=cache) == [
+        {"text": "# Rules\n\ntyped rules", "tier": "text"}
+    ]

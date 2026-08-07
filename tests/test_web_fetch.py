@@ -862,3 +862,25 @@ def test_image_with_rich_ocr_is_not_thin(cache, monkeypatch, capsys):
     )
     _run(cache, "https://x.com/flyer.jpg")
     assert "OCR found little/no text" not in capsys.readouterr().err
+
+
+def test_successful_empty_ocr_keeps_the_stored_reading_on_unchanged_bytes(
+    cache, monkeypatch
+):
+    # Vision succeeding and finding nothing arrives as ocr_text=None, the same
+    # shape as "no opinion" — deliberately (see upsert_page): the bytes are
+    # unchanged, the stored reading came from those very bytes, and ocr_text
+    # is a recall-only tier nothing may cite, so the richer reading of
+    # identical pixels stays. Contrast the text layer, where successful-empty
+    # is a finding that overwrites because quotes verify against it.
+    _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO")
+    _stub_get(
+        monkeypatch, body=JPEG_BYTES, content_type="image/jpeg", decode_body=False
+    )
+    _run(cache, "https://x.com/flyer.jpg")
+
+    _stub_ocr(monkeypatch, None)  # a later Vision reads nothing off same bytes
+    _run(cache, "https://x.com/flyer.jpg", force=True)
+
+    row = _page(cache, "https://x.com/flyer.jpg")
+    assert row["ocr_text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
