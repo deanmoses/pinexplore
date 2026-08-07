@@ -335,7 +335,7 @@ END;
 -- rowid, NOT an ocr_text column on pages_fts: FTS5 normalizes bm25 by a row's
 -- total token count across every column, so a shared table would penalize a
 -- document's *text*-tier rank for having been OCR'd even at weight zero. Two
--- tables give two independent bm25 spaces (see docs/plans/pdf_ocr/PdfOcr.md).
+-- tables give two independent bm25 spaces.
 -- ocr_text alone — url/title stay pages_fts's, or an address token would match
 -- a document once per tier.
 CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(
@@ -420,7 +420,7 @@ def init_schema(con: sqlite3.Connection) -> None:
     # `executescript` committed and nothing below has run yet.
     if "html_file" in pages_cols or "text_sha" in fetches_cols or legacy_ocr_rows:
         _backup_before_destructive_migration()
-    # `ocr_text` arrived with PDF OCR (docs/plans/pdf_ocr/PdfOcr.md): the
+    # `ocr_text` holds the machine-read tier: the
     # machine-read tier, stored apart from `text` because quotes verify against
     # `text` alone and OCR is not character-exact enough to cite. First among
     # the migrations because the ocr_* triggers _SCHEMA just created reference

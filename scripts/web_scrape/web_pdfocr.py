@@ -6,7 +6,7 @@ critical words (model names as table headers, coil charts baked into diagrams)
 are often ink the text layer never held. This pass rasterizes each sheet with
 Quartz and reads it with macOS Vision, storing the result in ``ocr_text`` — the
 findable, never-citable tier ``search`` indexes alongside the text layer. The
-division of labor (docs/plans/pdf_ocr/PdfOcr.md): OCR provides findability;
+division of labor: OCR provides findability;
 citation comes from rendering the sheet and reading the ink.
 
     # every un-OCR'd PDF in the cache (~560ms/sheet, single-threaded)

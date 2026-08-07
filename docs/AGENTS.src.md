@@ -45,18 +45,14 @@ the catalog. Its job is to surface corrections.
 
 ### How a finding becomes a fix
 
-Now that the catalog is live, full re-ingests no longer happen — corrections
-discovered in pinexplore are applied as **data patches**: numbered, attributed,
-cited YAML files in flippatch's `patches/`, replayed onto flipcommons with
+Corrections discovered in pinexplore are applied as **data patches**: numbered,
+attributed, cited YAML files in flippatch's `patches/`, replayed onto flipcommons with
 `make ingest-patches`. Web-sourced evidence — a cite whose `ref` is the page URL and whose `quote` is the verbatim excerpt — comes from pinexplore's [web evidence cache](WebCache.md). The canonical patch guides live in the flipcommons repo:
 
 - [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
   — the patch file format and how patches are applied.
 - [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md)
   — the authoring workflow: the `patchkit` helper, worksheets, and `expect:` guards.
-
-Editing pindata's seed Markdown directly (the pre-launch bulk path) is mostly
-mothballed; see [PindataScripts.md](PindataScripts.md).
 
 ## Requirements
 
@@ -132,7 +128,7 @@ The build **fails** if integrity checks don't pass — query `SELECT * FROM _vio
 
 ## Web Evidence Cache
 
-`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_pages` / `web_fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). `search` itself narrows in three scopes: a term ranks documents with a match count each, `--url` lists that document's matching sections with theirs, and `--section` (or `--pages`, a sheet range) shows the matches with surrounding words. It searches two tiers: `text` (citable) and `ocr` (machine-read PDF sheets and images via `web_pdfocr.py`; findable but never quotable — hits labelled `(ocr)` are cited by rendering the sheet with `Read(<blob>, pages=N)` and reading the ink). See [WebCache.md](WebCache.md) for the full guide.
+`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_pages` / `web_fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). `search` itself narrows in three scopes: a term ranks documents with a match count each, `--url` lists that document's matching sections with theirs, and `--section` (or `--pages`, a sheet range) shows the matches with surrounding words. It searches two tiers: `text` (the document's own words) and `ocr` (machine-read PDF sheets and images via `web_pdfocr.py`; hits labelled `(ocr)` are read by rendering the sheet with `Read(<blob>, pages=N)`). See [WebCache.md](WebCache.md) for the full guide.
 
 ## Remote Data (Cloudflare R2)
 

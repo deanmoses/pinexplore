@@ -25,11 +25,10 @@ class ExtractedMeta(NamedTuple):
     title: str | None
     last_updated: str | None
     text: str | None
-    # Machine-read (OCR) words, kept apart from ``text`` because they are
-    # findable but never citable: quotes verify against ``text`` alone (see
-    # docs/plans/pdf_ocr/PdfOcr.md). A handler whose content is pixels (an
-    # image) returns its OCR here with ``text=None`` — it read the document
-    # without claiming a citable text layer.
+    # Machine-read (OCR) words, kept apart from ``text``: they are findable,
+    # but they are the machine's reading, not the document's own words. A
+    # handler whose content is pixels (an image) returns its OCR here with
+    # ``text=None`` — it read the document without claiming a text layer.
     ocr_text: str | None = None
     # True when this run produced no *result* — the backend the type needs is
     # missing (image OCR on a non-macOS host) or it ran and failed (Vision

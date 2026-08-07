@@ -12,14 +12,12 @@ what decides the blob extension (a PNG blob must not be stored as ``.jpg``) and
 the magic-byte signature, and nothing else differs. Adding TIFF or WebP later is
 another two-line subclass.
 
-OCR'd words are findable, never citable: they land in ``ocr_text`` (the
-machine-read tier) with ``text`` and ``text_source`` NULL, because measured
-line-exactness against ground truth is ~88% — a wrong-but-plausible reading
-(``1/16"`` for ``11/16"``) would survive quote verification and land in the
-catalog. To cite an image, open the blob and read the words off the picture;
-the only way an image acquires a citable text layer is a human transcription
-through ``web_import.py`` (``text_source='manual'``), where a person is
-answerable for the words. See docs/plans/pdf_ocr/PdfOcr.md.
+OCR'd words are findable, but they are the machine's reading: they land in
+``ocr_text`` (the machine-read tier) with ``text`` and ``text_source`` NULL,
+because measured line-exactness against ground truth is ~88% — a
+wrong-but-plausible reading (``1/16"`` for ``11/16"``) reads perfectly fine.
+An image acquires a text layer only through a human transcription filed with
+``web_import.py`` (``text_source='manual'``).
 """
 
 from __future__ import annotations

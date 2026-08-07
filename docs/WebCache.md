@@ -8,7 +8,6 @@ Flipcommons catalog data are written as curated [data patches](#citing--quoting)
 - extracts text from web sites, PDFs, video transcripts
 - provides a **searchable corpus** of pinball evidence that grows over years
 - captures **provenance** — when we fetched and the document's own publish/modified date
-- supports [automated quote verification](#the-verify-gate)
 
 ## How to use
 
@@ -45,7 +44,7 @@ web_cache.py section <pdf-url> "page 41"                    # …on a PDF, one s
 # --- lift a span for a citation ---
 web_cache.py quote <url> "2024"                             # text containing a needle; on a PDF each hit names its page(s)
 web_cache.py quote <url> "2024" --context 3                 # …each hit widened to ±3 lines
-web_cache.py quote <url> "<the whole quote>"                # …whole quote as the needle: a hit is the verification
+web_cache.py quote <url> "<the whole quote>"                # …whole quote as the needle: does the document contain it?
 
 # --- view one PDF page as an image (Claude Code built-in) ---
 Read(<blob path>, pages="27")                               # blob path: quote/outline/section print it (PDFs, images)
@@ -54,7 +53,7 @@ Read(<blob path>, pages="27")                               # blob path: quote/o
 web_cache.py get <url>                                      # full document; text on stdout, row fields + blob on stderr
 ```
 
-The reads are needle-driven: each costs the same however big the document is. That matters because a comment-heavy web page can hold 360K chars of text and a large PDF 670K. `get` is last resort, not the start.
+The reads are needle-driven: each costs the same however big the document is. That matters because a comment-heavy web page or a large PDF can hold hundreds of thousands of chars. `get` is last resort, not the start.
 
 If you are trying to suck all the information out of a document — such as you're trying to fill in every piece of information about a model or manufacturer or person record — `get` the stored text in a subagent so only the results reach your context; see [Extracting everything a document knows](#extracting-everything-a-document-knows).
 
@@ -87,7 +86,7 @@ matches: 15 in 1 section
 snippet: … [HAGGIS] PINBALL … may have its roots in Australia …
 ```
 
-### Pull the quotable span
+### Pull the span
 
 Spans are labelled with the section it sits in (`--context 1` widens each hit to a line either side):
 
@@ -105,8 +104,6 @@ cite:
   quote: "any remaining assets are sold in an attempt to raise money for creditors of the company"
   locator: in the Welcome to Pinball News – First & Free section
 ```
-
-In Flippatch, `make verify-quotes` then confirms the quote against the cached text before the patch ships.
 
 ## Getting documents in
 
@@ -194,9 +191,9 @@ The rules that bind an import:
 - **Store the bytes under the URL that serves them** — the image URL, not the viewer page that displays it. The file type is taken from the magic bytes, not the filename.
 - **Words are mandatory — citable or findable.** A document nothing can find or quote is refused. Citable text comes from `--text-file` (recorded as `text_source = 'manual'` — a person is answerable for it) or the file's own handler (a PDF's text layer). An image is findable without a transcription: its OCR lands in `ocr_text`, searchable but never quotable. A scanned PDF imports with no text at all — `web_pdfocr.py` reads its sheets afterwards.
 - **A reviewed transcription outranks a later re-extraction.** A refetch never replaces `manual` text while the bytes are unchanged; when the bytes did change, the new extraction wins loudly. Changing a transcription is a deliberate act through `web_import.py --force`.
-- **Machine-read text is never imported as citable.** OCR run outside this tool used to come in under a `text_source = 'ocr'` label; that label is retired — machine readings belong in `ocr_text`, and the OCR pass produces them from the blob itself.
+- **Machine-read text is never imported as a text layer.** Machine readings belong in `ocr_text`, which the OCR pass produces from the blob itself.
 
-To cite an image, open the blob and read the words off the picture (`--dry-run` previews the import, including its OCR draft, writing nothing). A hand-typed transcription via `--text-file` is what makes an image quotable; keep the document's line structure — the quote gate's whitespace collapsing handles the rest.
+To cite an image, open the blob and read the words off the picture (`--dry-run` previews the import, including its OCR draft, writing nothing). A hand-typed transcription via `--text-file` is what gives an image a text layer; keep the document's line structure.
 
 ## Finding & reading
 
@@ -223,13 +220,13 @@ A **match count is matched phrases plus matched loose words**: `'"camel toes" ba
 
 Match windows are **stored lines verbatim and unmarked**, so any part of one can be lifted into a cite's `quote` — unlike the global snippet, which elides with `…` and brackets its matches. `--surrounding-words` sizes a window in words rather than lines (a PDF sheet's lines are short and irregular, so ±3 lines means something different on every document) but whole lines still come out, keeping table rows intact. N is a cap on lines either side too, which only ever bites on blank runs: a blank line holds no words, so without it two matches a page apart would merge into one window of mostly whitespace. A window's padding never leaves the section it is filed under, so a window that sits inside one carries its locator. The exception is a match that itself runs past the section's end: that comes back whole and labelled `section boundary` rather than truncated, since a span missing the words it was found for would be worse than one without a locator. Overlapping windows merge and say how many matches they absorbed. `--limit` caps how many are shown and reports what it withheld.
 
-**Search reads two tiers.** `text` is the citable layer (a document's own words); `ocr` is machine-read sheet ink from [the OCR pass](#pdfs) — findable, verified by rendering the sheet, never quoted. Every scope keeps the tiers apart: a document row carries each tier's own counts (`95 in 35 sections (text) · 12 in 4 (ocr)` — the asymmetry says whether OCR found anything the text layer missed), section lists and match windows interleave both in sheet order with each row labelled, and a `snippet (ocr)` label means the snippet is machine-read. The tier says where the words came from, not which is more accurate: on manuals whose text layer is mojibake (seven Stern manuals store headings as a cipher), the `ocr` tier is the only readable one. When any un-OCR'd PDFs remain, `search` says so on stderr rather than implying completeness.
+**Search reads two tiers.** `text` is the document's own words; `ocr` is machine-read sheet ink from [the OCR pass](#pdfs), read by rendering the sheet. Every scope keeps the tiers apart: a document row carries each tier's own counts (`95 in 35 sections (text) · 12 in 4 (ocr)` — the asymmetry says whether OCR found anything the text layer missed), section lists and match windows interleave both in sheet order with each row labelled, and a `snippet (ocr)` label means the snippet is machine-read. The tier says where the words came from, not which is more accurate: on a manual whose text layer is mojibake, the `ocr` tier is the only readable one. When any un-OCR'd PDFs remain, `search` says so on stderr rather than implying completeness.
 
 Two documents can both match with no text match at all, since the index covers url and title as well: `url/title match, no text layer` is a document whose bytes are cached but unreadable — a scanned PDF the OCR pass hasn't reached — while `url/title match, 0 text matches` is an ordinary document that simply doesn't say the word.
 
 ### Search syntax
 
-Units of a term AND together, and a **double-quoted run is one phrase**: `'"upper magnet" knocker'` asks for the phrase and the loose word, where `upper magnet` asks only that both words appear somewhere in the document. On this corpus that is 1 hit against 28 — worth reaching for whenever you know one exact caption and are guessing at the rest. The shell has to be told to keep the double quotes, hence the surrounding single ones. Every unit is sent as a quoted phrase, so FTS5 operator syntax in a term (`AND`, `OR`, `NEAR(…)`, `*`) is searched for literally rather than obeyed, and no term can raise a query error; an unbalanced quote runs to the end of the term, and the CLI shows the expression it ran.
+Units of a term AND together, and a **double-quoted run is one phrase**: `'"upper magnet" knocker'` asks for the phrase and the loose word, where `upper magnet` asks only that both words appear somewhere in the document. Worth reaching for whenever you know one exact caption and are guessing at the rest. The shell has to be told to keep the double quotes, hence the surrounding single ones. Every unit is sent as a quoted phrase, so FTS5 operator syntax in a term (`AND`, `OR`, `NEAR(…)`, `*`) is searched for literally rather than obeyed, and no term can raise a query error; an unbalanced quote runs to the end of the term, and the CLI shows the expression it ran.
 
 `search` spans **every cached type** — web pages, PDFs, OCR'd images and video transcripts together. A non-web hit says what it is (`type:`) and how its citable text was derived (`text_source:`), so you know to weigh before quoting; web pages are the unlabeled common case:
 
@@ -251,7 +248,7 @@ snippet: … made under the label '[Mecatronics]') - Speed Test …
 
 `outline()` tells you where a long document's weight sits ("intro 2K, machine list 4K, 41 comments 32K") for a couple hundred chars; `section()` then pulls just the block you need. If a heading matches more than once, `section()` returns every matching block — ambiguity surfaces rather than silently picking one — and `outline()` correspondingly collapses that name to one row carrying `x2` and the summed size.
 
-That collapse is what keeps the map usable on page-builder sites, where the meaningful labels are styled `<div>`s and the real `<h2>`s are UI chrome. A live product page came back with **100 rows, 38 after collapsing** — `RETIRED` twelve times, edition panels repeated once per responsive variant. Repeats collapse only when they sit in the same place in the tree (same ancestors, same level), so a name that recurs under different parents stays several rows. `--min-chars N` trims further by hiding blocks too small to be content (38 → 29 on that page), and says on stderr how many it withheld.
+That collapse is what keeps the map usable on page-builder sites, where the meaningful labels are styled `<div>`s and the real `<h2>`s are UI chrome. A live product page can come back with a repeated label many times over — `RETIRED` once per edition panel, panels repeated once per responsive variant. Repeats collapse only when they sit in the same place in the tree (same ancestors, same level), so a name that recurs under different parents stays several rows. `--min-chars N` trims further by hiding blocks too small to be content, and says on stderr how many it withheld.
 
 `section` matches a heading **exactly**, and separates the three reasons a name comes back empty instead of letting all three read as "not in this document": a heading that merely contains the name (`did you mean: 100th Anniversary`), a name that is only body text (`not a heading; appears as text in section(s): Additional Features` — the page-builder shape again), or genuine absence, which stays silent.
 
@@ -291,7 +288,7 @@ The ladder is for needle-driven reads — you have a claim and want its span. Th
 
 **On a PDF that walk is by sheet.** `section(url, "page 41")` returns that sheet's text. A sheet with no extracted text gets no block in `section`.
 
-For a long document, do the read in a subagent so only results enter the main session's context: its prompt is the schema ("read this document's text; for every gameplay feature, credit, spec and date it states, return the verbatim span and the section it sits in"), its return is field → span pairs. The same applies to whole-document questions ("do any of the 41 replies dispute the production count?") — don't pull 38K chars into the main session to extract two sentences. Whole-document extraction is what makes either read reliable: credits live in footers and specs in tables, and both survive with structure intact. Each extracted span then becomes its own cite.
+For a long document, do the read in a subagent so only results enter the main session's context: its prompt is the schema ("read this document's text; for every gameplay feature, credit, spec and date it states, return the verbatim span and the section it sits in"), its return is field → span pairs. The same applies to whole-document questions ("do any of the replies dispute the production count?") — don't pull the whole text into the main session to extract two sentences. Whole-document extraction is what makes either read reliable: credits live in footers and specs in tables, and both survive with structure intact. Each extracted span then becomes its own cite.
 
 ## Citing & quoting
 
@@ -304,7 +301,7 @@ cite:
   locator: in the 1978 machine list # optional: where in the document it sits
 ```
 
-- **`quote`** is the only field that must match the source word for word — it is what `make verify-quotes` checks. Take it from `web_cache.quote()`.
+- **`quote`** must match the source word for word. Take it from `web_cache.quote()`, or transcribe it from a rendered sheet where there is no text layer to take it from.
 - **`locator`** is freeform for a web page, and says where the excerpt lives so a reader can find it.
 - **`note:`** is the edit summary — rationale beyond the evidence, uncertainty, why the value follows. It is never a verbatim excerpt, and a cite carrying a quote usually needs no note at all.
 
@@ -314,7 +311,7 @@ cite:
 
 `quote` is the starting point for a patch's **`cite.quote`** — the verbatim span, not the `note:` above. It labels each hit with the section the span sits in, so **one command produces a whole cite** — the `quote` and the `locator` — instead of quoting first and then hunting for where the words were:
 
-Matching is forgiving but the return is not: finding a hit collapses whitespace runs, straightens smart quotes and ignores case, so a phrase spanning a stored line break is still found — while the text handed back is always the stored lines verbatim. That asymmetry is why every hit you lift still verifies.
+Matching is forgiving but the return is not: finding a hit collapses whitespace runs, straightens smart quotes and ignores case, so a phrase spanning a stored line break is still found — while the text handed back is always the stored lines verbatim.
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py quote https://en.wikipedia.org/wiki/Taito_of_Brazil "Mecatronics"
@@ -335,23 +332,13 @@ The label names the **match**, never the widened window around it, so **a hit ne
 | takes        | one literal needle                                 | AND'd units; a double-quoted run is one phrase     |
 | widens by    | `--context N` lines                                | `--surrounding-words N`                            |
 | also reports | the PDF page(s) a hit sits on, and the blob path   | per-window match counts, and `--limit` withholding |
-| available as | `quote()`, the form flippatch's quote gate imports | `search_matches()`                                 |
+| available as | `quote()`                                          | `search_matches()`                                 |
 
 ### Weighing a quote: text_source
 
-Every document row carries a **`text_source`** label saying what turned the bytes into its _citable_ text: `html` (the markdown conversion), `pdf` (the document's own text layer), `vtt` (a caption track), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, captions a guess about audio — so weigh a quote by its label. Machine-read pixels carry no label because they are never citable text at all: they live in the separate `ocr_text` column, and a row holding only OCR (an image, a fully scanned PDF) has `text_source` NULL.
+Every document row carries a **`text_source`** label saying what turned the bytes into its _citable_ text: `html` (the markdown conversion), `pdf` (the document's own text layer), `vtt` (a caption track), or `manual` (a human transcription). These are not equally trustworthy — a PDF's text layer is what the document contains, captions a guess about audio — so weigh a quote by its label. Machine-read pixels carry no label: OCR lives in the separate `ocr_text` column, and a row holding only OCR (an image, a fully scanned PDF) has `text_source` NULL.
 
-`text_source` is independent of `rendered` (which says where the **bytes** came from): a rendered page is still `text_source = 'html'`. Rows cached before the column existed are NULL too.
-
-### Quote-less cites: when the fact is only in pixels
-
-A checkmark in a PDF feature matrix is vector art; there is no text to quote. The honest cite is the analogue of a locator-only book cite: `ref` the document URL, `locator` the PDF document page (`printed page 17, PDF document page 27`), `note` the visual observation — `quote:` is optional in the cite grammar. **Do not quote the feature's row label instead**: it is verbatim and it is in the document, but it establishes the row, never the edition column — a true string doing work its context doesn't support, which is the column-splice forgery in a new costume. flippatch's `RULE_QUOTE_SUPPORTS_CLAIM` would rightly reject it; the point is not to author it. (The authoring-side rules live in flipcommons' [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md); this paragraph is the reading-side statement of the same policy.)
-
-### The verify gate
-
-Every quote is machine-checked. flippatch's `make verify-quotes` gate is **fast, deterministic and offline** — it requires the cite's `quote` to be a verbatim substring of `pages.text` once smart quotes are straightened and whitespace runs collapsed, and it never does a live fetch. A quote needs to verify for one brief window: from the moment a session authors the patch to the moment it's committed. After that the quote is shipped and immutable — the gate globs pending `patches/[0-9]*.yaml` only, so a change to how this cache extracts text can never break a shipped patch.
-
-**If a quote doesn't verify, the presumption is that the quote is wrong** — changing cached text to match a claim is a deliberate human act, never a side effect of making a check pass.
+`text_source` is independent of `rendered` (which says where the **bytes** came from): a rendered page is still `text_source = 'html'`.
 
 See DataPatches.md for the full cite grammar (a URL cite needs its website root seeded first; a known-scheme URL like `ipdb.org` cites as `scheme:id`), and [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md) for the authoring rules on quoting.
 
@@ -386,13 +373,13 @@ For these, look at the page visually. Claude Code can render a single page strai
 
 A hit whose `--context` window spans multiple pages lists every page the shown text touches (`pdf document pages: 26, 27`).
 
-**A word drawn as artwork is found through the OCR tier.** A table cell, a diagram callout, a label baked into a figure — none of it is in the text layer, and before the OCR pass such a needle returned `no matches`, indistinguishable from a document that never says it. Now `web_pdfocr.py` rasterizes every sheet (Quartz) and reads it (macOS Vision) into `pages.ocr_text`, so `search` finds the ink and names the sheet: in the Galactic Tank Force manual, `UPPER MAGNET` lives only inside a diagram image, and a scoped search returns `page 41 (ocr)` where the text tier returns nothing. The division of labor: **OCR provides findability, not citability** — measured line-exactness against ground truth is ~88%, and a wrong-but-plausible reading (`1/16"` for `11/16"`) would survive quote verification. So an `(ocr)` hit's payoff step is `Read(<blob>, pages="41")`: render the sheet, read the ink, and cite what you read — a quote-less cite (`ref`, a `locator` naming the sheet, a `note` recording what was seen). `quote` never answers from the OCR tier. `page N` counts sheets from the front of the file in both tiers — the two columns are asserted to agree at write time — but the folio printed on the sheet is different ink.
+**A word drawn as artwork is found through the OCR tier.** A table cell, a diagram callout, a label baked into a figure — none of it is in the text layer. `web_pdfocr.py` rasterizes every sheet (Quartz) and reads it (macOS Vision) into `pages.ocr_text`, so `search` finds the ink and names the sheet: in the Galactic Tank Force manual, `UPPER MAGNET` lives only inside a diagram image, and a scoped search returns `page 41 (ocr)` where the text tier returns nothing. **The tier finds; your eyes read.** A wrong-but-plausible misreading (`1/16"` for `11/16"`) reads perfectly fine, so an `(ocr)` hit's payoff step is `Read(<blob>, pages="41")` — render the sheet and read it. `quote` never answers _from_ the OCR tier. `page N` counts sheets from the front of the file in both tiers — the two columns are asserted to agree at write time — but the folio printed on the sheet is different ink.
 
 A fully scanned PDF has no text layer at all: the blob caches, no text is extracted, and the fetch warns — but once OCR'd it gets a page map (`outline`/`section` answer from the OCR tier, labelled `(ocr)`) and every scope finds its words. `quote` on such a row says the matches are OCR and to render rather than quote. Until the pass runs, the row cannot say whether the document is image-only or whether extraction was merely unavailable on the host that fetched it (a missing poppler, a document poppler couldn't read); `search` prints a coverage line while any PDF remains un-OCR'd. OCR is macOS-only and separate from fetching: a refetch on any host keeps the stored OCR while the bytes are unchanged, and clears it when they changed so the next pass re-reads them.
 
 ### Images
 
-Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and OCR (macOS Vision — no system binary, no model download, no network) reads them at fetch time into `ocr_text`: findable by every search scope, labelled `(ocr)`, never citable. To cite an image, open the blob and read the words off the picture — the same render-and-cite step a PDF sheet gets, except the blob already is the picture. A picture with no legible text prints a loud warning rather than silently caching a blank document.
+Images — JPG, PNG — sometimes contain printed evidence: a scanned flyer, a photographed manual page, a screenshot of a page that won't scrape. We store the image's raw bytes, and OCR (macOS Vision — no system binary, no model download, no network) reads them at fetch time into `ocr_text`: findable by every search scope, labelled `(ocr)`, never citable. To cite an image, open the blob and read the words off the picture — the same read-it-with-your-eyes step a PDF sheet gets, except the blob already is the picture. Unlike a PDF, an image quote stays gated: file the transcription through `web_import.py --text-file` and it verifies like any text. A picture with no legible text prints a loud warning rather than silently caching a blank document.
 
 The only way an image acquires a citable text layer is a human transcription through `web_import.py` (`text_source = 'manual'`), where a person is answerable for the words. The image's `title` and `last_updated` stay null unless the importer supplies them. OCR is macOS-only; on another platform the bytes still cache with a warning — and a host that can't OCR never blanks a reading a Mac already stored.
 
@@ -425,8 +412,7 @@ The **SQLite database is the system-of-record**; `make explore` materializes it 
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
   cache.sqlite                 system-of-record: pages + fetches + pages_fts (FTS5)
   raw/<sha256(raw)>.<ext>      raw document blobs, content-addressed
-                               (kept for re-extraction; citations verify
-                                against pages.text, never blobs)
+                               (kept for re-extraction and for rendering)
 
 scripts/web_scrape/
   web_cache.py               store: schema, URL normalization, upsert, and
