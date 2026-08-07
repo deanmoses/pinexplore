@@ -26,9 +26,10 @@ Query helpers (an escalation ladder — reach for the next rung only when the
 previous one wasn't enough):
     search(term)          FTS5 BM25-ranked pages, each with its match count and
                           how many sections it matched in — per tier: `text`
-                          (the citable layer) and `ocr` (machine-read sheet
-                          images; findable, verified by rendering the sheet,
-                          never quoted). Units AND together and a double-quoted
+                          (the extracted layer) and `ocr` (machine-read sheet
+                          images; findable, but don't quote it — render
+                          the sheet and quote what you read). Units AND
+                          together and a double-quoted
                           run is one phrase, so '"upper magnet" knocker' is
                           phrase-and-word
     search_sections(url, term)
@@ -110,7 +111,7 @@ class PageRow(TypedDict):
     content_type: str | None
     text: str | None
     # Machine-read (OCR) text for the row's sheet/pixel content — the findability
-    # tier. Never citable: quotes verify against `text` only (see PdfOcr.md).
+    # tier. Don't quote it; instead, render the sheet and read the text there.
     ocr_text: str | None
     rendered: int | None  # 1 if the blob is a headless-browser render, else 0/null
     text_source: str | None  # how `text` was derived: html|pdf|vtt|manual
@@ -129,9 +130,9 @@ class SearchHit(TypedDict):
     title: str | None
     last_updated: str | None
     content_type: str | None  # what kind of document the hit is
-    text_source: str | None  # how the citable text was derived (html|pdf|vtt|manual)
+    text_source: str | None  # how the extracted text was derived (html|pdf|vtt|manual)
     snippet: str | None  # None on a row with nothing to snippet
-    snippet_tier: str  # which tier the snippet shows; "ocr" text is not citable
+    snippet_tier: str  # which tier the snippet shows; don't quote "ocr" directly
     # Per tier: matched phrases plus matched loose words, and how many sections
     # they fall in. None when the count could not be taken (a marker collision,
     # see MarkerCollisionError); 0 when the tier exists but holds no match.
@@ -291,7 +292,7 @@ CREATE TABLE IF NOT EXISTS pages (
   http_status      INTEGER,
   content_type     TEXT,               -- canonical MIME; the blob's extension derives from it
   text             TEXT,               -- extracted readable text (current version)
-  ocr_text         TEXT,               -- machine-read (OCR) text; findable, never citable
+  ocr_text         TEXT,               -- machine-read (OCR) text; findable but don't quote it
   rendered         INTEGER,            -- 1 if the blob is a headless-browser render
   text_source      TEXT,               -- how `text` was derived: html|pdf|vtt|manual
   imported         INTEGER             -- 1 if a human handed these bytes over
@@ -469,7 +470,7 @@ def init_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE fetches DROP COLUMN text_sha")
     # With `ocr_text` in place, `text_source='ocr'` retires: machine-read words
     # belong in `ocr_text` whatever produced them, and `text_source` goes back
-    # to answering one question — how the *citable* layer was derived. Moving
+    # to answering one question — how the *text* layer was derived. Moving
     # rather than clearing, so a host that cannot OCR loses nothing: the old
     # reading stands as the row's OCR tier until a Mac replaces it. Idempotent
     # by construction (once run, nothing matches); the ocr_au/pages_au triggers
@@ -526,9 +527,8 @@ def upsert_page(
     found nothing* also arrives as ``None``, and on unchanged bytes it
     preserves too. That inverts the text layer's rule, where successful-empty
     is a finding that overwrites — and the inversion is the point. ``text``
-    is the citable record of what extraction currently yields and the quote
-    gate verifies against it, so it must track the current extractor;
-    ``ocr_text`` is a recall-only tier nothing may cite, the stored reading
+    is the record of what extraction currently yields, so it must track the
+    current extractor; ``ocr_text`` is a recall-only tier, the stored reading
     came from these very bytes via a deterministic recognizer (so it is never
     stale while the sha holds), and keeping the richer of two readings of
     identical bytes can mislead no one. A supplied/result flag here would
@@ -911,7 +911,7 @@ class OutlineEntry(TypedDict):
     heading: str
     chars: int
     count: int  # how many blocks this name opens (>1 on a repeated heading)
-    # Which layer the row maps: "text" (citable), or "ocr" on a dark document
+    # Which layer the row maps: "text" (extracted), or "ocr" on a dark document
     # whose only page map is machine-read — verify by rendering the sheet.
     tier: str
 
@@ -920,12 +920,12 @@ class SectionBlock(TypedDict):
     """One block ``section()`` returned, and which layer it came from.
 
     The tier rides the text rather than living only in the rung that found it:
-    a function whose contract is verbatim citable text must not quietly start
+    a function whose contract is verbatim extracted text must not quietly start
     returning machine-read ink, and the tier is the whole of the difference.
     """
 
     text: str
-    tier: str  # "text" (citable) or "ocr" (render the sheet to cite)
+    tier: str  # "text" (extracted) or "ocr" (render the sheet and read it)
 
 
 class QuoteHit(TypedDict):
@@ -1411,7 +1411,7 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     ``section()``/``search`` would speak different address vocabularies. Its
     rows are ``tier='ocr'``: what the sheets hold is ink, verified by
     rendering, but where the sheets are is a fact the map can state. On a
-    transcription the heading rows still lead — they map the citable text,
+    transcription the heading rows still lead — they map the extracted text,
     which is this read's first job — with the sheet rows appended after. A
     page-shaped heading in the transcription (``# Page 1``) is withheld: the
     map that owns the namespace reserves it, as on a text-paginated document,
@@ -1421,7 +1421,7 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     if not rec:
         return []
     if not rec.get("text"):
-        # No citable layer at all: the OCR page map, or nothing.
+        # No text layer at all: the OCR page map, or nothing.
         return _ocr_page_entries(rec)
     doc = _doc_of(rec)
     if doc.page_starts:
@@ -1440,14 +1440,20 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     if meta_block is not None:
         entries.append(
             OutlineEntry(
-                level=0, heading="metadata", chars=len(meta_block), count=1,
+                level=0,
+                heading="metadata",
+                chars=len(meta_block),
+                count=1,
                 tier=_TEXT_TIER,
             )
         )
     if body_block is not None:
         entries.append(
             OutlineEntry(
-                level=0, heading="body", chars=len(body_block), count=1,
+                level=0,
+                heading="body",
+                chars=len(body_block),
+                count=1,
                 tier=_TEXT_TIER,
             )
         )
@@ -1544,9 +1550,10 @@ def section(
     resolvable here.
 
     **A dark document answers ``page <N>`` from its OCR page map**, each block
-    ``tier='ocr'``: what comes back is machine-read ink, verified by rendering
-    the sheet, never quoted. Text stays primary — the OCR map defines the page
-    axis only when the text layer has no markers of its own.
+    ``tier='ocr'``: what comes back is machine-read ink, don't quote it —
+    render the sheet and quote the words you read there. Text stays primary —
+    the OCR map defines the page axis only when the text layer has no markers of
+    its own.
 
     A sheet with no extracted text comes back ``[]``, like a name that is
     absent — the return is blocks of text, and such a sheet has none. The two
@@ -1567,9 +1574,7 @@ def section(
         page_doc, page_tier = _page_doc(rec)
         if page_doc.page_starts:
             page_block = _page_block(page_doc, int(page_match.group(1)))
-            return (
-                [SectionBlock(text=page_block, tier=page_tier)] if page_block else []
-            )
+            return [SectionBlock(text=page_block, tier=page_tier)] if page_block else []
     if not rec.get("text"):
         return []
     doc = _doc_of(rec)
@@ -1601,11 +1606,13 @@ _MARK_CLOSE = "\ue001"
 if len(_MARK_OPEN) != 1 or len(_MARK_CLOSE) != 1:  # pragma: no cover - import guard
     raise AssertionError("highlight markers must be exactly one character each")
 
-# Which text layer a hit's counts and windows describe. `text` is the citable
-# layer quotes verify against; `ocr` is machine-read ink — findable, verified
-# by rendering the sheet, never by quoting. The tier says where the words came
-# from, not which reading is more accurate: on the mojibake manuals the text
-# layer is a cipher and the OCR is the faithful reading.
+# Which text layer a hit's counts and windows describe. `text` is the layer a
+# quote can verify against; `ocr` is machine-read ink — findable, and the way
+# to a quote rather than a quote itself: render the sheet and transcribe what
+# you read, since a plausible misreading (`1/16"` for `11/16"`) is invisible in
+# the OCR string. The tier says where the words came from, not which reading is
+# more accurate: on the mojibake manuals the text layer is a cipher and the OCR
+# is the faithful reading.
 _TEXT_TIER = "text"
 _OCR_TIER = "ocr"
 
@@ -1627,6 +1634,7 @@ def _missing_ocr_schema(exc: sqlite3.OperationalError) -> bool:
     return "no such table: ocr_fts" in message or (
         "no such column" in message and "ocr_text" in message
     )
+
 
 # Shared by the CLI and the library so a scripted read and a typed one agree.
 _DEFAULT_SURROUNDING_WORDS = 30
@@ -1912,7 +1920,7 @@ def search(
     row are the decision signal, the same division SearchScopes.md draws for
     url/title matches. A document selected through one tier still reports the
     other tier's counts (backfilled with a scoped query), so the row's
-    asymmetry is always real. The snippet comes from the citable tier when it
+    asymmetry is always real. The snippet comes from the text tier when it
     has matches, else from the OCR tier, labelled so.
 
     The match counts are the triage signal a snippet cannot carry: they say
@@ -1955,9 +1963,7 @@ def search(
             recs,
             key=lambda url: (
                 min(
-                    data.score
-                    for data in tiers[url].values()
-                    if data.score is not None
+                    data.score for data in tiers[url].values() if data.score is not None
                 ),
                 arrival[url],
             ),
@@ -1991,7 +1997,7 @@ def search(
         ocr_data = tiers[url].get(_OCR_TIER)
         matches, sections = _tier_counts(rec, text_data, _TEXT_TIER)
         ocr_matches, ocr_sections = _tier_counts(rec, ocr_data, _OCR_TIER)
-        # The citable tier's snippet leads whenever it has something to show —
+        # The text tier's snippet leads whenever it has something to show —
         # a reader trained onto OCR snippets is being trained off the one habit
         # keeping machine readings out of the catalog.
         if text_data is not None and (matches is None or matches > 0):
@@ -2160,7 +2166,7 @@ def search_matches(
     one thing, so pass at most one; with neither, every match comes back.
 
     Both tiers answer, interleaved in sheet order like ``search_sections``; a
-    window's ``tier`` says whether its text is citable (``text``) or machine-read
+    window's ``tier`` says whether its text is extracted (``text``) or machine-read
     ink to verify by rendering the sheet (``ocr``). Overlapping windows merge
     within their tier and report how many matches they absorbed. Every window
     is returned — capping is the caller's job, so it can say what it withheld.
@@ -2485,8 +2491,8 @@ def _row_facts(rec: PageRow) -> list[str]:
     if not text.strip():
         if ocr.strip():
             facts.append(
-                "no citable text layer — matches here are OCR (machine-read); "
-                "cite by rendering the sheet, never by quoting"
+                "no text layer — matches here are OCR (machine-read); render "
+                "the sheet and quote the words you read, not this OCR text"
             )
         else:
             facts.append(
@@ -2528,9 +2534,7 @@ def _tier_segment(matches: int | None, sections: int | None, tier: str) -> str:
     """One tier's piece of a count line, tier-labelled."""
     if matches is None:
         return f"count unavailable ({tier}): the text contains a highlight marker"
-    return (
-        f"{matches} in {_plural(sections or 0, 'section', 'sections')} ({tier})"
-    )
+    return f"{matches} in {_plural(sections or 0, 'section', 'sections')} ({tier})"
 
 
 def _match_label(hit: SearchHit) -> str:
@@ -2628,8 +2632,8 @@ def _cmd_search(term: str, limit: int) -> int:
         print(f"matches: {_match_label(hit)}")
         if hit["snippet"]:
             # The snippet spans stored line breaks; collapse for one line. The
-            # (ocr) label is the machine-read flag: such a hit is verified by
-            # rendering the sheet, and its wording is never quoted.
+            # (ocr) label is the machine-read flag: render the sheet before
+            # trusting the words, and quote what you read there, not this string.
             label = "snippet (ocr)" if hit["snippet_tier"] == _OCR_TIER else "snippet"
             print(f"{label}: {' '.join(hit['snippet'].split())}")
     if coverage:
@@ -2646,8 +2650,8 @@ _SECTION_COLUMN = 24
 # The one-line meaning of an (ocr) marker, printed once per command whose
 # output carries any — on stderr, so stdout stays the data.
 _OCR_TIER_NOTE = (
-    "(ocr) = machine-read from the sheet image; not citable — render the "
-    "sheet and cite what you read off it"
+    "(ocr) = machine-read from the sheet image; don't quote it — "
+    "render the sheet and quote the words you read off it"
 )
 
 
@@ -2892,10 +2896,7 @@ def _section_miss_hint(url: str, heading: str) -> str | None:
         # tier) — the same resolution `section()` just used to miss.
         page_doc = _page_doc(rec)[0]
         n = int(page_match.group(1))
-        if (
-            not (rec["text"] or "").strip()
-            and not (rec.get("ocr_text") or "").strip()
-        ):
+        if not (rec["text"] or "").strip() and not (rec.get("ocr_text") or "").strip():
             return "no stored text in this row, so no page holds any"
         if not page_doc.page_starts:
             return "no page markers in this document; `page N` names a PDF sheet"
@@ -3185,8 +3186,11 @@ def _cmd_get(url: str) -> int:
     elif rec.get("ocr_text"):
         # The row's only readable content; a full-record read withholds
         # nothing, and the note above stdout says what this is.
-        print("text: (none); printing ocr_text — machine-read, never citable",
-              file=sys.stderr)
+        print(
+            "text: (none); printing ocr_text — machine-read; don't quote it; "
+            "render the sheet and quote what you read",
+            file=sys.stderr,
+        )
         print(rec["ocr_text"])
     return 0
 

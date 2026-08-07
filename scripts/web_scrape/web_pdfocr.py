@@ -5,9 +5,11 @@
 critical words (model names as table headers, coil charts baked into diagrams)
 are often ink the text layer never held. This pass rasterizes each sheet with
 Quartz and reads it with macOS Vision, storing the result in ``ocr_text`` — the
-findable, never-citable tier ``search`` indexes alongside the text layer. The
-division of labor: OCR provides findability;
-citation comes from rendering the sheet and reading the ink.
+findable tier ``search`` indexes alongside the text layer. The division of
+labor: **OCR points you at the sheet; your eyes do the transcribing.** The words
+on a sheet are quotable, but not from this column — a plausible misreading
+(``1/16"`` for ``11/16"``) is invisible here, so a quote comes from rendering the
+sheet and reading the ink.
 
     # every un-OCR'd PDF in the cache (~560ms/sheet, single-threaded)
     uv run python scripts/web_scrape/web_pdfocr.py
@@ -88,7 +90,12 @@ def _render_sheet(quartz: Any, page: Any) -> Any | None:  # noqa: ANN401
         width, height = height, width
     px_w, px_h = max(int(width * SCALE), 1), max(int(height * SCALE), 1)
     ctx = q.CGBitmapContextCreate(
-        None, px_w, px_h, 8, 0, q.CGColorSpaceCreateDeviceRGB(),
+        None,
+        px_w,
+        px_h,
+        8,
+        0,
+        q.CGColorSpaceCreateDeviceRGB(),
         q.kCGImageAlphaNoneSkipLast,
     )
     if ctx is None:
@@ -149,8 +156,9 @@ def ocr_pdf(raw: bytes, url: str) -> tuple[str, int]:
             try:
                 lines = web_ocr.recognize_lines(handler)
             except web_ocr.OcrFailedError as exc:
-                print(f"WARNING: sheet {n} Vision errored: {url} ({exc})",
-                      file=sys.stderr)
+                print(
+                    f"WARNING: sheet {n} Vision errored: {url} ({exc})", file=sys.stderr
+                )
             else:
                 # The confidence floor is the only filter: short numeric lines
                 # (part numbers, pin designators) are exactly what catalog

@@ -41,7 +41,7 @@ def _validate(handlers: tuple[ContentHandler, ...]) -> None:
         name = type(handler).__name__
         assert handler.mime_types, f"{name} declares no mime_types"
         assert handler.extension, f"{name} sets no blob extension"
-        # None is a declaration (this type derives no citable layer — its words
+        # None is a declaration (this type derives no text layer — its words
         # are machine-read, landing in ocr_text); "" is the unset default.
         assert handler.text_source != "", f"{name} declares no text_source"
         if handler.signature is not None:
@@ -64,7 +64,7 @@ EXTRACTABLE_CONTENT_TYPES: frozenset[str] = frozenset(_BY_MIME)
 # Generic/ambiguous labels worth reading so a handler's signature gets a chance:
 # servers routinely serve a real PDF as octet-stream, and a response with no
 # Content-Type header surfaces (via get_content_type's default) as text/plain. We
-# read the (size-capped) body and let ``sniff`` decide, rather than skip a citable
+# read the (size-capped) body and let ``sniff`` decide, rather than skip a quotable
 # document. A sniffable body that matches no signature still skips.
 SNIFFABLE_CONTENT_TYPES: frozenset[str] = frozenset(
     {

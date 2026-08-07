@@ -13,8 +13,10 @@ asked to "read this flyer" will. That property is the whole point here: a page
 in this cache is quoted verbatim downstream, so a fluent wrong transcription
 would be far more damaging than obviously-broken text. Low-confidence lines are
 dropped (``MIN_CONFIDENCE``) so the junk doesn't reach the FTS index; whatever
-survives is still machine output, stored in ``pages.ocr_text`` — the findable,
-never-citable tier — rather than as a text layer.
+survives is still machine output, stored in ``pages.ocr_text`` — the findable
+tier — rather than as a text layer. (An **image** needs a
+human transcription through ``web_import.py --text-file`` to carry a quote at
+all; that is the one path where a person is answerable for the words.)
 
 Imported lazily by the image content handler — a batch with no images never
 loads pyobjc, and a non-macOS host only fails if it actually meets an image.

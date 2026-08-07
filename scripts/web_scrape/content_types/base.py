@@ -49,7 +49,7 @@ class ExtractedMeta(NamedTuple):
 
 
 class ContentHandler:
-    """Base class for a document type the cache can turn into citable evidence.
+    """Base class for a document type the cache can turn into quotable evidence.
 
     Subclasses set the class-level attributes and override the methods. The
     registry instantiates one singleton per subclass; handlers are stateless.
@@ -71,12 +71,12 @@ class ContentHandler:
     # verify (a PDF as ``.pdf``, not mislabeled ``.html``). No default — each type
     # states its own, or the registry rejects it. Required.
     extension: str = ""
-    # How this handler derives its *citable* text, stored on the page row as
+    # How this handler derives its *extracted* text, stored on the page row as
     # ``text_source``. Not a restatement of the content type: it answers "how
     # was this text derived?" — a document's own text layer (``html``, ``pdf``),
     # a caption track (``vtt``), or a human-typed transcription (``manual``, set
     # by the importer rather than by a handler). ``None`` — deliberate, not a
-    # default — declares that this handler derives no citable layer at all: its
+    # default — declares that this handler derives no text layer at all: its
     # words are machine-read and land in ``ocr_text`` (the image handlers).
     # Required — the registry rejects a handler that leaves it at the unset
     # sentinel ``""``, so forgetting it is still an import-time error.

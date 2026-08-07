@@ -108,7 +108,7 @@ class PdfHandler(ContentHandler):
     """PDF documents: bytes stored verbatim, read by poppler, never rendered.
 
     Recognized by the ``%PDF-`` signature even when the header lies (octet-stream,
-    a wrong text/* label, or nothing), so a citable document served sloppily isn't
+    a wrong text/* label, or nothing), so a quotable document served sloppily isn't
     skipped. Not renderable: a scanned PDF reads as thin too, but a browser can't
     extract its text either (that needs OCR, out of scope).
     """

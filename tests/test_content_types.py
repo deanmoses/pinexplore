@@ -104,7 +104,7 @@ def test_image_alias_mime_canonicalizes_to_one_extension():
 def test_each_handler_declares_how_its_text_was_derived():
     # Stored on the page row so a consumer can weigh a quote by its extraction
     # path. An image declares None: its words are machine-read, land in
-    # ocr_text, and no citable layer is derived — stamping a label would
+    # ocr_text, and no text layer is derived — stamping a label would
     # assert otherwise.
     assert ct.handler_for("text/html").text_source == "html"
     assert ct.handler_for("application/pdf").text_source == "pdf"
@@ -114,7 +114,7 @@ def test_each_handler_declares_how_its_text_was_derived():
 
 
 def test_every_registered_handler_declares_a_text_source():
-    # None is a declaration (no citable layer); "" is the unset default the
+    # None is a declaration (no text layer); "" is the unset default the
     # registry rejects at import.
     for handler in ct.HANDLERS:
         assert handler.text_source != "", (
@@ -793,8 +793,8 @@ def _extract_jpeg(monkeypatch, ocr_result):
 
 
 def test_extract_image_puts_ocr_in_the_machine_read_tier(monkeypatch):
-    # OCR'd words are findable, never citable: they land in ocr_text and the
-    # citable text stays None — quotes verify against `text` alone.
+    # OCR'd words are findable but are not a text layer: they land in ocr_text
+    # and the extracted text stays None.
     meta = _extract_jpeg(monkeypatch, "MECATRONICS INDUSTRIA E COMERCIO LTDA.")
     assert meta.text is None
     assert meta.ocr_text == "MECATRONICS INDUSTRIA E COMERCIO LTDA."

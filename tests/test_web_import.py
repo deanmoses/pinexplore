@@ -172,8 +172,8 @@ def test_supplied_text_form_feeds_become_line_breaks(cache, jpeg):
 
 
 def test_ocr_text_lands_in_the_machine_read_tier(cache, jpeg, monkeypatch):
-    # An image imported without a transcription is findable, not citable: its
-    # OCR lands in ocr_text, and no citable layer is claimed.
+    # An image imported without a transcription is findable, not quotable: its
+    # OCR lands in ocr_text, and no text layer is claimed.
     monkeypatch.setattr(web_ocr, "ocr_text", lambda raw: "MACHINE READ THIS")
     _run(cache, jpeg)
     row = _page(cache, FLYER_URL)
@@ -195,7 +195,7 @@ def test_supplied_text_wins_over_ocr(cache, jpeg, monkeypatch):
 
 
 def test_machine_read_text_is_not_an_importable_label(cache, tmp_path, make_pdf):
-    # `ocr` retired as a text_source: machine-read words are never citable, so
+    # `ocr` is not a text_source: machine-read words are not a text layer, so
     # outside OCR can't be imported as a text layer any more — the OCR pass
     # (web_pdfocr) reads a scanned PDF's sheets into ocr_text instead.
     path = tmp_path / "scan.pdf"
@@ -307,7 +307,7 @@ def test_url_is_normalized_and_raw_url_preserved(cache, jpeg):
 
 def test_non_http_url_is_refused(cache, jpeg):
     # The cache key must be the address the bytes actually live at on the web —
-    # a local path is not a citable source.
+    # a local path is not a quotable source.
     with pytest.raises(web_import.ImportRefusedError, match="http"):
         _run(cache, jpeg, text="text", url="file:///tmp/flyer.jpg")
 

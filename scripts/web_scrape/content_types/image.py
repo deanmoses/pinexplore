@@ -68,7 +68,7 @@ class _ImageHandler(ContentHandler):
     can; OCR is the only path to text, so a thin result never escalates.
 
     ``text_source = None``: OCR is this type's entire reading and it lands in
-    ``ocr_text``, so nothing derives a citable layer and stamping a label would
+    ``ocr_text``, so nothing derives a text layer and stamping a label would
     assert otherwise. Images keep OCRing inline at fetch time — one image is
     one Vision call, with no batch to defer.
     """
@@ -85,7 +85,7 @@ class _ImageHandler(ContentHandler):
         self, url: str, *, rendered: bool, render_attempted: bool
     ) -> str | None:
         # Loud, so a 0-quote image isn't silent: an image whose text OCR can't
-        # read is not citable evidence, whatever it depicts. Render flags don't
+        # read is not quotable evidence, whatever it depicts. Render flags don't
         # apply — an image is never rendered.
         return f"WARNING: OCR found little/no text in image: {url}"
 

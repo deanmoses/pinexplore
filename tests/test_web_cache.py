@@ -2327,7 +2327,7 @@ def test_cli_search_rejects_two_addresses_and_a_backwards_range(cache):
 
 
 # --------------------------------------------------------------------------- #
-# The OCR tier — machine-read sheet text: findable, interleaved, never citable
+# The OCR tier — machine-read sheet text: findable, interleaved, not a text layer
 # --------------------------------------------------------------------------- #
 
 # Two sheets in each column, sheet counts agreeing, with `magnet` printed once
@@ -2371,7 +2371,7 @@ def test_search_reports_each_tier_own_counts_on_one_row(cache):
     assert (hit["ocr_matches"], hit["ocr_sections"]) == (1, 1)
     assert hit["has_text"]
     assert hit["has_ocr"]
-    # The citable tier's snippet leads when it has matches.
+    # The text tier's snippet leads when it has matches.
     assert hit["snippet_tier"] == "text"
 
 
@@ -2456,7 +2456,7 @@ def test_section_answers_page_names_from_the_ocr_map_on_a_dark_document(cache):
 
 
 def test_section_never_reads_ocr_when_the_text_layer_is_paginated(cache):
-    # Text is primary: on a mixed document `page N` is the citable sheet, and
+    # Text is primary: on a mixed document `page N` is the extracted sheet, and
     # the machine-read sheet never masquerades as it.
     url = _seed_two_tier(cache)
     assert wc.section(url, "page 2", con=cache) == [

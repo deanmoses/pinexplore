@@ -5,7 +5,7 @@ The escape hatch for sources ``web_fetch.py`` cannot retrieve. Some sites refuse
 us outright — ipdb.org answers HTTP 403 site-wide, rendered or not — while a
 person with a browser can open the very same page. This takes the file that
 person saved and files it in the cache like any other evidence: content-addressed
-blob, extracted text, FTS index, quotable and citable downstream.
+blob, extracted text, FTS index, searchable and quotable downstream.
 
     # a flyer scan the fetcher can't reach, with a reviewed transcription
     uv run python scripts/web_scrape/web_import.py flyer.jpg \\
@@ -29,7 +29,7 @@ under the address that serves that JPEG. Filing image bytes under a viewer page
 survives into every citation.
 
 Words are mandatory: a page nothing can find is a no-op dressed as evidence.
-They come citable or findable. Citable text arrives with ``--text-file``
+They come with a text layer, or findable only. Text arrives with ``--text-file``
 (recorded as ``text_source='manual'`` — a person is answerable for it) or from
 the file's own handler (a PDF's text layer). Findable-only text is machine-read:
 an image's OCR lands in ``ocr_text``, searchable but never quotable — to cite
@@ -59,7 +59,7 @@ from content_types import HANDLERS, ContentHandler, handler_for, sniff
 # What ``--text-source`` may declare: every provenance a handler can produce,
 # plus ``manual``. Derived from the registry rather than spelled out, so a new
 # handler's label is accepted here the moment it exists — and a typo is not.
-# A handler that declares None derives no citable layer (its words are
+# A handler that declares None derives no text layer (its words are
 # machine-read, landing in ocr_text), so it contributes no importable label.
 TEXT_SOURCES: frozenset[str] = frozenset(
     {handler.text_source for handler in HANDLERS if handler.text_source} | {"manual"}
@@ -192,8 +192,8 @@ def import_one(
 
     ``text`` is supplied text and always wins over what the file's handler
     extracts; it lands on ``text_source='manual'`` — a person is answerable for
-    it (``text_source`` can name another citable label where one applies). A
-    machine reading is never imported as citable text: an image's OCR lands in
+    it (``text_source`` can name another label where one applies). A
+    machine reading is never imported as a text layer: an image's OCR lands in
     ``ocr_text``, findable but not quotable, alongside whatever transcription
     was supplied. ``title``/``date`` override extracted values — for an image
     both are otherwise null, since OCR'd words are not a title and an EXIF
@@ -203,7 +203,7 @@ def import_one(
     or date, an unrecognized file type, a supplied text file that is blank, a
     ``text_source`` outside :data:`TEXT_SOURCES` or given without ``text``, an
     already-cached URL without ``force``, or a document that would be neither
-    citable nor findable — no text, no OCR, and no deferred OCR pass coming (a
+    quotable nor findable — no text, no OCR, and no deferred OCR pass coming (a
     scanned PDF passes: ``web_pdfocr.py`` reads its sheets after import).
     ``dry_run`` prints what would be stored and writes nothing — the review
     step for an OCR draft; it accepts ``con=None`` so a fresh checkout can
@@ -280,14 +280,14 @@ def import_one(
         print(f"    blob would be {blob}")
         print(f"    title        {page_title or '(none)'}")
         print(f"    date         {last_updated or '(none)'}")
-        print(f"    text_source  {stored_source or '(none — no citable layer)'}")
+        print(f"    text_source  {stored_source or '(none — no text layer)'}")
         if page_text and page_text.strip():
             print(f"    text ({len(page_text):,} chars) — review against the original:")
             print("\n".join(f"      {line}" for line in page_text.splitlines()))
         elif meta.ocr_text and meta.ocr_text.strip():
             print(
                 f"    ocr_text ({len(meta.ocr_text):,} chars) — machine-read, "
-                f"findable but not citable:"
+                f"findable but not quotable:"
             )
             print("\n".join(f"      {line}" for line in meta.ocr_text.splitlines()))
         elif handler.deferred_ocr:
@@ -302,9 +302,9 @@ def import_one(
             )
         return
 
-    citable = bool(page_text and page_text.strip())
+    has_text = bool(page_text and page_text.strip())
     findable = bool(meta.ocr_text and meta.ocr_text.strip())
-    if not citable and not findable and not handler.deferred_ocr:
+    if not has_text and not findable and not handler.deferred_ocr:
         raise ImportRefusedError(
             f"no text for {normalized}: nothing could find or quote this page. "
             f"Supply --text-file, or run --dry-run to see what extraction found."
@@ -331,7 +331,7 @@ def import_one(
         content_type=handler.canonical_mime or None,
         text=page_text,
         # The machine-read tier rides along whether or not a transcription was
-        # supplied: a reviewed manual text makes the row citable, the OCR keeps
+        # supplied: a reviewed manual text makes the row quotable, the OCR keeps
         # it findable by the words a person didn't happen to transcribe.
         ocr_text=meta.ocr_text,
         rendered=False,
@@ -379,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(TEXT_SOURCES),
         help=(
             "How the --text-file text was derived, when it isn't a human "
-            "transcription (machine-read text is never citable and has no "
+            "transcription (machine-read text is not a text layer and has no "
             "label here — it belongs in ocr_text via the OCR pass)."
         ),
     )

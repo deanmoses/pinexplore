@@ -449,7 +449,7 @@ def test_image_stored_as_jpg_blob_with_ocr_text(cache, monkeypatch):
     _run(cache, "https://x.com/flyer.jpg")
     row = _page(cache, "https://x.com/flyer.jpg")
     assert row["content_type"] == "image/jpeg"
-    # Machine-read words land in the findable tier; no citable layer is
+    # Machine-read words land in the findable tier; no text layer is
     # derived, and text_source stays NULL rather than asserting one.
     assert "O MELHOR FLIPPER" in (row["ocr_text"] or "")
     assert row["text"] is None
@@ -644,7 +644,7 @@ def test_changed_bytes_supersede_manual_text_but_warn(cache, monkeypatch, capsys
 
     row = _page(cache, url)
     # The new version's reading is machine-read, so it lands in ocr_text and
-    # the row no longer claims a citable layer at all.
+    # the row no longer claims a text layer at all.
     assert row["text"] is None
     assert row["text_source"] is None
     assert "text of the new version" in (row["ocr_text"] or "")
@@ -853,7 +853,7 @@ def test_too_large_reports_each_types_own_cap():
 
 
 def test_image_with_rich_ocr_is_not_thin(cache, monkeypatch, capsys):
-    # The thin probe falls back to ocr_text when a handler derives no citable
+    # The thin probe falls back to ocr_text when a handler derives no text
     # layer: an image Vision read a full flyer off must not warn "OCR found
     # little/no text" just because `text` is (by design) NULL.
     _stub_ocr(monkeypatch, "O MELHOR FLIPPER JAMAIS FABRICADO. " * 10)
