@@ -24,7 +24,6 @@ web_cache.py have --from-file urls.tsv                      # which of these do 
 web_cache.py links <url>                                    # what documents does a cached page point at?
 web_cache.py links <url> --ext pdf                          # …just the PDFs
 web_cache.py links <url> --ext pdf --limit 0 | cut -f1 | web_cache.py have --from-file -  # …which does cache already hold
-
 web_import.py <file> --url <url>                            # hand-saved copy, for a site that refuses the fetcher
 web_pdfocr.py                                               # OCR cached PDFs' sheet images into the searchable ocr tier (macOS)
 web_pdfocr.py --url <url> [--force]                         # …one document; --force re-reads one already OCR'd
@@ -177,6 +176,7 @@ by extension: pdf:132  (none):27
 132 shown after filtering
 https://wp.sternpinball.com/…/ACDC_Pro_web.pdf    AC/DC Pro Manual Download File
 …
+showing 100 of 132 (--limit 0 for all; --ext/--host narrow better than truncation)
 ```
 
 ### Import: when fetching fails
