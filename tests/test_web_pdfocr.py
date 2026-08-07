@@ -144,3 +144,27 @@ def test_ocr_pdf_reads_the_fixture_pdf(make_pdf):
     assert text.endswith("\n\f")
     assert text.count("\f") == 1
     assert "Hello PDF evidence" in text
+
+
+def test_ocr_one_discards_a_reading_when_the_row_changed_mid_read(
+    cache, monkeypatch, capsys
+):
+    # OCR of a big manual takes minutes; a refetch can swap the row's bytes
+    # while it runs. Writing by URL alone would attach the old blob's reading
+    # to the new version — the write is sha-guarded, and a miss leaves the row
+    # in the gap for the next pass to read the current bytes.
+    _seed_pdf(cache, url="https://x.com/m.pdf", raw=b"%PDF-v1", text=None)
+    rec = wc.get("https://x.com/m.pdf", con=cache)
+    assert rec is not None
+
+    def _ocr_and_swap(raw: bytes, url: str) -> tuple[str, int]:
+        # Mid-OCR, the document is refetched with new bytes.
+        _seed_pdf(cache, url="https://x.com/m.pdf", raw=b"%PDF-v2", text=None)
+        return "reading of v1\n\f", 1
+
+    monkeypatch.setattr(web_pdfocr, "ocr_pdf", _ocr_and_swap)
+    assert web_pdfocr.ocr_one(cache, rec) is False
+    row = wc.get("https://x.com/m.pdf", con=cache)
+    assert row is not None
+    assert row["ocr_text"] is None  # still in the gap, not mislabelled
+    assert "changed while OCR ran" in capsys.readouterr().err

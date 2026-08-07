@@ -201,8 +201,24 @@ def ocr_one(con: sqlite3.Connection, rec: web_cache.PageRow) -> bool:
             file=sys.stderr,
         )
         return False
-    con.execute("UPDATE pages SET ocr_text = ? WHERE url = ?", (ocr_text, url))
+    # Guarded on the sha captured before the (minutes-long) OCR: a refetch or
+    # forced import can swap the row's bytes mid-read, and writing by URL alone
+    # would attach the old blob's reading to the new version — bypassing the
+    # staleness rule upsert_page enforces. A miss leaves the row in the
+    # ocr_text IS NULL gap, where the next run reads the current bytes.
+    cur = con.execute(
+        "UPDATE pages SET ocr_text = ? WHERE url = ? AND content_sha = ?",
+        (ocr_text, url, rec["content_sha"]),
+    )
     con.commit()
+    if cur.rowcount == 0:
+        print(
+            f"WARNING: not written — the row changed while OCR ran "
+            f"(new bytes or removed): {url}; the next pass reads the "
+            f"current version",
+            file=sys.stderr,
+        )
+        return False
     elapsed = time.monotonic() - started
     print(f"ocr'd ({sheets} sheets, {len(ocr_text):,} chars, {elapsed:.0f}s): {url}")
     return True

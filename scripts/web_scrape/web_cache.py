@@ -1372,30 +1372,22 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
     of one whole-document read. It is a cruder division than headings (a
     credits list can straddle a sheet), and it is the only one available.
 
-    **A dark document is mapped by its OCR pages.** A row with no text layer
-    but an OCR'd blob answers with the machine-read page map, every row
-    ``tier='ocr'`` — what the sheets hold is ink, verified by rendering, but
-    where the sheets are is a fact the map can state.
+    **An unpaginated text layer is followed by the OCR page map.** Whenever
+    ``text`` carries no markers of its own — a fully dark row, or a hand-typed
+    transcription of a scanned PDF — the machine-read page map is what defines
+    ``page N`` (see ``_page_doc``), so it must appear here or this map and
+    ``section()``/``search`` would speak different address vocabularies. Its
+    rows are ``tier='ocr'``: what the sheets hold is ink, verified by
+    rendering, but where the sheets are is a fact the map can state. On a
+    transcription the heading rows still lead — they map the citable text,
+    which is this read's first job — with the sheet rows appended after.
     """
     rec = get(url, con=con)
     if not rec:
         return []
     if not rec.get("text"):
-        # No citable layer at all: the OCR page map, or nothing. Text stays
-        # primary — a document with any stored text is mapped from it below.
-        ocr_doc = _doc_of(rec, _OCR_TIER)
-        if not ocr_doc.page_starts:
-            return []
-        return [
-            OutlineEntry(
-                level=0,
-                heading=f"page {n}",
-                chars=len(_page_block(ocr_doc, n) or ""),
-                count=1,
-                tier=_OCR_TIER,
-            )
-            for n in range(1, len(ocr_doc.page_starts) + 1)
-        ]
+        # No citable layer at all: the OCR page map, or nothing.
+        return _ocr_page_entries(rec)
     doc = _doc_of(rec)
     if doc.page_starts:
         return [
@@ -1450,7 +1442,27 @@ def outline(url: str, con: sqlite3.Connection | None = None) -> list[OutlineEntr
                 level=h.level, heading=h.text, chars=chars, count=1, tier=_TEXT_TIER
             )
         )
+    # The text layer has no markers (or this branch wouldn't run), so if the
+    # OCR tier has a page map it is the one defining `page N` — list it, or
+    # the addresses section()/search answer to would be missing from the map.
+    entries.extend(_ocr_page_entries(rec))
     return entries
+
+
+def _ocr_page_entries(rec: PageRow) -> list[OutlineEntry]:
+    """The OCR tier's page map as outline rows, or none when it has no markers
+    (an image's OCR, or no OCR at all)."""
+    ocr_doc = _doc_of(rec, _OCR_TIER)
+    return [
+        OutlineEntry(
+            level=0,
+            heading=f"page {n}",
+            chars=len(_page_block(ocr_doc, n) or ""),
+            count=1,
+            tier=_OCR_TIER,
+        )
+        for n in range(1, len(ocr_doc.page_starts) + 1)
+    ]
 
 
 def section(
@@ -1553,6 +1565,21 @@ _OCR_TIER = "ocr"
 # The pages column each tier reads. The one mapping, so the roundtrip check,
 # the document parse, and the FTS joins cannot disagree about what a tier is.
 _TIER_COLUMN = {_TEXT_TIER: "text", _OCR_TIER: "ocr_text"}
+
+
+def _missing_ocr_schema(exc: sqlite3.OperationalError) -> bool:
+    """Whether ``exc`` is the one failure the OCR tier tolerates: a cache from
+    before the tier existed, read through a read-only connection that can't
+    migrate it (the first writable open adds the table and column).
+
+    Deliberately this narrow. The tier queries must not swallow
+    ``OperationalError`` wholesale — a malformed FTS index or a SQL regression
+    would then degrade into an empty result, and in this system "no matches"
+    reads as a considered answer about the corpus, not as a failure."""
+    message = str(exc)
+    return "no such table: ocr_fts" in message or (
+        "no such column" in message and "ocr_text" in message
+    )
 
 # Shared by the CLI and the library so a scripted read and a typed one agree.
 _DEFAULT_SURROUNDING_WORDS = 30
@@ -1725,11 +1752,13 @@ def _scoped(
                 row = con.execute(
                     sql, (_MARK_OPEN, _MARK_CLOSE, query, normalize_url(url))
                 ).fetchone()
-            except sqlite3.OperationalError:
-                # A cache pulled before the OCR tier existed (no ocr_fts), read
-                # through a read-only connection that can't migrate it. The
-                # text tier still answers; the first writable open migrates.
-                continue
+            except sqlite3.OperationalError as exc:
+                # Only a pre-OCR cache, and only for the tier it can't hold —
+                # the text tier answers regardless. Anything else raises: see
+                # _missing_ocr_schema.
+                if tier == _OCR_TIER and _missing_ocr_schema(exc):
+                    continue
+                raise
             if row is None:
                 continue
             rec = _row_minus(row, "hl")
@@ -1824,9 +1853,17 @@ def search(
     returns every hit.
 
     Each tier ranks in its own index and the results merge to one row per
-    document, ordered by its better tier; each tier is over-fetched at twice
-    the limit, which loses nothing — a document in neither tier's top can't be
-    in the merged top. A document selected through one tier still reports the
+    document, ordered by its better (lower) raw bm25 score; each tier is
+    over-fetched at twice the limit, which loses nothing — a document in
+    neither tier's top can't be in the merged top. Comparing raw scores across
+    two indexes is knowingly imperfect (different corpora, lengths, and
+    columns), and stays anyway: any fusion rule is arbitrary, and rank-based
+    merging would be systematically worse — it grants "best of each tier"
+    parity, vaulting a tier's single trivial hit over another's many strong
+    ones — while raw scores at least carry real per-document signal across the
+    boundary. The ordering is soft triage; the per-tier counts riding every
+    row are the decision signal, the same division SearchScopes.md draws for
+    url/title matches. A document selected through one tier still reports the
     other tier's counts (backfilled with a scoped query), so the row's
     asymmetry is always real. The snippet comes from the citable tier when it
     has matches, else from the OCR tier, labelled so.
@@ -1852,11 +1889,13 @@ def search(
                 rows = con.execute(
                     sql, (_MARK_OPEN, _MARK_CLOSE, query, fetch)
                 ).fetchall()
-            except sqlite3.OperationalError:
-                # A cache pulled before the OCR tier existed (no ocr_fts), read
-                # through a read-only connection that can't migrate it. The
-                # text tier still answers; the first writable open migrates.
-                continue
+            except sqlite3.OperationalError as exc:
+                # Only a pre-OCR cache, and only for the tier it can't hold —
+                # the text tier answers regardless. Anything else raises: see
+                # _missing_ocr_schema.
+                if tier == _OCR_TIER and _missing_ocr_schema(exc):
+                    continue
+                raise
             for row in rows:
                 rec = _row_minus(row, "score", "snippet", "hl")
                 url = rec["url"]
@@ -1888,8 +1927,10 @@ def search(
                     row = con.execute(
                         _BACKFILL_SQL[tier], (_MARK_OPEN, _MARK_CLOSE, query, url)
                     ).fetchone()
-                except sqlite3.OperationalError:  # pre-OCR cache, as above
-                    continue
+                except sqlite3.OperationalError as exc:
+                    if tier == _OCR_TIER and _missing_ocr_schema(exc):
+                        continue  # pre-OCR cache, as above
+                    raise
                 if row is not None:
                     tiers[url][tier] = _TierData(None, row["snippet"], row["hl"])
     finally:
@@ -2417,16 +2458,19 @@ def _ocr_coverage_note(con: sqlite3.Connection | None = None) -> str | None:
     own = con is None
     con = con or connect(read_only=True)
     try:
-        n = con.execute(
-            "SELECT count(*) FROM pages "
-            "WHERE content_type = 'application/pdf' AND ocr_text IS NULL"
-        ).fetchone()[0]
-    except sqlite3.OperationalError:
-        # A pre-OCR cache has no ocr_text column and nothing OCR'd: the whole
-        # PDF shelf is un-read, which is exactly what the note should say.
-        n = con.execute(
-            "SELECT count(*) FROM pages WHERE content_type = 'application/pdf'"
-        ).fetchone()[0]
+        try:
+            n = con.execute(
+                "SELECT count(*) FROM pages "
+                "WHERE content_type = 'application/pdf' AND ocr_text IS NULL"
+            ).fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if not _missing_ocr_schema(exc):
+                raise
+            # A pre-OCR cache has no ocr_text column and nothing OCR'd: the
+            # whole PDF shelf is un-read, which is what the note should say.
+            n = con.execute(
+                "SELECT count(*) FROM pages WHERE content_type = 'application/pdf'"
+            ).fetchone()[0]
     finally:
         if own:
             con.close()

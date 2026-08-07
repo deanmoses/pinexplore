@@ -2539,3 +2539,76 @@ def test_legacy_ocr_text_source_rows_move_to_the_ocr_tier(tmp_path, monkeypatch)
     # Both FTS indexes followed the move.
     assert wc.search("imported", con=con)[0]["ocr_matches"] == 1
     con.close()
+
+
+def test_outline_appends_the_ocr_page_map_to_an_unpaginated_transcription(cache):
+    # A hand-typed transcription has headings but no page markers, while the
+    # OCR tier defines `page N` (see _page_doc). The map must list both, or
+    # outline and section()/search would speak different address vocabularies.
+    url = wc.normalize_url("https://pdf.example/transcribed.pdf")
+    _seed(
+        cache,
+        url=url,
+        text="# Rules\n\ntyped rules text",
+        ocr_text="sheet one ink\n\f\nsheet two ink\n\f",
+        content_type="application/pdf",
+        text_source="manual",
+    )
+    entries = wc.outline(url, con=cache)
+    assert [(e["heading"], e["tier"]) for e in entries] == [
+        ("Rules", "text"),
+        ("page 1", "ocr"),
+        ("page 2", "ocr"),
+    ]
+    # And the appended addresses resolve where they claim to.
+    assert wc.section(url, "page 2", con=cache) == [
+        {"text": "sheet two ink", "tier": "ocr"}
+    ]
+
+
+def test_search_raises_on_a_broken_text_index_rather_than_answering_empty(cache):
+    # Only the missing-OCR-schema case is tolerated (a pre-migration cache); a
+    # genuinely broken index must raise, because an empty result here reads as
+    # a considered "no matches" about the corpus.
+    _seed(cache, url=wc.normalize_url("https://a.com/x"), text="coil words")
+    cache.executescript("DROP TRIGGER pages_au; DROP TABLE pages_fts;")
+    with pytest.raises(sqlite3.OperationalError):
+        wc.search("coil", con=cache)
+    with pytest.raises(sqlite3.OperationalError):
+        wc.search_sections("https://a.com/x", "coil", con=cache)
+
+
+def test_search_tolerates_a_cache_from_before_the_ocr_tier(tmp_path, monkeypatch):
+    # A pulled pre-migration cache read through a read-only connection: the
+    # text tier answers, the absent OCR tier contributes nothing, and nothing
+    # raises. The first writable open migrates.
+    web_dir = tmp_path / "web"
+    web_dir.mkdir(parents=True)
+    monkeypatch.setattr(wc, "WEB_DIR", web_dir)
+    monkeypatch.setattr(wc, "DB_PATH", web_dir / "cache.sqlite")
+    monkeypatch.setattr(wc, "RAW_DIR", web_dir / "raw")
+    con = sqlite3.connect(wc.DB_PATH)
+    con.executescript(
+        """
+        CREATE TABLE pages (
+          url TEXT PRIMARY KEY, raw_url TEXT, content_sha TEXT NOT NULL,
+          first_fetched_at TEXT NOT NULL, last_fetched_at TEXT NOT NULL,
+          last_updated TEXT, title TEXT, http_status INTEGER, content_type TEXT,
+          text TEXT, rendered INTEGER, text_source TEXT, imported INTEGER);
+        CREATE VIRTUAL TABLE pages_fts USING fts5(
+          url, title, text, content='pages', content_rowid='rowid');
+        INSERT INTO pages VALUES ('https://a.com/x', NULL, 's', 't', 't', NULL,
+          'A page', 200, 'text/html', 'coil words here', NULL, 'html', NULL);
+        INSERT INTO pages_fts(rowid, url, title, text)
+          SELECT rowid, url, title, text FROM pages;
+        """
+    )
+    con.commit()
+    con.row_factory = sqlite3.Row
+    (hit,) = wc.search("coil", con=con)
+    assert hit["url"] == "https://a.com/x"
+    assert (hit["matches"], hit["ocr_matches"]) == (1, 0)
+    assert wc.search_sections("https://a.com/x", "coil", con=con) == [
+        {"section": None, "matches": 1, "tier": "text"}
+    ]
+    con.close()
