@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from pathlib import Path  # noqa: TC003 — runtime annotation on a test helper
 
 import pytest
 import web_cache as wc
@@ -662,7 +663,9 @@ def test_section_metadata_is_frontmatter_lines_without_delimiters(cache):
     url = _seed_structured(cache)
     blocks = wc.section(url, "metadata", con=cache)
     assert len(blocks) == 1
-    assert blocks[0]["text"] == "title: Structured Doc\nog:description: A test document."
+    assert (
+        blocks[0]["text"] == "title: Structured Doc\nog:description: A test document."
+    )
 
 
 def test_quote_context_zero_matches_sentence_behavior(cache):
@@ -1925,6 +1928,95 @@ def test_cli_section_prints_the_blob_path_with_the_sheet(cache, capsys):
     assert captured.out.startswith("third sheet")  # stdout stays pure page text
 
 
+def _write_blob(rec: wc.PageRow, size: int, ext: str = "pdf") -> Path:
+    """Put a real file of `size` bytes where a seeded row's blob would live."""
+    path = wc.blob_path(rec["content_sha"], ext)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0" * size)
+    return path
+
+
+def test_cli_section_blob_line_carries_the_size_when_the_blob_is_on_disk(cache, capsys):
+    url = _seed_paged(cache)
+    path = _write_blob(_page(cache, url), 2_500_000)
+    assert wc.main(["section", url, "page 3"]) == 0
+    assert capsys.readouterr().err == f"blob: {path}  (2.5MB)\n"
+
+
+def test_cli_section_blob_line_omits_the_size_when_the_blob_is_absent(cache, capsys):
+    # Blobs are R2-backed, so a checkout need not hold this one.
+    url = _seed_paged(cache)
+    sha = _page(cache, url)["content_sha"]
+    assert wc.main(["section", url, "page 3"]) == 0
+    assert capsys.readouterr().err == f"blob: {wc.blob_path(sha, 'pdf')}\n"
+
+
+def test_oversized_pdf_prints_a_pdftoppm_handoff(cache, monkeypatch):
+    monkeypatch.setattr(wc, "_READ_PDF_MAX_BYTES", 1_000)
+    url = _seed_paged(cache)
+    rec = _page(cache, url)
+    path = _write_blob(rec, 1_001)
+    line = wc._render_handoff_line(rec)
+    assert line is not None
+    out = f"/tmp/sheet-{rec['content_sha'][:8]}-pN"  # noqa: S108 — printed, not opened
+    assert line.splitlines() == [
+        f"blob: {path}  (1KB — over Read's 100MB cap)",
+        "      render one sheet instead (same N in both places; "
+        "-r 288 for a contested glyph):",
+        f"      pdftoppm -f N -l N -r 144 -png -singlefile {path} {out}",
+        f"      → Read {out}.png",
+    ]
+
+
+def test_pdftoppm_handoff_quotes_a_blob_path_with_a_space(cache, tmp_path, monkeypatch):
+    # RAW_DIR follows the checkout, which can sit under a path with a space —
+    # unquoted, the command hands pdftoppm three positional args.
+    monkeypatch.setattr(wc, "_READ_PDF_MAX_BYTES", 1_000)
+    monkeypatch.setattr(wc, "RAW_DIR", tmp_path / "my repo" / "raw")
+    url = _seed_paged(cache)
+    rec = _page(cache, url)
+    path = _write_blob(rec, 1_001)
+    line = wc._render_handoff_line(rec)
+    assert line is not None
+    assert f"-singlefile '{path}' /tmp/" in line
+
+
+def test_pdftoppm_handoff_passes_singlefile(cache, monkeypatch):
+    # Without it poppler pads the page suffix to the width of the document's
+    # page count, so the printed output path names a file that isn't there.
+    monkeypatch.setattr(wc, "_READ_PDF_MAX_BYTES", 1_000)
+    url = _seed_paged(cache)
+    rec = _page(cache, url)
+    _write_blob(rec, 1_001)
+    line = wc._render_handoff_line(rec)
+    assert line is not None
+    assert "-singlefile" in line
+
+
+def test_pdf_under_the_cap_gets_no_pdftoppm_line(cache, monkeypatch):
+    # Read is the render step for any PDF that fits one; an alternative beside
+    # it would steer readers onto two calls where one works.
+    monkeypatch.setattr(wc, "_READ_PDF_MAX_BYTES", 1_000)
+    url = _seed_paged(cache)
+    rec = _page(cache, url)
+    _write_blob(rec, 1_000)
+    line = wc._render_handoff_line(rec)
+    assert line is not None
+    assert "pdftoppm" not in line
+
+
+def test_oversized_image_gets_no_pdftoppm_line(cache, monkeypatch):
+    # An image blob is already the picture; it has no sheets to rasterize.
+    monkeypatch.setattr(wc, "_READ_PDF_MAX_BYTES", 1_000)
+    url = wc.normalize_url("https://flyer.example/scan.jpg")
+    _seed(cache, url=url, content_type="image/jpeg", ocr_text="ink")
+    rec = _page(cache, url)
+    _write_blob(rec, 1_001, ext="jpg")
+    line = wc._render_handoff_line(rec)
+    assert line is not None
+    assert "pdftoppm" not in line
+
+
 def test_cli_section_blank_page_hint_says_where_the_sheet_is(cache, capsys):
     # The hint's claim that the sheet may still hold ink is only actionable
     # with the path beside it.
@@ -2435,10 +2527,20 @@ def test_ocr_only_terms_never_rank_the_text_tier(cache):
 def test_outline_maps_a_dark_document_by_its_ocr_pages(cache):
     url = _seed_dark(cache)
     assert wc.outline(url, con=cache) == [
-        {"level": 0, "heading": "page 1", "chars": len("dark sheet words"),
-         "count": 1, "tier": "ocr"},
-        {"level": 0, "heading": "page 2", "chars": len("magnet on sheet two"),
-         "count": 1, "tier": "ocr"},
+        {
+            "level": 0,
+            "heading": "page 1",
+            "chars": len("dark sheet words"),
+            "count": 1,
+            "tier": "ocr",
+        },
+        {
+            "level": 0,
+            "heading": "page 2",
+            "chars": len("magnet on sheet two"),
+            "count": 1,
+            "tier": "ocr",
+        },
     ]
 
 

@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -2433,10 +2434,42 @@ _TYPE_LABELS = {
 }
 
 
+# Read reports its cap as "100MB" without saying whether that is decimal or
+# binary; the lower reading over-warns across the band between them, which is
+# the cheap direction to be wrong in.
+_READ_PDF_MAX_BYTES = 100_000_000
+
+
+def _blob_size(path: Path) -> int | None:
+    """Bytes on disk, or None — blobs are R2-backed and a checkout may lack one."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _human_bytes(n: int) -> str:
+    return f"{n / 1_000_000:.1f}MB" if n >= 1_000_000 else f"{n / 1_000:.0f}KB"
+
+
+def _sized_blob_line(path: Path, note: str | None = None) -> str:
+    """``blob: <path>  (<size> — <note>)``, dropping either part it lacks.
+
+    The size decides whether reading the blob is a move at all: past the cap
+    the read fails outright, and short of it a 9KB page and a 40MB manual are
+    not the same proposition.
+    """
+    size = _blob_size(path)
+    parts = [_human_bytes(size)] if size is not None else []
+    if note:
+        parts.append(note)
+    return f"blob: {path}" + (f"  ({' — '.join(parts)})" if parts else "")
+
+
 def _blob_line(rec: PageRow) -> str | None:
     """``blob: <path>`` for a row, or None when its type maps to no extension."""
     path = blob_for(rec)
-    return None if path is None else f"blob: {path}"
+    return None if path is None else _sized_blob_line(path)
 
 
 def _render_handoff_line(rec: PageRow) -> str | None:
@@ -2447,11 +2480,37 @@ def _render_handoff_line(rec: PageRow) -> str | None:
     read, and an image displays whatever its OCR found. An HTML blob is left
     out because the stored markdown is the better read of it — ``get`` calls
     ``_blob_line`` directly, a full-record dump withholding nothing.
+
+    ``Read(<blob>, pages=N)`` is the render step for any PDF that fits under
+    the cap and needs no help here. Past it Read refuses, and it refuses only
+    once the sheet has been located, so the recovery has to be on the row.
+    Printing the command rather than describing it is for ``-singlefile``:
+    without that flag poppler pads the page suffix to the width of the
+    document's page count (``-p09.png`` on a 58-sheet manual, ``-p010.png`` on
+    a 300-sheet one), a count the cache holds and the reader does not.
     """
     content_type = rec["content_type"] or ""
-    if content_type == "application/pdf" or content_type.startswith("image/"):
+    if content_type != "application/pdf" and not content_type.startswith("image/"):
+        return None
+    path = blob_for(rec)
+    if path is None or content_type != "application/pdf":
         return _blob_line(rec)
-    return None
+    size = _blob_size(path)
+    if size is None or size <= _READ_PDF_MAX_BYTES:
+        return _sized_blob_line(path)
+    # 144dpi is the vision input's native resolution, so the sheet passes
+    # without downsampling; 288 is for one contested glyph, not a default.
+    out = f"/tmp/sheet-{rec['content_sha'][:8]}-pN"  # noqa: S108 — printed, not opened
+    return "\n".join(
+        [
+            _sized_blob_line(path, "over Read's 100MB cap"),
+            "      render one sheet instead (same N in both places; "
+            "-r 288 for a contested glyph):",
+            f"      pdftoppm -f N -l N -r 144 -png "
+            f"-singlefile {shlex.quote(str(path))} {out}",
+            f"      → Read {out}.png",
+        ]
+    )
 
 
 def _row_facts(rec: PageRow) -> list[str]:
