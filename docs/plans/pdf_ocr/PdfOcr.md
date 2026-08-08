@@ -11,7 +11,7 @@ This dark content is absent from `search`. `search` is how consumers figure out 
 
 We want to use OCR to light up the dark content.
 
-The division of labor: OCR provides findability, not citability. AI sessions use `search` to locate the sheet, then Claude Code's `Read(blob, pages=N)` to render that sheet. Then cite what they read off the image.
+The division of labor: OCR provides findability, not citability. AI sessions use `search` to locate the sheet, then quote the text layer where it has the words. Where it doesn't — the ink-only sheets OCR exists to surface — they render that sheet and cite what they read off the image.
 
 ## The flow
 
@@ -39,31 +39,55 @@ Once the Flippatch AI session has a document it cares about, it scopes `search` 
 
 ### Step 3 — render
 
-The Flippatch Claude Code AI session renders page 41 and reads it. It reads UPPER MAGNET off the actual table, and that is what goes in the patch's `quote:`.
+Often you'll need to render the sheet, such as:
 
-#### Enhanced render - not for v1
+- reading the printed page number
+- an `(ocr)` hit, where the words exist only as ink
+- mojibake in the text layer, where `text` is a cipher
 
-Handing the PDF straight to Claude Code's `Read` tool — `Read("/…/raw/9a83…0721.pdf", pages="41")` — works, but at roughly 850x1100 it is the weakest link in the chain. Measured on an Iron Man parts sheet, that path renders a bushing spec as `Bushing, 16" a ID X 281" oOD X 187`; the same sheet rendered at scale 4.0 reads `Bushing, .16" ø ID X .281" ø OD X .187"`. Decimal points and `ø` glyphs are exactly the characters a parts citation turns on, so it is worth the better render.
 
-So `web_cache.py` should expose an **on-demand render**: give it a url and a page, it rasterizes that sheet to a PNG in a temp location and prints the path, which the session then `Read`s. Same Quartz path the OCR uses, ~35ms per sheet.
+#### Rasterize with `pdftoppm`
 
-Render at **scale 2.0** by default — the same scale the OCR pass uses, so there is one setting and one code path. At 1224x1584 the image passes to the model without downsampling and costs ~2,600 tokens. That is roughly double what `Read`-on-PDF costs, and it is the right place to spend: `search` is the cheap net over thousands of sheets, and the render lands on the one or two sheets actually being cited.
+```bash
+pdftoppm -f 10 -l 10 -r 144 -png -singlefile <blob> /tmp/sheet-b21ecaf7-p10
+```
 
-Going higher buys less than it looks. The ceiling is not the rasterizer but the vision input, which caps near 1550px on the long edge, so scale 4.0 is downsampled back to 1550x2000 and costs ~4,100 tokens for it. On both sheets tested — an Iron Man parts page and an unseen AFM assembly page — scale 2.0 already resolves the details that matter (`Rivet, .089 ⌀D, 11/32" L, Roll`, `Bushing, .16" ø ID X .281" ø OD X .187"`). So make scale a parameter and step up to 4.0 only when a specific glyph is genuinely contested, not by default.
+A quarter-second on the 105MB Sonic blob for a ~370KB PNG. 144dpi is the same resolution the OCR pass rasterizes at, and `-r 288` is there for a contested glyph. poppler is already a hard requirement of this repo (`pdftotext` extracts the text layer), so unlike the OCR pass this step carries no macOS constraint.
 
-Render on demand rather than storing the images. Storing every sheet would be ~13GB against an R2-backed cache to save 35ms of work, and the blobs we already keep can regenerate any sheet at any scale whenever it is actually wanted.
+Important flags:
 
-ENHANCED RENDER IS NOT FOR V1.
+- **`-singlefile`**: without it poppler pads the page suffix to the width of the document's total page count, so identical flags write `gtf-09.png` on a 58-sheet manual and `sonic-010.png` on Sonic — a hand-assembled path is wrong on every 100+ page document, and the sheet count is precisely the thing the cache knows and the session does not. With it, the output path is the prefix plus `.png`.
+- **a flat `/tmp` prefix**, so nothing has to `mkdir` before rendering. Out of range is loud rather than silent: `-f 999` against a 58-sheet document exits 99 with `the first page (999) can not be after the last page (58)`, so there is no empty-file failure mode to guard.
 
-### Step 4 — confirm against the text layer (conditional)
+**What ships is the handoff line.** `_render_handoff_line` prints the command and the path it will produce, so the session runs the one and reads the other instead of parsing `pdftoppm`'s output:
 
-If step 2 labelled the hit `(ocr)`, skip this: the words are only ink, and the cite is quote-less — `ref`, a `locator` naming the sheet, and a `note` recording what was seen.
+```terminal
+blob: /Users/…/raw/b21ecaf7….pdf  (105.4MB — over Read's 100MB cap)
+sheet: pdftoppm -f 10 -l 10 -r 144 -png -singlefile <blob> /tmp/sheet-b21ecaf7-p10
+       → Read /tmp/sheet-b21ecaf7-p10.png
+```
 
-However, if the hit was not labeled `(ocr)`, the words are in the text layer, and you will need to quote it. A reading of the ink can differ from the stored text — decimal points, `ø`, hyphenation across a line break. Use `section <url> "page 41"` to get that sheet's stored text verbatim.
+The blob line stays, and gains its size. `Read` refuses a PDF over 100MB, so a session pointed at Sonic's blob gets a refusal and nothing that explains it; with the size printed, the line says when it is worth following. It is also the whole of what there is to say about an image row, whose blob already is the picture.
+
+144dpi is the default because the ceiling is the vision input, not the rasterizer. At 1224x1584 the image passes to the model without downsampling, for roughly 2,600 tokens; 288dpi is downsampled back to about 1550x2000 and costs ~4,100 tokens for it. 144 already resolves the glyphs a numeric citation turns on — `Rivet, .089 ⌀D, 11/32" L, Roll`, `Bushing, .16" ø ID X .281" ø OD X .187"` — on both sheets tested, an Iron Man parts page and an unseen AFM assembly page. So 288 is for a specific contested glyph, not a default.
+
+The renders are not stored: `/tmp` is the right lifetime, since the OS reaps it, re-rendering is free, and a leftover file is by construction the same bytes at the same dpi. The OCR pass keeps its own in-process Quartz rasterizer — across every sheet in the corpus, shelling out per sheet is 15x slower, and at one sheet a quarter-second is free.
+
+### Step 4 — quoting
+
+**Quote the text layer when it has the words.** A hit not labelled `(ocr)` is already the source's own characters: `section <url> "page 41"` prints that sheet verbatim, and what it prints goes in `quote:`.
+
+**Quote the render when it doesn't**, like an `(ocr)` hit,  mojibake in the text layer.
+
+Extraction reads a sheet in reading order, so a table arrives as a column of unattached cells and words drawn as artwork never reach the text layer at all — a correct quote is routinely not a substring of what was extracted. Checking the OCR tier instead does not rescue it: measured against text layers across this corpus, an exact match rejects about a quarter of correct spans and an ordered-word match about a seventh, so no threshold makes the check honest and a fuzzy one would trade false rejections for false confidence.
+
+What that does **not** relax is what counts as a quote. The test is whether the evidence is _text_, not whether extraction caught it: outlined flyer type and a manual with no text layer are words on a sheet and are quotable once read, while a checkmark in a feature-matrix column is a mark and never becomes text by being looked at — that stays a quote-less cite (`ref` + `locator` + `note`). Quoting a feature's row label to establish an edition column is the forgery both rules exist to stop.
+
+The discriminator is the cache row's `content_type` — a fact about the document, not something the patch records about its own quote — which the gate reads through `web_cache.get`. That is already exposed, so this plan owes the change nothing: it is the same `content_type` `_render_handoff_line` keys on. Two consequences worth naming. A document the cache does not hold is a failure and never a skip, since a PDF nobody could read is not a PDF quote. And the skip is narrow by ref scheme: `http(s)` refs that resolve to a cached PDF go ungated, while IPDB rows, OPDB pages, caption transcripts and HTML pages stay fully gated — including an HTML page served at a `.pdf` path, because the row's type is consulted and the URL's spelling is not.
 
 ### `quote` is not needed for PDFs
 
-For PDFs, `search` and `section` replace everything that `quote` was once used for — and the search scopes cover HTML too, so that is not a reason to keep it either. It is kept anyway for now: its matching is the quote gate's matching, so a `quote` hit verifies by construction where an FTS hit can match tokens scattered across a sheet. See [SearchScopes.md](../SearchScopes.md); the decision waits on how Flippatch sessions actually use the scopes.
+For PDFs, `search` and `section` replace everything that `quote` was once used for — and the search scopes cover HTML too, so that is not a reason to keep it either. It is kept anyway for now, but the reason has narrowed: its matching is the quote gate's matching, so a `quote` hit verifies by construction where an FTS hit can match tokens scattered across a sheet — and that argument now holds only for the refs the gate still checks, which are every kind except a PDF. On a PDF, `quote` is a convenience for finding a phrase, not a preview of a verdict. See [SearchScopes.md](../SearchScopes.md); the decision waits on how Flippatch sessions actually use the scopes.
 
 ## Architecture
 
