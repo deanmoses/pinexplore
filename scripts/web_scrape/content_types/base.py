@@ -59,10 +59,13 @@ class ContentHandler:
     # extractable gate and routing (``handler_for``); the registry rejects a
     # handler that declares none. Required.
     mime_types: frozenset[str] = frozenset()
-    # The label written to Resp.content_type when ``signature`` reclassifies a
-    # response whose header lied (or was absent). Must be one of ``mime_types`` (the
-    # registry checks), so the re-lookup that drives extraction still finds this
-    # handler. Unused — and unset — by a type with no signature.
+    # The one content type a row of this kind is stored under: written to
+    # Resp.content_type when ``signature`` reclassifies a response whose header
+    # lied, and to the page row by ``web_import``, which has no header at all.
+    # Must be one of ``mime_types`` (the registry checks) so the re-lookup that
+    # drives extraction still finds this handler. Required even with no
+    # signature: left blank, imported rows get a NULL content type and their
+    # blobs lose the extension that locates them.
     canonical_mime: str = ""
     # A leading-bytes signature that authoritatively identifies this type whatever
     # the header claimed (a PDF's b"%PDF-"), or None when the type can't be sniffed.
@@ -124,6 +127,22 @@ class ContentHandler:
         self-contained type (PDF) ignores it. Required — every handler implements it.
         """
         raise NotImplementedError
+
+    def rereads_faithfully(self, raw: bytes) -> bool:
+        """Whether these stored bytes decode the same way without the HTTP header.
+
+        The header charset is never stored, so anything re-reading a blob
+        (``web_backfill``) or reading one that never had a header
+        (``web_import``) can only offer the document's own declaration. A type
+        that resolves from the bytes alone — binary, or a fixed encoding — says
+        True here and always did. A text type says True only when the document
+        declares a working charset or is valid utf-8; otherwise the re-read
+        falls to statistical detection, whose guess can differ from what the
+        header once gave and carries no U+FFFD to betray it.
+
+        Callers refuse or skip on False rather than storing a guess as evidence.
+        """
+        return True
 
     def links(self, raw: bytes, text: str | None, url: str) -> list[tuple[str, str]]:
         """Outbound links as ``(absolute href, anchor text)`` pairs, or [].

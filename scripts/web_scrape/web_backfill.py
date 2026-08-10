@@ -10,10 +10,12 @@ selector to get wrong) and there is no ``--dry-run`` (if the output is wrong,
 fix the extractor and run it again; to preview one page, run the extractor on
 its blob).
 
-Scope is the handler's ``backfillable`` flag — HTML and PDF today; see that
-flag in ``content_types/base.py`` for why a type opts out.
+Scope is the handler's ``backfillable`` flag — see it in ``content_types/base.py``
+for why a type opts out — then, per row, ``rereads_faithfully``: the HTTP charset
+was never stored, so a blob that neither declares an encoding nor is valid utf-8
+would be re-read by a guess, and is left alone.
 
-Within it, one selection rule: re-extract only what this handler's extractor
+Within that, one selection rule: re-extract only what this handler's extractor
 produced — the row whose ``text_source`` is the handler's own, or ``NULL``
 from before that column existed. Rewritten rows are stamped with it, which for
 a ``NULL`` row is a fact about the new text by construction.
@@ -64,6 +66,7 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
         "skipped (missing blob)": 0,
         "skipped (extractor unavailable)": 0,
         "skipped (empty re-extraction)": 0,
+        "skipped (charset unrecoverable)": 0,
         "skipped (decode regression)": 0,
     }
     try:
@@ -101,9 +104,25 @@ def backfill(con: sqlite3.Connection | None = None) -> dict[str, int]:
                 )
                 continue
             raw = blob.read_bytes()
-            # No header charset — it was never stored. The blob's own <meta>
-            # declaration or a statistical detection stands in; see the module
-            # docstring for why that reproduces fetch-time decoding.
+            if not handler.rereads_faithfully(raw):
+                # The header charset was never stored, and these bytes neither
+                # declare one nor are valid utf-8 — so re-decoding them would
+                # take statistical detection's guess. That guess produces no
+                # U+FFFD for the check below to catch, so a cp1252 page's
+                # "Réglage" would be rewritten as "RÈglage": wrong, plausible,
+                # and indistinguishable from the real thing downstream.
+                tally["skipped (charset unrecoverable)"] += 1
+                print(
+                    f"WARNING: blob declares no charset and is not utf-8, so its "
+                    f"encoding is only recoverable from the HTTP header this row "
+                    f"no longer has; keeping stored text — refetch with --force "
+                    f"to re-extract properly: {row['url']}",
+                    file=sys.stderr,
+                )
+                continue
+            # No header charset — it was never stored. The guard above leaves
+            # only bytes that resolve from their own declaration or from being
+            # valid utf-8, so this reproduces fetch-time decoding.
             decoded = handler.decode(raw, None)
             meta = handler.extract(raw, decoded, row["url"])
             if meta.unavailable:

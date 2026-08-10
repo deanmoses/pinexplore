@@ -431,6 +431,38 @@ def test_scanned_pdf_never_renders_and_warns(cache, monkeypatch, make_pdf, capsy
 
 
 # --------------------------------------------------------------------------- #
+# Plain text (the document's own bytes, stored as a .txt blob)
+# --------------------------------------------------------------------------- #
+
+CHANGELOG = b"Sonic the Hedgehog code revisions\r\n\r\n1.05 - Fixed the ball lock.\r\n"
+
+
+def test_plain_text_stored_verbatim_as_a_txt_blob(cache, monkeypatch):
+    _stub_get(monkeypatch, body=CHANGELOG, content_type="text/plain")
+    _run(cache, "https://x.com/sonic_changelog.txt")
+    row = _page(cache, "https://x.com/sonic_changelog.txt")
+    assert row["content_type"] == "text/plain"
+    assert row["text_source"] == "text"
+    assert not row["rendered"]
+    assert extension_for(row["content_type"]) == "txt"
+    # Blob: the bytes the server sent. Text: those bytes on LF.
+    assert wc.blob_path(row["content_sha"], ext="txt").read_bytes() == CHANGELOG
+    assert row["text"] == CHANGELOG.decode().replace("\r\n", "\n")
+
+
+def test_empty_text_document_warns_without_suggesting_a_render(
+    cache, monkeypatch, capsys
+):
+    # Never rendered, so the thin path must not point at --render.
+    _stub_get(monkeypatch, body=b"   \n\n", content_type="text/plain")
+    _run(cache, "https://x.com/empty.txt")
+    assert _page(cache, "https://x.com/empty.txt")["text"] is None
+    err = capsys.readouterr().err
+    assert "empty" in err
+    assert "--render" not in err
+
+
+# --------------------------------------------------------------------------- #
 # Images (text via OCR, stored as .jpg/.png blobs)
 # --------------------------------------------------------------------------- #
 

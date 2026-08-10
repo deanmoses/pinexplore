@@ -2431,6 +2431,9 @@ _TYPE_LABELS = {
     "image/jpg": "image",
     "image/png": "image",
     "text/vtt": "video transcript",
+    "text/plain": "plain text",
+    "text/markdown": "markdown",
+    "text/x-markdown": "markdown",
 }
 
 

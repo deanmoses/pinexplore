@@ -22,6 +22,7 @@ dependencies = [
     # no model download, but Darwin-only, hence the marker. On another platform
     # image handling degrades to "supply the text by hand", never a hard failure.
     "pyobjc-framework-Vision>=12.1 ; sys_platform == 'darwin'",
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]
@@ -88,8 +89,10 @@ ignore = [
 "tests/*.py" = ["S101", "S106", "S603", "S607", "ANN"]  # asserts, test creds, subprocess, untyped tests
 "tests/conftest.py" = ["S101", "ANN"]
 "scripts/**/*.py" = ["T201"]  # CLI scripts legitimately print
-# The web transport's entire purpose is opening arbitrary user-supplied web URLs;
-# the http/https scheme is enforced in fetch_one() before _http_get is ever called.
+# The web transport's entire purpose is opening arbitrary web URLs. Two of them:
+# the page being fetched, whose http/https scheme fetch_one() enforces before
+# http_get is ever called, and the CA certificate a chain repair follows, whose
+# scheme _ca_issuer_uri() enforces before _fetch_ca_cert opens it.
 "scripts/web_scrape/web_http.py" = ["S310"]
 # The video transport downloads the caption URL yt-dlp extracted from YouTube —
 # an https URL of YouTube's own timedtext service, never user-supplied.

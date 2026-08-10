@@ -14,6 +14,7 @@ from .base import ContentHandler, ExtractedMeta
 from .html import HtmlHandler
 from .image import JpegHandler, PngHandler
 from .pdf import PdfHandler
+from .text import MarkdownHandler, PlainTextHandler
 from .vtt import VttHandler
 
 # The registered handlers. One per document type; order is the sniff order (the
@@ -23,6 +24,8 @@ HANDLERS: tuple[ContentHandler, ...] = (
     HtmlHandler(),
     PdfHandler(),
     VttHandler(),
+    PlainTextHandler(),
+    MarkdownHandler(),
     JpegHandler(),
     PngHandler(),
 )
@@ -61,16 +64,15 @@ _BY_MIME: dict[str, ContentHandler] = {
 # handler. Anything else skips with skip="content-type".
 EXTRACTABLE_CONTENT_TYPES: frozenset[str] = frozenset(_BY_MIME)
 
-# Generic/ambiguous labels worth reading so a handler's signature gets a chance:
-# servers routinely serve a real PDF as octet-stream, and a response with no
-# Content-Type header surfaces (via get_content_type's default) as text/plain. We
-# read the (size-capped) body and let ``sniff`` decide, rather than skip a quotable
-# document. A sniffable body that matches no signature still skips.
+# Generic labels worth reading so a handler's signature gets a chance: servers
+# routinely serve a real PDF as octet-stream. We read the (size-capped) body and
+# let ``sniff`` decide, rather than skip a quotable document. A sniffable body
+# that matches no signature still skips. Types a handler already claims need no
+# entry — they are read on their own account.
 SNIFFABLE_CONTENT_TYPES: frozenset[str] = frozenset(
     {
         "application/octet-stream",
         "binary/octet-stream",
-        "text/plain",
     }
 )
 

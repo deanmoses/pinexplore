@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ssl
 import sys
 import time
 import urllib.error
@@ -202,6 +203,22 @@ def _resolve_text(
 # --------------------------------------------------------------------------- #
 
 
+def _transport_failure_reason(exc: Exception) -> str:
+    """Why a fetch never got a response, and what to do about it.
+
+    A TLS failure reads like an outage but the page opens in a browser, so the
+    way forward is a hand-saved import, not a retry. The wrapped error already
+    names the failed check; this only has to name the way out.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return (
+            f"{exc} — its certificate can't be verified. A browser may still "
+            f"open it: save the file and add it with web_import.py"
+        )
+    return str(exc)
+
+
 def _too_large_reason(resp: Resp) -> str:
     """Why a response was refused for size, and what to do about it.
 
@@ -299,7 +316,7 @@ def fetch_one(
         # (an HTTPException) for a host with spaces/control chars, ValueError for
         # an unknown url type, IDNA UnicodeError — so one bad --from-file line
         # can't crash the whole batch.
-        print(f"FAILED: {url} ({exc})", file=sys.stderr)
+        print(f"FAILED: {url} ({_transport_failure_reason(exc)})", file=sys.stderr)
         web_cache.append_fetch(
             con, url=url, fetched_at=fetched_at, search_query=query, http_status=None
         )

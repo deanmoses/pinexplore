@@ -1,9 +1,10 @@
 """Tests for the content-type handler registry and its handlers (no network).
 
 The registry routing (handler_for / sniff / the extractable + sniffable sets),
-plus each handler's per-type behavior: the HTML handler's charset decoding and
-conservative date extraction, the PDF handler's text/title/date pull, and
-the image handler's OCR (the Vision backend itself lives in test_web_ocr).
+plus each handler's per-type behavior: the HTML handler's charset resolution and
+conservative date extraction, the PDF handler's text/title/date pull, the text
+handlers' line normalization, and the image handler's OCR (the Vision backend
+itself lives in test_web_ocr).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import web_ocr
 from content_types.html import HtmlHandler, _sniff_meta_charset
 from content_types.image import JpegHandler, PngHandler
 from content_types.pdf import PdfHandler
+from content_types.text import MarkdownHandler, PlainTextHandler
 
 # --------------------------------------------------------------------------- #
 # Registry — routing by content type and by magic-byte signature
@@ -23,6 +25,8 @@ def test_handler_for_routes_known_types():
     assert isinstance(ct.handler_for("text/html"), HtmlHandler)
     assert isinstance(ct.handler_for("application/xhtml+xml"), HtmlHandler)
     assert isinstance(ct.handler_for("application/pdf"), PdfHandler)
+    assert isinstance(ct.handler_for("text/plain"), PlainTextHandler)
+    assert isinstance(ct.handler_for("text/markdown"), MarkdownHandler)
     assert isinstance(ct.handler_for("image/jpeg"), JpegHandler)
     assert isinstance(ct.handler_for("image/png"), PngHandler)
 
@@ -37,10 +41,20 @@ def test_extractable_set_is_the_union_of_handler_mime_types():
         "application/xhtml+xml",
         "application/pdf",
         "text/vtt",
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
         "image/jpeg",
         "image/jpg",
         "image/png",
     } == ct.EXTRACTABLE_CONTENT_TYPES
+
+
+def test_plain_text_is_extractable_not_merely_sniffable():
+    # Also the label a header-less response surfaces under, so the sniffable
+    # set must not list it too: a claimed type never reaches that branch.
+    assert "text/plain" in ct.EXTRACTABLE_CONTENT_TYPES
+    assert "text/plain" not in ct.SNIFFABLE_CONTENT_TYPES
 
 
 def test_sniff_matches_pdf_signature_whatever_the_header():
@@ -57,8 +71,10 @@ def test_sniff_matches_image_signatures():
 
 
 def test_sniff_returns_none_for_non_signature_bytes():
-    # HTML carries no signature; a genuine binary download matches nothing.
+    # HTML and the text types carry no signature — text can't have one — and a
+    # genuine binary download matches nothing.
     assert ct.sniff(b"<html>hi</html>") is None
+    assert ct.sniff(b"1.05 - Fixed the ball lock.") is None
     assert ct.sniff(b"PK\x03\x04zip") is None
 
 
@@ -75,6 +91,8 @@ def test_image_handler_is_not_renderable():
 def test_handler_extensions():
     assert ct.handler_for("text/html").extension == "html"
     assert ct.handler_for("application/pdf").extension == "pdf"
+    assert ct.handler_for("text/plain").extension == "txt"
+    assert ct.handler_for("text/markdown").extension == "md"
     assert ct.handler_for("image/jpeg").extension == "jpg"
     assert ct.handler_for("image/png").extension == "png"
 
@@ -96,6 +114,21 @@ def test_image_alias_mime_canonicalizes_to_one_extension():
     assert ct.handler_for("image/jpg").canonical_mime == "image/jpeg"
 
 
+def test_markdown_alias_mime_canonicalizes_to_one_extension():
+    assert ct.extension_for("text/x-markdown") == "md"
+    assert ct.handler_for("text/x-markdown").canonical_mime == "text/markdown"
+
+
+def test_every_handler_declares_a_canonical_mime_it_claims():
+    # web_import stamps canonical_mime on rows it writes, having no HTTP header
+    # to go on: left blank, the row gets a NULL content type and extension_for
+    # cannot locate its blob.
+    for handler in ct.HANDLERS:
+        name = type(handler).__name__
+        assert handler.canonical_mime, f"{name} declares no canonical_mime"
+        assert ct.handler_for(handler.canonical_mime) is handler, name
+
+
 # --------------------------------------------------------------------------- #
 # text_source — how a row's text was derived (evidence-quality provenance)
 # --------------------------------------------------------------------------- #
@@ -109,6 +142,8 @@ def test_each_handler_declares_how_its_text_was_derived():
     assert ct.handler_for("text/html").text_source == "html"
     assert ct.handler_for("application/pdf").text_source == "pdf"
     assert ct.handler_for("text/vtt").text_source == "vtt"
+    assert ct.handler_for("text/plain").text_source == "text"
+    assert ct.handler_for("text/markdown").text_source == "text"
     assert ct.handler_for("image/jpeg").text_source is None
     assert ct.handler_for("image/png").text_source is None
 
@@ -235,6 +270,15 @@ def test_decode_detects_charset_when_no_header_and_no_meta():
         f"<html><body><h1>{JP}</h1>" + "日本語の本文。" * 40 + "</body></html>"
     ).encode("cp932")
     assert JP in _decode(body, None)
+
+
+def test_decode_undeclared_valid_utf8_is_not_handed_to_detection():
+    # charset-normalizer reads this short sample as mac_latin2, so valid utf-8
+    # must be decoded before detection is consulted. The Shift-JIS tests above
+    # still reach detection: cp932 bytes are not valid utf-8.
+    assert _decode("Sonic spin dash — révisé".encode(), None) == (
+        "Sonic spin dash — révisé"
+    )
 
 
 def test_decode_header_charset_wins_over_meta():
@@ -780,6 +824,150 @@ def test_extract_pdf_keeps_text_when_the_info_dict_is_unreadable(monkeypatch):
     assert meta.text == "9 Stand-Up Targets"
     assert meta.title is None
     assert meta.unavailable is False
+
+
+# --------------------------------------------------------------------------- #
+# Text handlers — the document's own bytes, on the corpus's line convention
+# --------------------------------------------------------------------------- #
+
+
+def _extract_text(raw: bytes, header_charset: str | None = None) -> ct.ExtractedMeta:
+    handler = PlainTextHandler()
+    return handler.extract(raw, handler.decode(raw, header_charset), "http://x/c.txt")
+
+
+def test_extract_text_is_the_document_verbatim():
+    raw = b"1.05 - Fixed the ball lock.\n1.04 - Added Sonic's spin dash.\n"
+    assert _extract_text(raw).text == raw.decode()
+
+
+def test_extract_text_has_no_title_or_date():
+    # A first line is as often a version number as a title, and for evidence no
+    # date beats a wrong one.
+    meta = _extract_text(b"Version 1.05\nReleased 2024-01-15\nFixed the ball lock.\n")
+    assert meta.title is None
+    assert meta.last_updated is None
+
+
+def test_extract_text_normalizes_crlf():
+    # Windows-authored changelogs are CRLF, and structure parsing compares
+    # whole lines.
+    meta = _extract_text(b"Release notes\r\n\r\n- Fixed the ball lock.\r\n")
+    assert "\r" not in (meta.text or "")
+    assert meta.text == "Release notes\n\n- Fixed the ball lock.\n"
+
+
+def test_extract_text_form_feeds_become_line_breaks():
+    # A lone \f line means a PDF page boundary corpus-wide, so a changelog that
+    # separates releases with one must not mint phantom pages. Replaced, not
+    # deleted, so the words either side don't fuse.
+    meta = _extract_text(b"1.05 notes\f1.04 notes\n")
+    text = meta.text or ""
+    assert "\f" not in text
+    assert "\f" not in text.split("\n")
+    assert "1.05 notes" in text
+    assert "1.04 notes" in text
+    assert "notes1.04" not in text
+
+
+def test_extract_text_strips_a_leading_byte_order_mark():
+    # Text is the one type with no parser to absorb a BOM (HTML's lxml eats it),
+    # so the first quote would carry an invisible U+FEFF.
+    meta = _extract_text("\ufeffV1.05 - Fixed the ball lock.\n".encode())
+    assert meta.text == "V1.05 - Fixed the ball lock.\n"
+
+
+def test_extract_text_keeps_a_zero_width_space_mid_document():
+    # Only a *leading* BOM is an encoding signature; the same codepoint inside
+    # the document is a real character and must survive into the quote.
+    meta = _extract_text("Sonic the Hedgehog\ufeffcode\n".encode())
+    assert "\ufeff" in (meta.text or "")
+
+
+def test_extract_text_declines_bytes_carrying_a_nul():
+    # A header-less response surfaces as text/plain, so junk reaches here. No
+    # real text file holds a NUL, and control characters must not be stored as
+    # evidence — the blob is kept, the text is not.
+    meta = _extract_text(b"PK\x03\x04\x00\x00binary junk")
+    assert meta.text is None
+    # A finding about the document, not a failed read: it may overwrite a row.
+    assert meta.unavailable is False
+
+
+def test_extract_text_whitespace_only_document_has_no_text():
+    # A finding, not a failed read: `unavailable` stays False.
+    meta = _extract_text(b"\n\n   \n\f\n")
+    assert meta.text is None
+    assert meta.unavailable is False
+
+
+def test_decode_text_honors_header_charset():
+    assert _extract_text("café".encode("latin-1"), "latin-1").text == "café"
+
+
+def test_decode_text_detects_charset_when_header_absent():
+    # These bytes are not valid utf-8, so resolution reaches detection.
+    body = ("日本語の変更履歴。" * 40).encode("cp932")
+    assert "日本語の変更履歴。" in (_extract_text(body, None).text or "")
+
+
+def test_decode_short_undeclared_utf8_changelog_survives_intact():
+    # Text is most exposed to a detection misfire: no charset of its own, and a
+    # release note is short.
+    note = "V1.05 — Sonic spin dash rebalanced.\n"
+    assert _extract_text(note.encode(), None).text == note
+
+
+def test_decode_text_never_raises_on_bad_bytes():
+    assert isinstance(_extract_text(b"\xff\xfe bad", "utf-8x-bogus").text, str)
+
+
+def test_markdown_headings_survive_into_an_outline():
+    # Same ATX syntax the stored text uses, so a .md is navigable.
+    handler = MarkdownHandler()
+    raw = b"# Sonic\n\nProse.\n\n## Code revisions\n\n1.05 - Fixed the ball lock.\n"
+    text = handler.extract(raw, handler.decode(raw, None), "http://x/c.md").text or ""
+    assert "# Sonic" in text.split("\n")
+    assert "## Code revisions" in text.split("\n")
+
+
+def test_rereads_faithfully_gates_on_a_recoverable_encoding():
+    # web_backfill and web_import both re-read bytes with no HTTP charset, and
+    # detection's guess carries no U+FFFD for their guards to catch. What the
+    # bytes themselves settle is the whole question: utf-8 validates, a <meta>
+    # declares, and a cp1252 file with neither can only be guessed at.
+    text, html = PlainTextHandler(), ct.handler_for("text/html")
+    assert text.rereads_faithfully("Réglage\n".encode()) is True
+    assert text.rereads_faithfully("Réglage\n".encode("cp1252")) is False
+    assert MarkdownHandler().rereads_faithfully("# Réglage\n".encode()) is True
+    # HTML answers for itself: the same bytes are recoverable once declared.
+    bare = "<html><body><p>Réglage</p></body></html>"
+    declared = '<html><head><meta charset="windows-1252"></head><body>é</body></html>'
+    assert html.rereads_faithfully(bare.encode("cp1252")) is False
+    assert html.rereads_faithfully(bare.encode()) is True
+    assert html.rereads_faithfully(declared.encode("cp1252")) is True
+
+
+def test_binary_types_always_reread_faithfully():
+    # A charset never enters into a PDF or a JPEG, so the question is vacuous
+    # for them — they must not be caught by a rule about text encodings.
+    assert PdfHandler().rereads_faithfully(b"%PDF-1.4 \xff\xfe binary") is True
+    assert JpegHandler().rereads_faithfully(b"\xff\xd8\xff\xe0 binary") is True
+
+
+def test_text_handler_is_not_renderable():
+    # A browser would return the same words in a <pre>.
+    assert ct.handler_for("text/plain").renderable is False
+
+
+def test_text_thin_warning_allows_for_a_merely_short_document():
+    # No reading could have failed, so this fires on a short release note too;
+    # the message must not call that file empty.
+    msg = PlainTextHandler().thin_warning(
+        "http://x/c.txt", rendered=False, render_attempted=False
+    )
+    assert msg is not None
+    assert "short document" in msg
 
 
 # --------------------------------------------------------------------------- #

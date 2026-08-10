@@ -121,10 +121,20 @@ class PdfHandler(ContentHandler):
     renderable = False
     backfillable = True
     deferred_ocr = True
-    # Scanned manuals run to tens of megabytes — the cached Stern Transformers
-    # manual and a 15.5MB quick reference both sit above the shared default — so
+    # Scanned manuals run to a hundred megabytes and more — a JJP manual and a
+    # Chicago Gaming remake manual both sit far above the shared default — so
     # PDFs carry their own cap. This is the only place its value is stated.
-    max_response_bytes: int | None = 65 * 1024 * 1024
+    #
+    # Sized to admit the largest manuals a factory actually publishes rather
+    # than to keep blobs under any downstream reader's limit: past ~100MB a
+    # blob stops opening in one `Read(<blob>, pages=N)` call and a sheet has to
+    # be rendered out first, which `web_cache` prints the command for. That is
+    # a step, not a wall, and a manual we can't fetch at all is worse than one
+    # whose sheets take two calls to look at. What the number does bound is
+    # transport cost: the body is buffered whole (and copied again through
+    # pdftotext), and a response refused for size is read to the cap first, so
+    # every byte here is memory in flight and bandwidth spent on a refusal.
+    max_response_bytes: int | None = 128 * 1024 * 1024
 
     @override
     def extract(self, raw: bytes, text: str | None, url: str) -> ExtractedMeta:

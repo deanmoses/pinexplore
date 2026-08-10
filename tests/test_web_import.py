@@ -135,6 +135,85 @@ def test_unsupported_file_type_is_refused(cache, tmp_path):
     assert wc.get(FLYER_URL, con=cache) is None
 
 
+def test_text_file_imports_on_its_suffix(cache, tmp_path):
+    # No magic bytes, so the suffix is the only route in. The file's own words
+    # are the evidence, so no transcription is needed.
+    path = tmp_path / "sonic_changelog.txt"
+    path.write_text("1.05 - Fixed the ball lock.\n", encoding="utf-8")
+    _run(cache, path, url="https://www.jerseyjackpinball.com/sonic_changelog.txt")
+    row = _page(cache, "https://www.jerseyjackpinball.com/sonic_changelog.txt")
+    assert row["content_type"] == "text/plain"
+    assert row["text_source"] == "text"
+    assert row["text"] == "1.05 - Fixed the ball lock.\n"
+    assert wc.blob_path(row["content_sha"], ext="txt").exists()
+
+
+def test_non_utf8_text_file_is_refused_not_guessed_at(cache, tmp_path):
+    # An import has no charset header and a text file can't restate its own, so
+    # these bytes would resolve by detection — which reads them as a different
+    # single-byte codec and stores the result as citable text. Refuse instead,
+    # the same call --text-file makes: re-saving puts the encoding decision on
+    # someone who can see whether the accents came out right.
+    path = tmp_path / "changelog.txt"
+    path.write_bytes("V1.05 — Réglage « Sonic »\n".encode("cp1252"))
+    with pytest.raises(web_import.ImportRefusedError, match="not valid UTF-8"):
+        _run(cache, path, url="https://example.com/changelog.txt")
+    assert wc.get("https://example.com/changelog.txt", con=cache) is None
+
+
+def test_non_utf8_html_without_a_declared_charset_is_refused(cache, tmp_path):
+    # The same rule, and the reason it asks the handler instead of the file
+    # type: a saved page that left its encoding to the HTTP header has none left
+    # by the time it reaches an import.
+    path = tmp_path / "page.html"
+    path.write_bytes(
+        "<html><body><p>Réglage « Sonic »</p></body></html>".encode("cp1252")
+    )
+    with pytest.raises(web_import.ImportRefusedError, match="declares no charset"):
+        _run(cache, path, url="https://example.com/p.html")
+    assert wc.get("https://example.com/p.html", con=cache) is None
+
+
+def test_html_declaring_its_own_charset_imports_intact(cache, tmp_path):
+    # And the other side of it: a page that states windows-1252 carries its
+    # encoding in the blob, so it must keep importing — and keep its accents.
+    path = tmp_path / "declared.html"
+    path.write_bytes(
+        '<html><head><meta charset="windows-1252"></head>'
+        "<body><p>Réglage « Sonic »</p></body></html>".encode("cp1252")
+    )
+    _run(cache, path, url="https://example.com/d.html")
+    assert "Réglage « Sonic »" in (_page(cache, "https://example.com/d.html")["text"])
+
+
+def test_non_utf8_bytes_do_not_block_a_binary_import(cache, jpeg):
+    # The rule is about types whose text is a bare charset decode. A JPEG's
+    # bytes are not text and must not be held to it.
+    _run(cache, jpeg, text="MECATRONICS")
+    assert _page(cache, FLYER_URL)["content_type"] == "image/jpeg"
+
+
+def test_markdown_file_imports_under_its_own_extension(cache, tmp_path):
+    path = tmp_path / "notes.md"
+    path.write_text("# Notes\n\nProse.\n", encoding="utf-8")
+    _run(cache, path, url="https://example.com/notes.md")
+    row = _page(cache, "https://example.com/notes.md")
+    assert row["content_type"] == "text/markdown"
+    assert extension_for(row["content_type"]) == "md"
+    assert wc.blob_path(row["content_sha"], ext="md").exists()
+
+
+def test_jpeg_saved_under_a_txt_suffix_is_still_a_jpeg(cache, tmp_path):
+    # A browser "Save image as" routinely lands a JPEG under .txt. Signatures
+    # run first so the picture isn't decoded into mojibake and stored as text.
+    path = tmp_path / "flyer.txt"
+    path.write_bytes(JPEG_BYTES)
+    _run(cache, path, text="MECATRONICS")
+    row = _page(cache, FLYER_URL)
+    assert row["content_type"] == "image/jpeg"
+    assert wc.blob_path(row["content_sha"], ext="jpg").exists()
+
+
 # --------------------------------------------------------------------------- #
 # Text is mandatory — a blank-text page defeats the whole point
 # --------------------------------------------------------------------------- #

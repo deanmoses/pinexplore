@@ -1,15 +1,22 @@
 """Tests for web_http: the content-type gate, PDF sniff, and wire-safe URL
-encoding (no network). Charset decoding now lives with the HTML handler — see
+encoding (no network). Charset resolution is a content-type concern — see
 test_content_types.py."""
 
 from __future__ import annotations
 
+import datetime
 import ssl
+import urllib.error
 import urllib.request
 
 import pytest
 import web_http
 from content_types.pdf import PdfHandler
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.x509.oid import AuthorityInformationAccessOID, NameOID
 
 # --------------------------------------------------------------------------- #
 # request_url — wire-safe encoding of a readable normalized URL
@@ -89,15 +96,12 @@ class _FakeResp:
         self.status = status
         self.headers = _FakeHeaders(content_type, charset, len(body))
         self._body = body
-        self._url = url
+        self.url = url
         self._may_read = may_read
         self._pos = 0
         # Every read length asked for, so a test can assert how much of an
         # oversized body was buffered before it was refused.
         self.reads: list[int] = []
-
-    def geturl(self) -> str:
-        return self._url
 
     def read(self, n: int = -1) -> bytes:
         # A skipped (non-extractable) type must decline the body unread; reading
@@ -140,7 +144,7 @@ def _stub_urlopen(
         # would silently fall back to the interpreter's own trust store.
         assert context is not None
         assert context.verify_mode is ssl.CERT_REQUIRED
-        # Echo the requested wire URL as geturl() → no redirect.
+        # Echo the requested wire URL back as the landed URL → no redirect.
         resp = _FakeResp(
             status=status,
             content_type=content_type,
@@ -206,13 +210,24 @@ def test_http_get_octet_stream_non_pdf_skipped(monkeypatch):
     assert resp.raw is None
 
 
-def test_http_get_plain_text_non_pdf_skipped(monkeypatch):
-    # A real text/plain document (not a PDF) is read for the sniff, then skipped —
-    # PDF support doesn't turn plain text into evidence, only rescues mislabeled PDFs.
+def test_http_get_plain_text_is_read_as_a_document(monkeypatch):
+    # A manufacturer's changelog is often served exactly this way.
     _stub_urlopen(monkeypatch, content_type="text/plain", body=b"just some notes")
     resp = web_http.http_get("https://x.com/notes.txt")
-    assert resp.skip == "content-type"
-    assert resp.raw is None
+    assert resp.skip is None
+    assert resp.content_type == "text/plain"
+    assert resp.text == "just some notes"
+
+
+def test_http_get_headerless_unrecognized_bytes_cache_as_text(monkeypatch):
+    # The cost of claiming text/plain: a header-less response surfaces under it,
+    # so unlabelled bytes matching no signature cache rather than being refused.
+    # Locked as a deliberate trade. The repair (letting a handler reject a body)
+    # buys a rare case with a new interface, so it waits for a real one.
+    _stub_urlopen(monkeypatch, content_type="text/plain", body=b"\x00\x01binary junk")
+    resp = web_http.http_get("https://x.com/untyped")
+    assert resp.skip is None
+    assert resp.content_type == "text/plain"
 
 
 def test_http_get_archive_skipped_without_reading_body(monkeypatch):
@@ -357,5 +372,292 @@ def test_sniffing_down_to_a_narrower_type_re_applies_its_cap(small_caps, monkeyp
 
 def test_pdfs_are_configured_larger_than_everything_else():
     # Locks the policy itself, not just the mechanism the tests above shrink.
-    assert PdfHandler.max_response_bytes == 65 * 1024 * 1024
+    assert PdfHandler.max_response_bytes == 128 * 1024 * 1024
     assert PdfHandler.max_response_bytes > web_http.MAX_RESPONSE_BYTES
+
+
+# --------------------------------------------------------------------------- #
+# Certificate chain repair — rebuilding what a server omits, and refusing the
+# rest. Certificates are minted in-process; nothing here touches the network.
+# --------------------------------------------------------------------------- #
+
+
+def _make_key() -> ec.EllipticCurvePrivateKey:
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+def _make_cert(
+    cn,
+    key,
+    *,
+    issuer_cn=None,
+    issuer_key=None,
+    aia_uri=None,
+    ocsp_uri=None,
+):
+    """Mint a certificate, self-signed unless an issuer is supplied."""
+    now = datetime.datetime.now(datetime.UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .issuer_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn or cn)])
+        )
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365))
+    )
+    access = [
+        x509.AccessDescription(method, x509.UniformResourceIdentifier(uri))
+        for method, uri in (
+            (AuthorityInformationAccessOID.OCSP, ocsp_uri),
+            (AuthorityInformationAccessOID.CA_ISSUERS, aia_uri),
+        )
+        if uri is not None
+    ]
+    if access:
+        builder = builder.add_extension(
+            x509.AuthorityInformationAccess(access), critical=False
+        )
+    return builder.sign(issuer_key or key, hashes.SHA256())
+
+
+@pytest.fixture(autouse=True)
+def _clear_repair_cache():
+    """A repaired context is memoized per host; don't leak one between tests."""
+    web_http._repaired_contexts.clear()
+    yield
+    web_http._repaired_contexts.clear()
+
+
+def test_ca_issuer_uri_prefers_ca_issuers_over_ocsp():
+    key = _make_key()
+    cert = _make_cert(
+        "leaf", key, aia_uri="http://ca.example/i.der", ocsp_uri="http://ocsp.example/"
+    )
+    assert web_http._ca_issuer_uri(cert) == "http://ca.example/i.der"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://127.0.0.1/ca.der",
+        "http://localhost/ca.der",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/ca.der",
+        "http://[::1]/ca.der",
+    ],
+)
+def test_fetch_ca_cert_refuses_non_public_addresses(uri, monkeypatch):
+    # The pointer comes from an unverified certificate — the one place a stranger
+    # picks a URL for us. It must not reach the loopback or a metadata endpoint.
+    def _opened(*_args, **_kwargs):
+        raise AssertionError(f"fetched a non-public address: {uri}")
+
+    monkeypatch.setattr(web_http._CA_OPENER, "open", _opened)
+    assert web_http._fetch_ca_cert(uri) is None
+
+
+def test_ca_fetches_do_not_follow_redirects():
+    # A redirect would reach past the address check above.
+    assert web_http._NoRedirect().redirect_request() is None
+
+
+def test_ca_issuer_uri_none_when_absent():
+    assert web_http._ca_issuer_uri(_make_cert("leaf", _make_key())) is None
+
+
+def _stub_chain_probe(monkeypatch, leaf, issuers):
+    """Serve ``leaf`` as the host's certificate and ``issuers`` by AIA URI."""
+    monkeypatch.setattr(
+        ssl,
+        "get_server_certificate",
+        lambda addr, timeout=None: leaf.public_bytes(Encoding.PEM).decode("ascii"),
+    )
+    monkeypatch.setattr(web_http, "_fetch_ca_cert", lambda uri: issuers.get(uri))
+
+
+def test_aia_chain_refuses_a_self_nominated_root(monkeypatch):
+    # The attack the repair must not enable: a loaded certificate becomes a
+    # *trust anchor*, so a server must not get to point at its own root.
+    rogue_key = _make_key()
+    rogue_root = _make_cert("Rogue Root", rogue_key)
+    leaf_key = _make_key()
+    leaf = _make_cert(
+        "evil.example",
+        leaf_key,
+        issuer_cn="Rogue Root",
+        issuer_key=rogue_key,
+        aia_uri="http://rogue.example/root.der",
+    )
+    _stub_chain_probe(monkeypatch, leaf, {"http://rogue.example/root.der": rogue_root})
+    assert web_http._aia_chain("evil.example", 443) is None
+
+
+def test_aia_chain_returns_the_certificates_the_server_omitted(monkeypatch):
+    # The case worth repairing: two hops up (omitted intermediate, then the
+    # cross-signed root tying it back) the chain does reach a trusted root.
+    root_key = _make_key()
+    root = _make_cert("Trusted Root", root_key)
+    cross_key = _make_key()
+    cross = _make_cert(
+        "Rotated Root",
+        cross_key,
+        issuer_cn="Trusted Root",
+        issuer_key=root_key,
+        aia_uri="http://ca.example/root.der",
+    )
+    inter_key = _make_key()
+    inter = _make_cert(
+        "Intermediate",
+        inter_key,
+        issuer_cn="Rotated Root",
+        issuer_key=cross_key,
+        aia_uri="http://ca.example/cross.der",
+    )
+    leaf = _make_cert(
+        "host.example",
+        _make_key(),
+        issuer_cn="Intermediate",
+        issuer_key=inter_key,
+        aia_uri="http://ca.example/inter.der",
+    )
+    monkeypatch.setattr(web_http, "_trusted_roots", lambda: (root,))
+    _stub_chain_probe(
+        monkeypatch,
+        leaf,
+        {
+            "http://ca.example/inter.der": inter,
+            "http://ca.example/cross.der": cross,
+            "http://ca.example/root.der": root,
+        },
+    )
+    chain = web_http._aia_chain("host.example", 443)
+    assert chain is not None
+    assert [c.subject.rfc4514_string() for c in chain] == [
+        "CN=Intermediate",
+        "CN=Rotated Root",
+    ]
+
+
+def test_aia_chain_refuses_a_certificate_that_did_not_sign_the_one_below(monkeypatch):
+    # An AIA pointer naming a real trusted CA that simply didn't issue this leaf
+    # must not drag that CA in: every link is checked by signature, not by name.
+    root_key = _make_key()
+    root = _make_cert("Trusted Root", root_key)
+    unrelated = _make_cert(
+        "Unrelated CA", _make_key(), issuer_cn="Trusted Root", issuer_key=root_key
+    )
+    leaf = _make_cert(
+        "host.example",
+        _make_key(),
+        issuer_cn="Unrelated CA",
+        issuer_key=_make_key(),  # signed by someone else entirely
+        aia_uri="http://ca.example/unrelated.der",
+    )
+    monkeypatch.setattr(web_http, "_trusted_roots", lambda: (root,))
+    _stub_chain_probe(monkeypatch, leaf, {"http://ca.example/unrelated.der": unrelated})
+    assert web_http._aia_chain("host.example", 443) is None
+
+
+def test_repaired_context_verifies_as_strictly_as_the_original(monkeypatch, capsys):
+    # The promise of the repair: supply missing certificates, never relax the check.
+    root_key = _make_key()
+    inter = _make_cert(
+        "Intermediate",
+        _make_key(),
+        issuer_cn="Trusted Root",
+        issuer_key=root_key,
+    )
+    monkeypatch.setattr(web_http, "_aia_chain", lambda host, port: [inter])
+    context = web_http._repaired_context("host.example", 443)
+    assert context is not None
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname
+    # Without this, verification could stop at a fetched certificate instead of
+    # having to reach a certifi root — the walk checks signatures, not expiry.
+    assert not context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    # Loud, because trusting certificates a server didn't send is worth seeing.
+    assert "Intermediate" in capsys.readouterr().err
+
+
+def test_repaired_context_is_built_once_per_host(monkeypatch):
+    # Including an unrepairable host: a dozen URLs must not mean a dozen probes.
+    probes = []
+
+    def _unrepairable(host, port):
+        probes.append(host)
+
+    monkeypatch.setattr(web_http, "_aia_chain", _unrepairable)
+    assert web_http._repaired_context("host.example", 443) is None
+    assert web_http._repaired_context("host.example", 443) is None
+    assert probes == ["host.example"]
+
+
+def _missing_issuer_error():
+    err = ssl.SSLCertVerificationError("unable to get local issuer certificate")
+    err.verify_code = web_http._VERIFY_MISSING_ISSUER
+    return urllib.error.URLError(err)
+
+
+def _raising_urlopen(exc):
+    def _open(*_args, **_kwargs):
+        raise exc
+
+    return _open
+
+
+def test_urlopen_retries_once_with_the_repaired_context(monkeypatch):
+    repaired = ssl.create_default_context()
+    monkeypatch.setattr(web_http, "_repaired_context", lambda host, port: repaired)
+    contexts = []
+
+    def _open(req, timeout=None, *, context=None):
+        contexts.append(context)
+        if len(contexts) == 1:
+            raise _missing_issuer_error()
+        return "response"
+
+    monkeypatch.setattr(urllib.request, "urlopen", _open)
+    assert web_http._urlopen("https://x.com/p") == "response"
+    assert contexts == [web_http._SSL_CONTEXT, repaired]
+
+
+def test_urlopen_starts_from_a_repair_already_made_this_run(monkeypatch):
+    # The second URL off a broken host shouldn't repeat the doomed handshake.
+    repaired = ssl.create_default_context()
+    web_http._repaired_contexts[("x.com", 443)] = repaired
+    contexts = []
+
+    def _open(req, timeout=None, *, context=None):
+        contexts.append(context)
+        return "response"
+
+    monkeypatch.setattr(urllib.request, "urlopen", _open)
+    assert web_http._urlopen("https://x.com/p") == "response"
+    assert contexts == [repaired]
+
+
+def test_urlopen_does_not_repair_a_genuinely_bad_certificate(monkeypatch):
+    # A real trust failure: the probe must not even be attempted.
+    def _repair(host, port):
+        raise AssertionError("repair attempted for a non-chain TLS failure")
+
+    monkeypatch.setattr(web_http, "_repaired_context", _repair)
+    err = ssl.SSLCertVerificationError("certificate has expired")
+    err.verify_code = 10  # X509_V_ERR_CERT_HAS_EXPIRED
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _raising_urlopen(urllib.error.URLError(err))
+    )
+    with pytest.raises(urllib.error.URLError):
+        web_http._urlopen("https://x.com/p")
+
+
+def test_urlopen_reraises_when_the_chain_cannot_be_repaired(monkeypatch):
+    monkeypatch.setattr(web_http, "_repaired_context", lambda host, port: None)
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _raising_urlopen(_missing_issuer_error())
+    )
+    with pytest.raises(urllib.error.URLError):
+        web_http._urlopen("https://x.com/p")

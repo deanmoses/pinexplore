@@ -120,7 +120,10 @@ def _resolve_handler(raw: bytes, path: Path) -> ContentHandler:
     The signature leads because a hand-saved file's name is unreliable — a
     browser's "Save image as" lands JPEGs under ``.txt``, ``.jpeg``, or no
     suffix at all — while its first bytes are not. The suffix is the fallback
-    for a type with no signature (saved HTML).
+    for a type with no signature (saved HTML, and the text formats, which have
+    no magic bytes to have a signature from). That ordering is what keeps a
+    misnamed JPEG out of the text handler: a ``.txt`` only reads as text once
+    the signatures have all declined it.
     """
     handler = sniff(raw)
     if handler is not None:
@@ -129,13 +132,38 @@ def _resolve_handler(raw: bytes, path: Path) -> ContentHandler:
         ".html": "text/html",
         ".htm": "text/html",
         ".xhtml": "application/xhtml+xml",
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+        ".markdown": "text/markdown",
     }
     by_suffix = handler_for(suffix_types.get(path.suffix.lower(), ""))
     if by_suffix is not None:
         return by_suffix
     raise ImportRefusedError(
         f"unsupported content type for {path.name}: no handler recognizes these "
-        f"bytes or the '{path.suffix}' suffix. Supported: HTML, PDF, JPEG, PNG."
+        f"bytes or the '{path.suffix}' suffix. "
+        "Supported: HTML, PDF, plain text, Markdown, JPEG, PNG."
+    )
+
+
+def _check_encoding(raw: bytes, handler: ContentHandler, path: Path) -> None:
+    """Refuse a file whose encoding can only be guessed at, rather than store the guess.
+
+    A fetch has an HTTP charset header to go on; an import never does. Whether
+    that matters is the handler's to answer — a ``.txt`` has nowhere to declare
+    an encoding, an HTML page usually does, and a binary type doesn't care — so
+    ask rather than test the type here.
+
+    Re-saving as UTF-8 puts the call on the person who can see whether the
+    accents came out right, which is why this asks for that rather than offering
+    a charset flag to guess with.
+    """
+    if handler.rereads_faithfully(raw):
+        return
+    raise ImportRefusedError(
+        f"{path.name} is not valid UTF-8 and declares no charset, so its encoding "
+        f"could only be guessed at; re-save it as UTF-8 so its accented "
+        f"characters survive into the quote"
     )
 
 
@@ -217,6 +245,7 @@ def import_one(
     normalized = _check_url(url)
     raw = path.read_bytes()
     handler = _resolve_handler(raw, path)
+    _check_encoding(raw, handler, path)
 
     existing = web_cache.get(normalized, con=con) if con is not None else None
     if existing is not None and not force and not dry_run:

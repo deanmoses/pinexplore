@@ -91,6 +91,40 @@ def test_backfill_rewrites_html_and_null_rows_and_stamps_source(cache):
         assert row["last_updated"] == "2023-01-01"  # untouched
 
 
+def test_backfill_skips_a_row_whose_charset_only_the_header_knew(cache):
+    # The HTTP charset is never stored, so a page that declared none and isn't
+    # utf-8 can only be re-read by detection — whose guess carries no U+FFFD for
+    # the regression guard below to catch. Keep the fetch-time text instead of
+    # rewriting "Réglage" as a plausible-looking "RÈglage".
+    body = "<html><body><p>Réglage du flipper « Sonic »</p></body></html>"
+    url = _seed_row(
+        cache,
+        "https://a.example/cp1252",
+        body.encode("cp1252"),
+        text="Réglage du flipper « Sonic »",  # what the header-bearing fetch stored
+        text_source="html",
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 0
+    assert tally["skipped (charset unrecoverable)"] == 1
+    assert _row(cache, url)["text"] == "Réglage du flipper « Sonic »"
+
+
+def test_backfill_rewrites_a_row_whose_blob_declares_its_charset(cache):
+    # The same bytes, once the page states its own encoding: recoverable from
+    # the blob alone, so the re-extraction runs and stays faithful.
+    body = (
+        '<html><head><meta charset="windows-1252"><title>T</title></head>'
+        "<body><p>Réglage du flipper</p></body></html>"
+    )
+    url = _seed_row(
+        cache, "https://a.example/declared", body.encode("cp1252"), text_source="html"
+    )
+    tally = web_backfill.backfill(con=cache)
+    assert tally["rewritten"] == 1
+    assert "Réglage du flipper" in (_row(cache, url)["text"] or "")
+
+
 def test_backfill_skips_foreign_text_sources(cache):
     url_manual = _seed_row(
         cache,
