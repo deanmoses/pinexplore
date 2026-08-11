@@ -98,6 +98,32 @@ def _make_timeout_handler(
     return handler
 
 
+def _print_violations(con: duckdb.DuckDBPyConnection) -> None:
+    """Print what `05_error_checks.sql` recorded before the build gave up.
+
+    `_violations` is a temp table, so the abort message's advice to query it is
+    only actionable from inside this connection — which closes moments later.
+    Without this the operator gets a count and no idea which rows failed.
+    """
+    limit = 50
+    try:
+        # The window count is taken before LIMIT, so the total comes back
+        # without carrying every row over to report a number.
+        rows = con.execute(
+            "SELECT category, check_name, detail, count(*) OVER () AS total"
+            " FROM _violations"
+            " ORDER BY category, check_name, detail"
+            " LIMIT ?",
+            [limit],
+        ).fetchall()
+    except duckdb.Error:
+        return  # a failure anywhere but the error-check layer
+    for category, check_name, detail, _ in rows:
+        print(f"    {category}/{check_name}: {detail}", file=sys.stderr)
+    if rows and rows[0][3] > limit:
+        print(f"    ... and {rows[0][3] - limit} more", file=sys.stderr)
+
+
 def load_dotenv() -> None:
     """Load .env file into os.environ (key=value lines only)."""
     env_path = pathlib.Path(".env")
@@ -195,20 +221,19 @@ def main() -> None:
                     " FROM _warnings WHERE cnt > 0"
                 ).fetchall():
                     print(f"    {row[0]}")
-            elif layer == "05_error_checks.sql":
-                for row in con.execute(
-                    "SELECT category || ': ' || count(*) FROM _violations"
-                    " GROUP BY category ORDER BY category"
-                ).fetchall():
-                    print(f"    {row[0]}")
         except TimeoutError:
             elapsed = int(time.time() - layer_start)
             print(f"  FAILED {layer} after {elapsed}s (timeout)", file=sys.stderr)
             sys.exit(1)
         except Exception as e:
+            # Disarm before diagnosing. The layer's alarm is still live in here,
+            # and a timeout landing mid-diagnostic would replace a clean exit
+            # with a traceback from the wrong failure.
+            signal.alarm(0)
             elapsed = int(time.time() - layer_start)
             print(f"  FAILED {layer} after {elapsed}s", file=sys.stderr)
             print(f"  {e}", file=sys.stderr)
+            _print_violations(con)
             sys.exit(1)
         finally:
             signal.alarm(0)

@@ -609,6 +609,6 @@ FROM _violations GROUP BY category ORDER BY category;
 
 SELECT CASE
   WHEN count(*) > 0
-  THEN error(count(*) || ' contract violation(s) found. Run: SELECT * FROM _violations')
+  THEN error(count(*) || ' contract violation(s) found')
   ELSE 'All checks passed'
 END FROM _violations;
