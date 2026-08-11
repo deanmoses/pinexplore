@@ -600,6 +600,74 @@ GROUP BY alias
 HAVING count(*) > 1;
 
 ------------------------------------------------------------
+-- System resolution
+------------------------------------------------------------
+
+-- An MPU string claimed by two systems. The catalog side of the match, so this
+-- fires whether or not a machine reports that MPU yet.
+INSERT INTO _violations
+WITH system_mpu AS (SELECT slug, unnest(mpu_strings) AS mpu_string FROM systems)
+SELECT 'systems', 'ambiguous_system_mpu_string',
+  mpu_string || ' resolves to: ' || string_agg(slug, ', ' ORDER BY slug)
+FROM system_mpu
+GROUP BY mpu_string
+HAVING count(*) > 1;
+
+-- Every consumer of `ipdb_machines_staged` treats it as one row per machine and
+-- joins it as a lookup, so a second row silently multiplies whatever joined it —
+-- 85,828 file rows in `ipdb_files` alone. The view resolves three lookups
+-- (systems by MPU, technology generation by short name and by full name) and
+-- none of them is unique by construction, so the invariant is asserted here
+-- rather than once per lookup.
+INSERT INTO _violations
+SELECT 'systems', 'ipdb_machines_staged_not_unique',
+  'IpdbId ' || IpdbId || ' -> ' || count(*) || ' rows (MPU: ' || coalesce(any_value(MPU), 'none') || ')'
+FROM ipdb_machines_staged
+GROUP BY IpdbId
+HAVING count(*) > 1;
+
+------------------------------------------------------------
+-- Document classification vocabulary
+------------------------------------------------------------
+
+-- The vocabulary is split across three hand-maintained tables that reference
+-- each other by name, so a rename applied to one of them dangles in the others.
+-- Nothing downstream raises when that happens: `ipdb_file_class_matches` joins
+-- patterns to classes with an INNER JOIN, so a pattern naming a class that no
+-- longer exists contributes nothing and the build stays green. Renaming a class
+-- with 4,000 matches would quietly delete them.
+
+-- A pattern detects a class that isn't in the vocabulary
+INSERT INTO _violations
+SELECT 'documents', 'ref_document_class_pattern_orphan',
+  document_class || ' (pattern: ' || pattern || ')'
+FROM ref_document_class_pattern
+WHERE document_class NOT IN (SELECT document_class FROM ref_document_class);
+
+-- A hierarchy edge names a class that isn't in the vocabulary, at either end
+INSERT INTO _violations
+SELECT 'documents', 'ref_document_class_parent_orphan', detail
+FROM (
+  SELECT document_class || ' -> ' || parent_class || ' (unknown child)' AS detail
+  FROM ref_document_class_parent
+  WHERE document_class NOT IN (SELECT document_class FROM ref_document_class)
+  UNION ALL
+  SELECT document_class || ' -> ' || parent_class || ' (unknown parent)'
+  FROM ref_document_class_parent
+  WHERE parent_class NOT IN (SELECT document_class FROM ref_document_class)
+);
+
+-- A class declares a kind that isn't in the vocabulary. This is the only thing
+-- that reads `ref_source_kind`, but the kinds are load-bearing anyway:
+-- `ipdb_patents` and `ipdb_trade_articles` select on their literal values, so a
+-- misspelt kind empties those views rather than failing.
+INSERT INTO _violations
+SELECT 'documents', 'ref_document_class_unknown_kind',
+  document_class || ' -> ' || source_kind
+FROM ref_document_class
+WHERE source_kind NOT IN (SELECT source_kind FROM ref_source_kind);
+
+------------------------------------------------------------
 -- Results
 ------------------------------------------------------------
 

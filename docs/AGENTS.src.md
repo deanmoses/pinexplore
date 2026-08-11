@@ -122,6 +122,7 @@ Files in `sql/` load in numeric order during `make explore`:
 | `09_quality.sql`        | Slug quality, media audit, backfill proposals         |
 | `10_popularity.sql`     | Title popularity composite scoring                    |
 | `11_history.sql`        | Industry history: decade-level trends                 |
+| `12_documents.sql`      | IPDB trove classified: documents, patents, articles   |
 | `90_print_warnings.sql` | Print accumulated warnings (always runs last)         |
 
 The build **fails** if integrity checks don't pass — query `SELECT * FROM _violations` for details.

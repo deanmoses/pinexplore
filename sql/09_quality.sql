@@ -96,23 +96,6 @@ SELECT
 FROM opdb_machines AS om, unnest(om.images) AS t(img)
 WHERE len(om.images) > 0;
 
-CREATE OR REPLACE VIEW ipdb_machine_files AS
-SELECT
-  IpdbId AS ipdb_id,
-  Title AS machine_name,
-  f.Url AS file_url,
-  f."Name" AS file_name,
-  category
-FROM ipdb_machines, (
-  SELECT unnest(ImageFiles) AS f, 'image' AS category
-  UNION ALL SELECT unnest(Documentation), 'documentation'
-  UNION ALL SELECT unnest(Files), 'file'
-  UNION ALL SELECT unnest(RuleSheetUrls), 'rule_sheet'
-  UNION ALL SELECT unnest(ROMs), 'rom'
-  UNION ALL SELECT unnest(ServiceBulletins), 'service_bulletin'
-  UNION ALL SELECT unnest(MultimediaFiles), 'multimedia'
-);
-
 CREATE OR REPLACE VIEW model_files AS
 (SELECT
   m.slug AS model_slug,

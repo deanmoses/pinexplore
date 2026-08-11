@@ -575,3 +575,113 @@ WHERE LOWER(r.person_name) NOT IN (
 )
   AND r.person_name NOT ILIKE '%(undisclosed)%'
   AND r.person_name NOT ILIKE '%unknown%';
+
+------------------------------------------------------------
+-- IPDB file trove
+------------------------------------------------------------
+
+-- IPDB's per-machine file arrays, flattened to one row per file. Its seven
+-- array names collapse two different axes: `rom` and `service_bulletin` say
+-- what a file *is*, `image` and `file` say how it is delivered.
+CREATE OR REPLACE VIEW ipdb_machine_files AS
+SELECT
+  IpdbId AS ipdb_id,
+  Title AS machine_name,
+  f.Url AS file_url,
+  f."Name" AS file_name,
+  category
+FROM ipdb_machines, (
+  SELECT unnest(ImageFiles) AS f, 'image' AS category
+  UNION ALL SELECT unnest(Documentation), 'documentation'
+  UNION ALL SELECT unnest(Files), 'file'
+  UNION ALL SELECT unnest(RuleSheetUrls), 'rule_sheet'
+  UNION ALL SELECT unnest(ROMs), 'rom'
+  UNION ALL SELECT unnest(ServiceBulletins), 'service_bulletin'
+  UNION ALL SELECT unnest(MultimediaFiles), 'multimedia'
+);
+
+-- One row per file with the delivery axis resolved and its machine's context
+-- carried alongside. Everything here is mechanical: the container is the URL's
+-- extension, and the rest is the machine's own attributes.
+--
+-- Title and system come from the catalog rather than from IPDB, because they
+-- are what a subject is eventually resolved against. `machine_mpu` is the free
+-- text `machine_system_slug` is derived from, kept for the cases the catalog's
+-- `mpu_strings` do not cover. All three joins are on unique keys, so none of
+-- them multiplies the file count.
+CREATE OR REPLACE VIEW ipdb_files AS
+SELECT
+  f.ipdb_id,
+  f.machine_name,
+  f.category AS ipdb_category,
+  f.file_name,
+  f.file_url,
+  regexp_extract(f.file_url, '([^/]+)$', 1) AS file_basename,
+  nullif(lower(regexp_extract(f.file_url, '\.([A-Za-z0-9]{1,5})$', 1)), '') AS container,
+  m.ManufacturerShortName AS machine_manufacturer,
+  m.MPU AS machine_mpu,
+  s.system_slug AS machine_system_slug,
+  md.title_slug AS machine_title_slug
+FROM ipdb_machine_files AS f
+LEFT JOIN ipdb_machines AS m ON m.IpdbId = f.ipdb_id
+LEFT JOIN ipdb_machines_staged AS s ON s.IpdbId = f.ipdb_id
+LEFT JOIN models AS md ON md.ipdb_id = f.ipdb_id;
+
+-- Applying the declared patterns to the staged files: one row per file per
+-- class it matches. The judgement is all in `ref_document_class_pattern`; this
+-- only runs it.
+--
+-- In two stages, because a regex whose pattern is a column is recompiled per
+-- row, and pairing every filename with every pattern would build millions of
+-- them. Stage one pairs a file with a pattern only when one of that pattern's
+-- declared literals appears in the name — a substring test, nothing to compile.
+-- Stage two runs the real regex on the few pairs that survive. `required_any`
+-- is a necessary condition only, so the verdict is still entirely the regex's.
+--
+-- Materialized so the pairing runs once per build rather than once per query.
+CREATE OR REPLACE TABLE ipdb_file_class_matches AS
+WITH needles AS (
+  SELECT
+    document_class,
+    pattern,
+    allow_containers,
+    deny_pattern,
+    unnest(required_any) AS needle
+  FROM ref_document_class_pattern
+),
+candidates AS (
+  SELECT DISTINCT
+    f.ipdb_id,
+    f.file_url,
+    f.ipdb_category,
+    f.file_name,
+    f.container,
+    n.document_class,
+    n.pattern,
+    n.allow_containers,
+    n.deny_pattern
+  FROM ipdb_files AS f
+  INNER JOIN needles AS n ON contains(lower(f.file_name), n.needle)
+)
+-- DISTINCT because a class may be detected by more than one pattern row, and
+-- which row fired is not projected: two matches on the same class would be
+-- indistinguishable rows, and would double any count taken off this table.
+SELECT DISTINCT
+  cd.ipdb_id,
+  cd.file_url,
+  cd.ipdb_category,
+  cd.file_name,
+  cd.container,
+  cd.document_class,
+  c.source_kind
+FROM candidates AS cd
+INNER JOIN ref_document_class AS c USING (document_class)
+WHERE regexp_matches(lower(cd.file_name), cd.pattern)
+  AND (
+    cd.allow_containers IS NULL
+    OR list_contains(cd.allow_containers, coalesce(cd.container, ''))
+  )
+  AND (
+    cd.deny_pattern IS NULL
+    OR NOT regexp_matches(lower(cd.file_name), cd.deny_pattern)
+  );
