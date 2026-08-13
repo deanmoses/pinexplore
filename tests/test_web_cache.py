@@ -220,6 +220,64 @@ def test_get_by_raw_url_matches_the_normalized_alias(cache):
     assert wc.get_by_raw_url("https://site.com/other", con=cache) is None
 
 
+def test_capture_for_citation_ref_resolves_direct_and_aliased_urls(cache):
+    # A citation ref resolves through the document library to whichever of the
+    # document's URLs is captured — directly, or as the raw_url of a fetch that
+    # redirected (an archive.org download URL stored under its datanode host).
+    stored = wc.normalize_url("https://ia600400.us.archive.org/18/items/x/manual.pdf")
+    asked = "https://archive.org/download/x/manual.pdf"
+    _seed(cache, url=stored, raw_url=asked, content_type="application/pdf")
+    doc_id = wc.ensure_document_for_url(cache, wc.normalize_url(asked), role="archive")
+    # an uncaptured catalog URL rides along and must not block resolution
+    cache.execute(
+        "INSERT INTO document_urls (url, document_id, role, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            wc.normalize_url("https://www.ipdb.org/files/1/manual.pdf"),
+            doc_id,
+            "catalog",
+            wc.now_iso(),
+        ),
+    )
+    wc.set_document_fields(cache, doc_id, citation_ref="williams:manual")
+    hit = wc.capture_for_citation_ref("williams:manual", con=cache)
+    assert hit is not None
+    assert hit["url"] == stored
+    assert hit["content_type"] == "application/pdf"
+
+
+def test_capture_for_citation_ref_scans_every_document_carrying_the_ref(cache):
+    # citation_ref is not unique: enrichment stamps it by URL join, and IPDB
+    # seeds one work as several documents (a flyer's front and back) until a
+    # merge folds them. The captured copy must win regardless of which
+    # document row carries it, in deterministic order — an arbitrary
+    # fetchone() here read a cached document as missing.
+    uncaptured = wc.ensure_document_for_url(
+        cache, wc.normalize_url("https://www.ipdb.org/images/1/front.jpg"),
+        role="catalog",
+    )
+    stored = wc.normalize_url("https://www.ipdb.org/images/1/back.jpg")
+    _seed(cache, url=stored, content_type="image/jpeg")
+    captured = wc.ensure_document_for_url(cache, stored, role="catalog")
+    for doc_id in (uncaptured, captured):
+        wc.set_document_fields(cache, doc_id, citation_ref="williams:flyer")
+    hit = wc.capture_for_citation_ref("williams:flyer", con=cache)
+    assert hit is not None
+    assert hit["url"] == stored
+
+
+def test_capture_for_citation_ref_misses_cleanly(cache):
+    # Unknown ref: no document carries it.
+    assert wc.capture_for_citation_ref("williams:absent", con=cache) is None
+    # Known document, nothing captured: the trove's normal state.
+    doc_id = wc.ensure_document_for_url(
+        cache, wc.normalize_url("https://www.ipdb.org/files/2/handbook.pdf"),
+        role="catalog",
+    )
+    wc.set_document_fields(cache, doc_id, citation_ref="williams:handbook")
+    assert wc.capture_for_citation_ref("williams:handbook", con=cache) is None
+
+
 # --------------------------------------------------------------------------- #
 # upsert conflict behavior
 # --------------------------------------------------------------------------- #

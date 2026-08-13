@@ -1401,6 +1401,44 @@ def get_by_raw_url(
             con.close()
 
 
+def capture_for_citation_ref(
+    ref: str, con: sqlite3.Connection | None = None
+) -> PageRow | None:
+    """The cached capture behind a citation ref (``williams:some-manual-slug``).
+
+    Resolves every document library row whose ``citation_ref`` is *ref* —
+    the column is not unique, and enrichment legitimately stamps one ref onto
+    several rows when IPDB seeds one work as several documents (a flyer's
+    front and back) that a merge has not yet folded — then tries each
+    document's URLs: under their own normalized form first, then as the
+    ``raw_url`` of a fetch that redirected, the shape every archive.org
+    download URL takes when it lands on a datanode host. The first captured
+    page wins, in (document id, URL) order so ties resolve deterministically;
+    a ref no document carries, or one none of whose URLs is captured — the
+    trove's normal state — is ``None``.
+
+    This is the join flippatch's quote gates resolve a ``<publisher>:<slug>``
+    cite through, so its contract is deliberately: one ref in, at most one
+    ``PageRow`` out, no schema knowledge required of the caller.
+    """
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        for row in con.execute(
+            "SELECT u.url FROM documents AS d "
+            "JOIN document_urls AS u ON u.document_id = d.id "
+            "WHERE d.citation_ref = ? ORDER BY d.id, u.url",
+            (ref,),
+        ).fetchall():
+            page = get(row["url"], con=con) or get_by_raw_url(row["url"], con=con)
+            if page is not None:
+                return page
+        return None
+    finally:
+        if own:
+            con.close()
+
+
 def _fts_units(term: str) -> tuple[list[str], bool]:
     """Split a search term into units on whitespace *outside* double quotes,
     plus whether a quote was left open.
