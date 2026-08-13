@@ -12,7 +12,7 @@ from __future__ import annotations
 import content_types as ct
 import web_ocr
 from content_types.html import HtmlHandler, _sniff_meta_charset
-from content_types.image import JpegHandler, PngHandler
+from content_types.image import JpegHandler, PngHandler, WebpHandler
 from content_types.pdf import PdfHandler
 from content_types.text import MarkdownHandler, PlainTextHandler
 
@@ -29,6 +29,7 @@ def test_handler_for_routes_known_types():
     assert isinstance(ct.handler_for("text/markdown"), MarkdownHandler)
     assert isinstance(ct.handler_for("image/jpeg"), JpegHandler)
     assert isinstance(ct.handler_for("image/png"), PngHandler)
+    assert isinstance(ct.handler_for("image/webp"), WebpHandler)
 
 
 def test_handler_for_unknown_type_is_none():
@@ -47,6 +48,7 @@ def test_extractable_set_is_the_union_of_handler_mime_types():
         "image/jpeg",
         "image/jpg",
         "image/png",
+        "image/webp",
     } == ct.EXTRACTABLE_CONTENT_TYPES
 
 
@@ -68,6 +70,24 @@ def test_sniff_matches_image_signatures():
     # still routes to the right handler and blob extension.
     assert isinstance(ct.sniff(b"\xff\xd8\xff\xe0\x00\x10JFIF"), JpegHandler)
     assert isinstance(ct.sniff(b"\x89PNG\r\n\x1a\n\x00"), PngHandler)
+
+
+def test_sniff_matches_webp_past_its_riff_prefix():
+    assert isinstance(ct.sniff(b"RIFF\x24\x01\x00\x00WEBPVP8 "), WebpHandler)
+
+
+def test_sniff_declines_other_riff_containers():
+    # The bytes WebP shares with WAV and AVI must not be enough to claim them —
+    # an audio file stored as a .webp blob would be OCR'd as a broken picture.
+    assert ct.sniff(b"RIFF\x24\x01\x00\x00WAVEfmt ") is None
+    assert ct.sniff(b"RIFF\x24\x01\x00\x00AVI LIST") is None
+
+
+def test_sniff_bytes_covers_every_signature_including_webp():
+    # The transport reads exactly this many bytes before deciding, so a handler
+    # whose test reads past its own prefix must widen it or never match.
+    assert ct.SNIFF_BYTES >= 12
+    assert ct.sniff(b"RIFF\x24\x01\x00\x00WEBP"[: ct.SNIFF_BYTES]) is not None
 
 
 def test_sniff_returns_none_for_non_signature_bytes():
@@ -95,6 +115,7 @@ def test_handler_extensions():
     assert ct.handler_for("text/markdown").extension == "md"
     assert ct.handler_for("image/jpeg").extension == "jpg"
     assert ct.handler_for("image/png").extension == "png"
+    assert ct.handler_for("image/webp").extension == "webp"
 
 
 def test_extension_for_resolves_stored_content_types():

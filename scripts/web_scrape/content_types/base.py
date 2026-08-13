@@ -70,6 +70,11 @@ class ContentHandler:
     # A leading-bytes signature that authoritatively identifies this type whatever
     # the header claimed (a PDF's b"%PDF-"), or None when the type can't be sniffed.
     signature: bytes | None = None
+    # How many leading bytes ``matches`` must see to decide; None means "as many
+    # as ``signature`` is long". The transport reads this much and no more before
+    # it has to pick a size cap, so a type whose test reads past its own prefix
+    # states the wider span or never matches.
+    signature_span: int | None = None
     # Extension for the stored raw blob, so it re-opens in the right viewer on
     # verify (a PDF as ``.pdf``, not mislabeled ``.html``). No default — each type
     # states its own, or the registry rejects it. Required.
@@ -103,6 +108,16 @@ class ContentHandler:
     # default. "Too big" is a fact about the format: a 15MB scanned manual is an
     # ordinary document, a 15MB HTML page is a bug.
     max_response_bytes: int | None = None
+
+    def matches(self, raw: bytes) -> bool:
+        """Whether these leading bytes are this type's magic.
+
+        The prefix test is the whole story for a format whose magic opens the
+        file; a container format, whose magic sits at a fixed offset instead,
+        overrides. An override still sets ``signature`` — that is what marks a
+        type sniffable at all — plus ``signature_span`` if it reads further.
+        """
+        return self.signature is not None and raw.startswith(self.signature)
 
     def decode(self, raw: bytes, header_charset: str | None) -> str | None:
         """The text the cache stores/extracts from, or None for a binary type.

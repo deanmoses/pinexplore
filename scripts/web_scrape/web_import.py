@@ -142,7 +142,7 @@ def _resolve_handler(raw: bytes, path: Path) -> ContentHandler:
     raise ImportRefusedError(
         f"unsupported content type for {path.name}: no handler recognizes these "
         f"bytes or the '{path.suffix}' suffix. "
-        "Supported: HTML, PDF, plain text, Markdown, JPEG, PNG."
+        "Supported: HTML, PDF, plain text, Markdown, JPEG, PNG, WebP."
     )
 
 

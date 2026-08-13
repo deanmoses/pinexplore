@@ -9,8 +9,8 @@ the original picture.
 
 One handler class per image format, sharing the OCR extraction: the format is
 what decides the blob extension (a PNG blob must not be stored as ``.jpg``) and
-the magic-byte signature, and nothing else differs. Adding TIFF or WebP later is
-another two-line subclass.
+the magic-byte signature, and nothing else differs. Adding TIFF later is another
+two-line subclass.
 
 OCR'd words are findable, but they are the machine's reading: they land in
 ``ocr_text`` (the machine-read tier) with ``text`` and ``text_source`` NULL,
@@ -112,3 +112,27 @@ class PngHandler(_ImageHandler):
     canonical_mime = "image/png"
     signature: bytes | None = b"\x89PNG\r\n\x1a\n"
     extension = "png"
+
+
+class WebpHandler(_ImageHandler):
+    """WebP images — often a modern outlet's only copy, and usually its largest.
+
+    A news CDN serves WebP at full resolution while the JPEGs alongside it are
+    downscaled, so the WebP is the copy a flyer is legible in. Vision needs no
+    extra backend for it (macOS ImageIO decodes ``org.webmproject.webp``), and
+    an animated one reads its first frame.
+    """
+
+    mime_types = frozenset({"image/webp"})
+    canonical_mime = "image/webp"
+    # A RIFF container: "RIFF", a 4-byte length, then the form tag at offset 8.
+    # The prefix alone is WAV and AVI too, and the length bytes in between can
+    # be anything — so the tag is what decides, and ``signature`` is only the
+    # marker that this type is sniffable at all.
+    signature: bytes | None = b"RIFF"
+    signature_span: int | None = 12
+    extension = "webp"
+
+    @override
+    def matches(self, raw: bytes) -> bool:
+        return raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"

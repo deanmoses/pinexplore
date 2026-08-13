@@ -332,7 +332,7 @@ def test_an_oversized_body_is_not_buffered_to_the_widest_cap(small_caps, monkeyp
     assert web_http.http_get("https://x.com/p").skip == "too-large"
     # HTML's cap is 100 here: one byte past it proves too-large, plus the sniff
     # prefix. Reading to the PDF allowance instead would buffer 401.
-    assert made[0]._pos <= 101 + web_http._SIGNATURE_BYTES, made[0]._pos
+    assert made[0]._pos <= 101 + web_http.SNIFF_BYTES, made[0]._pos
 
 
 def test_an_unsniffable_binary_is_refused_after_a_few_bytes(small_caps, monkeypatch):

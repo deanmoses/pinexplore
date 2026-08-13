@@ -237,6 +237,36 @@ def _too_large_reason(resp: Resp) -> str:
     )
 
 
+def _web_url(raw_url: str) -> tuple[web_cache.NormalizedUrl, str]:
+    """Normalize a URL and its host, refusing anything that isn't a web address.
+
+    Raises ``ValueError`` with the reason, so a garbage ``--from-file`` row is a
+    per-URL skip rather than an aborted batch: ``normalize_url`` rejects it (a
+    bad port like ':abc', an invalid IPv6 literal), it isn't http(s) with a host
+    (``ftp://``, ``mailto:``), or its authority holds characters ``http.client``
+    refuses at connect time.
+
+    The character test reads the authority *decoded*, and whole, because that is
+    what the transport sees: ``urllib.request`` unquotes before connecting, so
+    ``https://not%20a%20url/`` is the same dead address wearing an escape, and
+    userinfo travels with the host rather than inside ``hostname``.
+
+    Shared, so that what the fetcher won't fetch, ``--doc-class`` won't mint a
+    document for either.
+    """
+    url = web_cache.normalize_url(raw_url)
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"not a web scheme: {parts.scheme or '(none)'}")
+    host = parts.hostname
+    if not host:
+        raise ValueError("no host")
+    authority = urllib.parse.unquote(parts.netloc)
+    if any(c.isspace() or ord(c) < 0x21 or ord(c) == 0x7F for c in authority):
+        raise ValueError(f"unusable host: {parts.netloc!r}")
+    return url, host
+
+
 def fetch_one(
     con: sqlite3.Connection,
     raw_url: str,
@@ -249,18 +279,9 @@ def fetch_one(
     thin_chars: int = THIN_TEXT_CHARS,
 ) -> None:
     try:
-        url = web_cache.normalize_url(raw_url)
-        parts = urllib.parse.urlsplit(url)
-        scheme_ok = parts.scheme in ("http", "https")
-        host = parts.hostname
+        url, host = _web_url(raw_url)
     except ValueError as exc:
-        # normalize_url / urlsplit raise ValueError on a malformed URL (a bad port
-        # like ':abc', an invalid IPv6 literal). A garbage --from-file row must
-        # skip, not abort the whole batch — this runs before the fetch try below.
         print(f"skip (malformed URL): {raw_url} ({exc})", file=sys.stderr)
-        return
-    if not scheme_ok or not host:
-        print(f"skip (unsupported or malformed URL): {raw_url}", file=sys.stderr)
         return
     domain = host
 
@@ -600,17 +621,41 @@ def _apply_document_metadata(
     Sugar over the shared registration library. Applies even to a
     freshness-skipped URL (the metadata is about the work, not the fetch);
     refusals are per-URL warnings so one bad flag doesn't kill a batch.
+
+    A URL we hold nothing for is annotated anyway, by registering it as a
+    document the library knows about but hasn't acquired — the state the trove
+    seed leaves its documents in. These flags are a judgment about what the work
+    *is*, and that stays true whether the fetch bounced off an unsupported
+    content type, a 404, or a dead host.
     """
     if not (args.doc_class or args.subject_pk is not None):
         return
-    rec = web_cache.get(raw_url, con) or web_cache.get_by_raw_url(raw_url, con)
-    if rec is None:
-        print(f"  no cached row to annotate: {raw_url}", file=sys.stderr)
+    try:
+        url, _host = _web_url(raw_url)
+    except ValueError as exc:
+        # Registering it would mint a document nothing can ever be captured for,
+        # and merge is the only path that deletes one.
+        print(f"  cannot annotate {raw_url}: {exc}", file=sys.stderr)
         return
-    doc_id = web_cache.resolve_document(con, rec["url"])
-    if doc_id is None:  # pragma: no cover — upsert_page registers; belt only
-        print(f"  no document for: {rec['url']}", file=sys.stderr)
-        return
+    # Collapse a video URL to the watch URL the fetch path keys its row on, or
+    # the same video cited as youtu.be/ID and as watch?v=ID becomes two
+    # documents — one of them holding the classification and no capture.
+    canonical = web_video.canonical_video_url(url) or url
+    rec = web_cache.get(canonical, con) or web_cache.get_by_raw_url(raw_url, con)
+    if rec is not None:
+        doc_id = web_cache.resolve_document(con, rec["url"])
+        if doc_id is None:  # pragma: no cover — upsert_page registers; belt only
+            print(f"  no document for: {rec['url']}", file=sys.stderr)
+            return
+    else:
+        # A document registered before it was ever captured may already own the
+        # address as cited, and minting a rival under the canonical form is the
+        # same split. ``ensure_`` covers the mirror case, resolving an owned
+        # canonical rather than minting on it.
+        doc_id = web_cache.resolve_document(
+            con, url
+        ) or web_cache.ensure_document_for_url(con, canonical)
+        print(f"  not acquired; annotating document {doc_id}: {url}")
     for document_class in args.doc_class:
         try:
             web_cache.add_document_class(con, doc_id, document_class, source="manual")

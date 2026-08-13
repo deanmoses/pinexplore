@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from .base import ContentHandler, ExtractedMeta
 from .html import HtmlHandler
-from .image import JpegHandler, PngHandler
+from .image import JpegHandler, PngHandler, WebpHandler
 from .pdf import PdfHandler
 from .text import MarkdownHandler, PlainTextHandler
 from .vtt import VttHandler
@@ -28,6 +28,7 @@ HANDLERS: tuple[ContentHandler, ...] = (
     MarkdownHandler(),
     JpegHandler(),
     PngHandler(),
+    WebpHandler(),
 )
 
 
@@ -59,6 +60,19 @@ _validate(HANDLERS)
 _BY_MIME: dict[str, ContentHandler] = {
     mime: handler for handler in HANDLERS for mime in handler.mime_types
 }
+
+# Enough leading bytes to run every signature we know, so the true type is
+# resolved before the body is buffered. Derived from the registry, so a new type
+# with a longer signature — or a wider ``signature_span`` — widens it by being
+# listed.
+SNIFF_BYTES: int = max(
+    (
+        handler.signature_span or len(handler.signature)
+        for handler in HANDLERS
+        if handler.signature is not None
+    ),
+    default=0,
+)
 
 # The content types we can turn into evidence: read the body, then dispatch to a
 # handler. Anything else skips with skip="content-type".
@@ -102,9 +116,12 @@ def sniff(raw: bytes) -> ContentHandler | None:
     A signature is authoritative: it identifies the type whatever the header
     claimed (octet-stream, a wrong text/* label, or nothing). Used to rescue a
     document served under a generic/wrong content type.
+
+    Pass at least ``SNIFF_BYTES`` when reading incrementally: a handler whose
+    test reads past its own prefix declines a shorter one rather than guessing.
     """
     for handler in HANDLERS:
-        if handler.signature is not None and raw.startswith(handler.signature):
+        if handler.matches(raw):
             return handler
     return None
 
@@ -113,6 +130,7 @@ __all__ = [
     "EXTRACTABLE_CONTENT_TYPES",
     "HANDLERS",
     "SNIFFABLE_CONTENT_TYPES",
+    "SNIFF_BYTES",
     "ContentHandler",
     "ExtractedMeta",
     "extension_for",

@@ -34,7 +34,7 @@ from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
 # Allow `import content_types` whether run as a script or imported (mirrors the
 # sibling-import dance the other web_scrape modules do).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from content_types import HANDLERS, SNIFFABLE_CONTENT_TYPES, handler_for, sniff
+from content_types import SNIFF_BYTES, SNIFFABLE_CONTENT_TYPES, handler_for, sniff
 
 if TYPE_CHECKING:
     from content_types.base import ContentHandler
@@ -51,14 +51,6 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 def _cap(handler: ContentHandler) -> int:
     """The byte cap for a resolved handler."""
     return handler.max_response_bytes or MAX_RESPONSE_BYTES
-
-
-# Enough leading bytes to run every signature we know, so the true type is
-# resolved before the body is buffered. Derived from the registry, so a new type
-# with a longer signature widens it automatically.
-_SIGNATURE_BYTES = max(
-    (len(h.signature) for h in HANDLERS if h.signature is not None), default=0
-)
 
 
 # Verify TLS against certifi's CA bundle, not whatever the interpreter happens to
@@ -418,7 +410,7 @@ def http_get(url: str) -> Resp:
         # be trusted to pick the cap, and the cap cannot be picked after the body
         # is already in memory. A generic label matching no signature is a
         # genuine non-evidence download, refused here having read a few bytes.
-        prefix = resp.read(_SIGNATURE_BYTES)
+        prefix = resp.read(SNIFF_BYTES)
         sniffed = sniff(prefix)
         if sniffed is not None:
             handler = sniffed

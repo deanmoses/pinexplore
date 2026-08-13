@@ -3353,6 +3353,7 @@ _TYPE_LABELS = {
     "image/jpeg": "image",
     "image/jpg": "image",
     "image/png": "image",
+    "image/webp": "image",
     "text/vtt": "video transcript",
     "text/plain": "plain text",
     "text/markdown": "markdown",
