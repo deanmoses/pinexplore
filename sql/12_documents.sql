@@ -119,7 +119,23 @@ SELECT
   -- The year in that convention is the machine's, not the document's, so it is
   -- consumed as an anchor here and not projected. A document's own date, where
   -- IPDB recorded one, is in `file_name`.
-  nullif(regexp_extract(f.file_basename, '^(.*?)_(?:18|19|20)[0-9]{2}_', 1), '') AS publisher_prefix,
+  --
+  -- The maker is one to three letter-initial words rather than anything at all,
+  -- because plenty of names carry no machine year and the first `_YYYY_` in one
+  -- of those is the document's own date near the end — an unbounded prefix then
+  -- reads the whole title as the publisher. Bounding it answers NULL instead,
+  -- which is the right answer for a name whose maker cannot be read positionally
+  -- ("Williams_WPC_95_Schematic_Manual_July_1_1997.pdf" — a platform document,
+  -- so no machine year exists to anchor on). Recovering those needs a
+  -- manufacturer vocabulary, not a wider pattern.
+  nullif(
+    regexp_extract(
+      f.file_basename,
+      '^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z][A-Za-z0-9]*){0,2})_(?:18|19|20)[0-9]{2}_',
+      1
+    ),
+    ''
+  ) AS publisher_prefix,
 
   -- NULL where the basename is not an identity, rather than a scope of one:
   -- the gallery images excluded above have no answer here, they are not lone
