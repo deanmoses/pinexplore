@@ -206,6 +206,33 @@ The rules that bind an import:
 
 To cite an image, open the blob and read the words off the picture (`--dry-run` previews the import, including its OCR draft, writing nothing). A hand-typed transcription via `--text-file` is what gives an image a text layer; keep the document's line structure.
 
+#### An AI session can be the person with the browser
+
+In the Claude Code mac desktop app, the built-in Browser pane loads ipdb.org pages the fetcher's 403 blocks — so with the **user's explicit go-ahead**, a session can do the whole save-and-import itself instead of asking for hand-saved files. The politeness rule carries over: a handful of named files at the user's direction, never a crawl.
+
+1. **Open the pane on the target origin** (`preview_start {url: <file-url>}`; the first load shows the user an origin-approval card). A `.txt` renders directly, but import the fetched bytes, not the page text.
+2. **Fetch in page context and expose a base64 slicer** (`javascript_tool`) — the fetch is same-origin, so the 403 never fires:
+
+   ```js
+   const b = await (await fetch('<file-url>')).arrayBuffer();
+   window.__buf = new Uint8Array(b);
+   window.__b64 = (s, e) => { const a = window.__buf.slice(s, e); let out = '';
+     for (let i = 0; i < a.length; i += 0x8000) out += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+     return btoa(out); };
+   window.__buf.length  // chunk plan comes from this
+   ```
+
+3. **Pull `window.__b64(start, end)` in ≤3 MB slices.** Each result exceeds the tool-result token cap on purpose: the harness saves it to a `tool-results/…​.txt` file and returns only the path, so megabytes of base64 never enter the session context. Decode each file and append:
+
+   ```python
+   import base64, json, sys
+   data = json.load(open(sys.argv[1]))                       # the tool-results file
+   b64 = json.loads(data[0]["text"].split("\n\n(captured")[0])
+   open(sys.argv[2], "ab").write(base64.b64decode(b64))      # append, chunks in order
+   ```
+
+4. **Verify the bytes before importing** — `file` magic, byte count against `window.__buf.length`, render a PDF's cover — then import it as above.
+
 ## Finding & reading
 
 ### Search scopes
