@@ -49,6 +49,16 @@ web_cache.py quote <url> "<the whole quote>"                # …whole quote as 
 # --- view one PDF page as an image (Claude Code built-in) ---
 Read(<blob path>, pages="27")                               # blob path: quote/outline/section print it (PDFs, images)
 
+# --- document library: metadata over the whole corpus ---
+web_docs.py show <doc>                                      # a document with its URLs, classes, subjects, hunts (<doc> = id or URL)
+web_docs.py register <url> --title "..." --role catalog     # register a document we know exists but haven't fetched
+web_docs.py set <doc> --title/--publisher/--citation-ref    # correct a registration ('' clears a field)
+web_docs.py classify <doc> operations_manual                # record a class judgment (--remove withdraws; --source manual|ai)
+web_docs.py subject <doc> --scope model --pk 42 --label "Yukon Yeti"  # attach a subject
+web_docs.py hunt <doc> https://archive.org --note "searched, nothing"  # dated "looked, not there"
+web_docs.py merge <survivor> <loser>                        # fold duplicate documents into one
+web_docs.py classes                                         # per-class document counts
+
 # --- last resort ---
 web_cache.py get <url>                                      # full document; text on stdout, row fields + blob on stderr
 ```
@@ -221,7 +231,7 @@ A **match count is matched phrases plus matched loose words**: `'"camel toes" ba
 
 Match windows are **stored lines verbatim and unmarked**, so any part of one can be lifted into a cite's `quote` — unlike the global snippet, which elides with `…` and brackets its matches. `--surrounding-words` sizes a window in words rather than lines (a PDF sheet's lines are short and irregular, so ±3 lines means something different on every document) but whole lines still come out, keeping table rows intact. N is a cap on lines either side too, which only ever bites on blank runs: a blank line holds no words, so without it two matches a page apart would merge into one window of mostly whitespace. A window's padding never leaves the section it is filed under, so a window that sits inside one carries its locator. The exception is a match that itself runs past the section's end: that comes back whole and labelled `section boundary` rather than truncated, since a span missing the words it was found for would be worse than one without a locator. Overlapping windows merge and say how many matches they absorbed. `--limit` caps how many are shown and reports what it withheld.
 
-**Search reads two tiers.** `text` is the document's own words; `ocr` is machine-read sheet ink from [the OCR pass](#pdfs), read by rendering the sheet. Every scope keeps the tiers apart: a document row carries each tier's own counts (`95 in 35 sections (text) · 12 in 4 (ocr)` — the asymmetry says whether OCR found anything the text layer missed), section lists and match windows interleave both in sheet order with each row labelled, and a `snippet (ocr)` label means the snippet is machine-read. The tier says where the words came from, not which is more accurate: on a manual whose text layer is mojibake, the `ocr` tier is the only readable one. When any un-OCR'd PDFs remain, `search` says so on stderr rather than implying completeness.
+**Search reads three tiers.** `text` is the document's own words; `ocr` is machine-read sheet ink from [the OCR pass](#pdfs), read by rendering the sheet; `metadata` is the [document library](#document-library)'s index of titles, IPDB names, subjects and classes, covering documents the cache has never fetched. Held documents lead the output; a capped "not acquired" block follows with each document's title, classes, subjects and the URL(s) to go get it. A held hit whose term lives only in its metadata (a scan whose subject never appears in its text) prints as `held, matched on metadata only`. Every scope keeps the tiers apart: a document row carries each tier's own counts (`95 in 35 sections (text) · 12 in 4 (ocr)` — the asymmetry says whether OCR found anything the text layer missed), section lists and match windows interleave both in sheet order with each row labelled, and a `snippet (ocr)` label means the snippet is machine-read. The tier says where the words came from, not which is more accurate: on a manual whose text layer is mojibake, the `ocr` tier is the only readable one. When any un-OCR'd PDFs remain, `search` says so on stderr rather than implying completeness.
 
 Two documents can both match with no text match at all, since the index covers url and title as well: `url/title match, no text layer` is a document whose bytes are cached but unreadable — a scanned PDF the OCR pass hasn't reached — while `url/title match, 0 text matches` is an ordinary document that simply doesn't say the word.
 
@@ -396,18 +406,32 @@ A YouTube URL routes automatically to the caption-track transport: yt-dlp pulls 
 
 A video with **no captions at all** (common for livestream archives) logs a loud warning and stores no document — there is no transcript to quote. Check the video's description for the written source it usually links, and cite that instead.
 
+## Document library
+
+The cache's structured index of the documents themselves — the _works_, distinct from the captures. Design and history: [ManufacturerDocs.md](plans/ManufacturerDocs.md).
+
+Three grains: a **document** is the work (title, publisher, classes, subjects, kind-specific identity like a patent number); a **document URL** is an address the work lives at, fetched or not, with a role (`reference` = its own canonical address, `catalog` = a third-party index holding a copy such as IPDB, `archive` = a preserved snapshot); a **capture** is the existing `pages` row. Every page belongs to exactly one document, and a document can exist with no capture at all — the un-acquired trove, findable by metadata before a byte is fetched.
+
+- **Classification is a guess with provenance, never a verdict.** Each class judgment records who made it (`ipdb_pattern` from the seed, `manual`, `ai`), and the vocabulary FK makes a misspelled class fail loudly.
+- **Subjects attach at the most granular true level** — `model` or `corporate_entity` rows, several per document where the work covers several models. A subject carries a resolved Flipcommons PK plus a searchable `label` snapshot, and/or its IPDB provenance ids.
+- **One URL, one document.** Merging duplicates (`web_docs.py merge`) is a deliberate act that moves URLs to the survivor and reports any metadata it declined to overwrite.
+- **Negative results are their own records.** A URL that _is_ the document's but couldn't be reached (IPDB's 403) is a document URL plus its failed fetches; "we looked and it isn't there" is a `hunt` — dated, and shown in search output.
+
+`web_seed_ipdb.py` seeds the trove from pinexplore's classified IPDB dump and `web_enrich_flipcommons.py` resolves subject PKs and labels against the Flipcommons dev DB by IPDB id and fills each document's `citation_ref` (e.g. `williams:some-manual-slug`) by URL join; both are idempotent, re-run to widen the subset or pick up new resolutions. Fetching a new document can annotate it in the same run: `web_fetch.py <url> --doc-class manual --subject-scope model --subject-pk 42 --subject-label "Yukon Yeti"` — thin sugar over the same library `web_docs.py` uses.
+
 ## Using from Python
 
 Every capability is also a function in `web_cache.py`.
 
 | CLI                      | Python                                                                                            |
 | ------------------------ | ------------------------------------------------------------------------------------------------- |
-| `search "<term>"`        | `search()`                                                                                        |
+| `search "<term>"`        | `search()` — held pages, decorated with `document_id`/`classes`/`subjects`                        |
+| (part of `search`)       | `search_documents()` — the metadata tier, acquired and not, partitioned by `captured`             |
 | `search --url`           | `search_sections()`                                                                               |
 | `search --url --section` | `search_matches()`                                                                                |
 | `quote`                  | `quote()` — plain spans; `quote_hits()` adds each hit's `heading` and `pdf_document_page_numbers` |
 
-The rest have the same name in both.
+The rest have the same name in both, and the document library's writes (`ensure_document_for_url`, `add_document_class`, `attach_document_subject`, `merge_documents`, …) are the same functions `web_docs.py` fronts.
 
 The CLI prints; functions return structured data. The OCR tier rides that data rather than living only in the CLI: a `SearchHit` carries each tier's own counts (`matches`/`sections` and `ocr_matches`/`ocr_sections`) plus `snippet_tier`; `SectionHit`, `MatchHit` and `OutlineEntry` each carry a scalar `tier`; and `section()` returns `{text, tier}` blocks, so a caller always knows whether it is holding citable text or machine-read ink.
 
@@ -417,13 +441,15 @@ The **SQLite database is the system-of-record**; `make explore` materializes it 
 
 ```text
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
-  cache.sqlite                 system-of-record: pages + fetches + pages_fts (FTS5)
+  cache.sqlite                 system-of-record: captures, fetch log, document
+                               library, FTS indexes (tables described below)
   raw/<sha256(raw)>.<ext>      raw document blobs, content-addressed
                                (kept for re-extraction and for rendering)
 
 scripts/web_scrape/
-  web_cache.py               store: schema, URL normalization, upsert, and
-                             the reads (see Using from Python)
+  web_cache.py               store: schema, URL normalization, upsert, the
+                             reads (see Using from Python), and the document
+                             library's registration functions
   web_http.py                transport: GET, content-type gate, wire-safe URLs
   web_video.py               transport: YouTube caption tracks via yt-dlp
   content_types/             one handler per document type (the registry)
@@ -434,12 +460,16 @@ scripts/web_scrape/
   web_render.py              headless-render fallback for JS-only pages
   web_fetch.py               CLI + per-URL orchestration (writes sqlite + raw/)
   web_import.py              CLI: file a hand-obtained file as evidence
+  web_docs.py                CLI: document metadata (show/register/set/classify/
+                             subject/hunt/merge/classes/reindex)
+  web_seed_ipdb.py           idempotent seed: the classified IPDB trove
+  web_enrich_flipcommons.py  re-runnable: subject PKs, labels, citation refs
 
 sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
 ```
 
-Two tables plus two FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)). The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. Blobs are content-addressed, so every distinct version of a document stays on disk.
+Two capture tables plus three FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)). The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank; the [document library](#document-library)'s metadata index (`docs_fts`) is a third bm25 space for the same reason. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. The [document library](#document-library)'s own tables (`documents`, `document_urls`, `document_ipdb_listings`, `document_classes`, `document_subjects`, `document_hunts`, the class vocabulary) live beside them in the same file. Blobs are content-addressed, so every distinct version of a document stays on disk.
 
 ### Sync
 

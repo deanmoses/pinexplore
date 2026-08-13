@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import sqlite3
 import ssl
 import sys
 import time
@@ -42,10 +43,7 @@ import urllib.error
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
-
-if TYPE_CHECKING:
-    import sqlite3
+from typing import NamedTuple
 
 # Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -594,6 +592,50 @@ def _read_tsv(path: str) -> list[FetchRequest]:
     return requests
 
 
+def _apply_document_metadata(
+    con: sqlite3.Connection, raw_url: str, args: argparse.Namespace
+) -> None:
+    """Apply the --doc-class / --subject flags to the URL's document.
+
+    Sugar over the shared registration library — never a second metadata
+    path. Applies whether the URL was fetched this run or freshness-skipped
+    (the metadata is about the work, not the fetch); a URL that failed to
+    cache at all is reported and skipped. Refusals (an unknown class, a
+    constraint) are per-URL warnings so one bad flag doesn't kill a batch.
+    """
+    if not (args.doc_class or args.subject_pk is not None):
+        return
+    rec = web_cache.get(raw_url, con) or web_cache.get_by_raw_url(raw_url, con)
+    if rec is None:
+        print(f"  no cached row to annotate: {raw_url}", file=sys.stderr)
+        return
+    doc_id = web_cache.resolve_document(con, rec["url"])
+    if doc_id is None:  # pragma: no cover — upsert_page registers; belt only
+        print(f"  no document for: {rec['url']}", file=sys.stderr)
+        return
+    for document_class in args.doc_class:
+        try:
+            web_cache.add_document_class(con, doc_id, document_class, source="manual")
+        except sqlite3.IntegrityError:
+            print(
+                f"  refused class {document_class!r} (not in the vocabulary); "
+                "see web_docs.py classes",
+                file=sys.stderr,
+            )
+    if args.subject_pk is not None:
+        try:
+            web_cache.attach_document_subject(
+                con,
+                doc_id,
+                args.subject_scope,
+                flipcommons_pk=args.subject_pk,
+                label=args.subject_label,
+            )
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            print(f"  refused subject: {exc}", file=sys.stderr)
+    con.commit()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Polite fetcher for the web evidence cache."
@@ -639,7 +681,43 @@ def main() -> int:
             f"and a render is tried (default: {THIN_TEXT_CHARS})."
         ),
     )
+    doc_group = parser.add_argument_group(
+        "document metadata",
+        "Thin sugar over web_docs.py, applied to every URL this run touches "
+        "(fetched or already cached): the same registration library, called "
+        "on the row just written. Classification is a guess with provenance; "
+        "the class must exist in the vocabulary.",
+    )
+    doc_group.add_argument(
+        "--doc-class",
+        action="append",
+        default=[],
+        metavar="CLASS",
+        help="record a class judgment (repeatable; source=manual)",
+    )
+    doc_group.add_argument(
+        "--subject-pk",
+        type=int,
+        help="attach a subject by Flipcommons PK (needs --subject-label)",
+    )
+    doc_group.add_argument(
+        "--subject-label", help="the subject's searchable name snapshot"
+    )
+    doc_group.add_argument(
+        "--subject-scope",
+        choices=["model", "corporate_entity"],
+        default="model",
+        help="which kind of record the subject is (default %(default)s)",
+    )
     args = parser.parse_args()
+    if args.subject_label and args.subject_pk is None:
+        parser.error(
+            "--subject-label needs --subject-pk (a label alone is not an identity)"
+        )
+    if args.subject_pk is not None and not args.subject_label:
+        parser.error(
+            "--subject-pk needs --subject-label (a PK-only subject is unsearchable)"
+        )
 
     # One browser per run, threaded into fetch_one (a batch pays startup once, and
     # lazily — see LazyBrowser). None disables the fallback entirely.
@@ -672,6 +750,7 @@ def main() -> int:
                 # itself mid-batch, so stop with the actionable message.
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 1
+            _apply_document_metadata(con, raw_url, args)
     finally:
         con.close()
         if browser is not None:

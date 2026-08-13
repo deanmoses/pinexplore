@@ -10,7 +10,11 @@ Stdlib only (sqlite3, hashlib, urllib.parse, re). The SQLite ``fts5`` extension
 ships with the standard CPython build.
 
 Layout (all under ingest_sources/web/, R2-backed and gitignored):
-    cache.sqlite        pages + fetches + pages_fts (FTS5)
+    cache.sqlite        pages + fetches + pages_fts/ocr_fts (FTS5), plus the
+                        document-library tables (documents, document_urls,
+                        document_ipdb_listings, document_classes,
+                        document_subjects, document_hunts, the class
+                        vocabulary) — see docs/plans/ManufacturerDocs.md
     raw/<sha>.<ext>     raw page blobs, content-addressed (sha = sha256(raw
                         bytes)) so every distinct version of a page is preserved.
                         The extension is derived from a row's content_type, not
@@ -146,6 +150,32 @@ class SearchHit(TypedDict):
     # ``_match_label`` for why the two must not print alike.
     has_text: bool
     has_ocr: bool
+    # Document-library decoration: which work this capture belongs to, and
+    # its judged classes / subject names. None/empty on a cache whose
+    # document tables haven't been created yet.
+    document_id: int | None
+    classes: list[str]
+    subjects: list[str]
+
+
+class DocumentHit(TypedDict):
+    """One document in the metadata tier — ``search_documents()``'s unit.
+
+    Covers acquired and un-acquired documents alike; ``captured`` is the
+    display partition. An un-acquired hit is the trove's whole point: the
+    document is findable by title/subject/class before a byte is fetched,
+    and ``urls`` says where to go get it.
+    """
+
+    document_id: int
+    title: str | None
+    display_title: str  # synthesized at read time: subject + title
+    captured: bool  # any of its URLs has a pages row
+    classes: list[str]
+    subjects: list[str]
+    urls: list[dict]  # {url, role, blocked} — blocked: "@date (HTTP n)" or None
+    hunts: list[str]  # dated "not at …" records
+    snippet: str | None
 
 
 # Query params that are tracking noise, never content-bearing. Stripped on
@@ -160,6 +190,8 @@ _TRACKING_PARAMS = re.compile(
 )
 
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+_HTTP_OK = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -277,6 +309,11 @@ def connect(read_only: bool = False) -> sqlite3.Connection:
         # where DuckDB's READ_ONLY ATTACH can't see them. Setting DELETE on a file
         # previously in WAL checkpoints and converts it back.
         con.execute("PRAGMA journal_mode=DELETE")
+    # SQLite ignores every REFERENCES clause unless each connection opts in.
+    # The document tables rely on enforcement (a class row must name a
+    # vocabulary entry, a URL row a real document), so this is load-bearing,
+    # not hygiene.
+    con.execute("PRAGMA foreign_keys=ON")
     con.row_factory = sqlite3.Row
     return con
 
@@ -369,6 +406,171 @@ CREATE TRIGGER IF NOT EXISTS ocr_au AFTER UPDATE ON pages BEGIN
   INSERT INTO ocr_fts(rowid, ocr_text)
   SELECT new.rowid, new.ocr_text WHERE new.ocr_text IS NOT NULL;
 END;
+
+-- ------------------------------------------------------------------------- --
+-- Document library: the work-grain index over the corpus (design:
+-- docs/plans/ManufacturerDocs.md). Every pages row belongs to a document
+-- (enforced in upsert_page and self-healed by init_schema's backfill); a
+-- document can also exist with no capture at all — the un-acquired trove,
+-- known by metadata before a byte is fetched. There is no source-kind
+-- column anywhere: kind derives from classes, and citation routing is the
+-- class-based prose rule in the design doc.
+
+CREATE TABLE IF NOT EXISTS documents (
+  id            INTEGER PRIMARY KEY,
+  title         TEXT,               -- the work's own title where known; display titles
+                                    -- are synthesized at read time, never stored
+  publisher     TEXT,
+  -- merge hints, measured at seed time across shared IPDB basenames.
+  -- ipdb_machines_referencing counts IPDB's own listings; the catalog_*
+  -- pair counts the catalog titles/systems those listings resolve to.
+  ipdb_machines_referencing   INTEGER,
+  catalog_titles_referencing  INTEGER,
+  catalog_systems_referencing INTEGER,
+  -- kind-specific identity (merge keys), NULL off-kind
+  patent_jurisdiction TEXT,
+  patent_number       TEXT,         -- the D prefix is part of the number
+  article_publication TEXT,
+  article_issue_date  TEXT,
+  article_pages       TEXT,
+  -- the Flipcommons citation source as its cite ref — a ref, not a PK:
+  -- catalog slugs change (so subjects hold PKs), citation slugs are frozen
+  -- by flipcommons doctrine. NULL until enrichment resolves it by URL join.
+  citation_ref  TEXT,
+  created_at    TEXT NOT NULL,      -- distinguishes seed-era rows from later registrations
+  updated_at    TEXT NOT NULL
+);
+
+-- The class vocabulary, as data (seeded from pinexplore's 01_reference.sql;
+-- the detection patterns stay there — they read IPDB naming habits and run
+-- only at seed). Parent edges are one row per edge so a class may later
+-- carry two parents without a schema change.
+CREATE TABLE IF NOT EXISTS document_class_vocab (
+  document_class  TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS document_class_parents (
+  document_class  TEXT NOT NULL REFERENCES document_class_vocab(document_class),
+  parent_class    TEXT NOT NULL REFERENCES document_class_vocab(document_class),
+  PRIMARY KEY (document_class, parent_class)
+);
+
+-- The original IPDB dump listings, verbatim, at the dump's own grain: one
+-- row per (machine, file, category) listing. A URL can be listed under
+-- several machines and several categories, so these facts cannot live as
+-- scalars on documents. This table is the "retain all IPDB data"
+-- requirement: reclassification and re-attachment never need a re-ingest.
+CREATE TABLE IF NOT EXISTS document_ipdb_listings (
+  document_id          INTEGER NOT NULL REFERENCES documents(id),
+  ipdb_id              INTEGER NOT NULL,  -- the machine page the file was listed under
+  file_url             TEXT NOT NULL,     -- the seed-grain identity
+  ipdb_category        TEXT NOT NULL,
+  ipdb_name            TEXT,              -- display name; holds date/language/revision text
+  container            TEXT,
+  machine_name         TEXT,
+  machine_manufacturer TEXT,
+  ipdb_manufacturer_id INTEGER,           -- joins Flipcommons' CorporateEntity.ipdb_manufacturer_id
+  machine_mpu          TEXT,
+  PRIMARY KEY (ipdb_id, file_url, ipdb_category)
+);
+CREATE INDEX IF NOT EXISTS document_ipdb_listings_by_document
+  ON document_ipdb_listings(document_id);
+
+-- A document holds several classes legitimately (a Schematic Manual is
+-- both). Each row is a judgment with provenance — a guess, never a verdict.
+CREATE TABLE IF NOT EXISTS document_classes (
+  document_id     INTEGER NOT NULL REFERENCES documents(id),
+  document_class  TEXT NOT NULL REFERENCES document_class_vocab(document_class),
+  source          TEXT NOT NULL,      -- ipdb_pattern | manual | ai
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (document_id, document_class)
+);
+
+-- One row per address the work lives at, fetched or not. url is the primary
+-- key: a capture belongs to exactly one document, which keeps "acquired"
+-- well-defined; a merge moves URLs to the surviving document. Roles are
+-- DocumentCitations' link-type vocabulary: reference = the document's own
+-- canonical address, catalog = a third-party index holding a copy (IPDB),
+-- archive = a preserved snapshot. No sheet_order: the parts structure is
+-- designed with the deferred sheet-assembly work that consumes it.
+CREATE TABLE IF NOT EXISTS document_urls (
+  -- NOT NULL is not implied: in a rowid table only INTEGER PRIMARY KEY
+  -- implies it, and one NULL here would turn the backfill's membership test
+  -- three-valued.
+  url          TEXT PRIMARY KEY NOT NULL,  -- normalized; joins pages.url when captured
+  document_id  INTEGER NOT NULL REFERENCES documents(id),
+  role         TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS document_urls_by_document
+  ON document_urls(document_id);
+
+-- Dated negative results: a hunt tried somewhere and concluded the document
+-- is NOT there. Separate from document_urls, which asserts the work DOES
+-- live at its URL — and whose primary key would let a wrong guess
+-- permanently own an address. A known address that can't be reached (403,
+-- auth) is a document_urls row plus its failed fetches, not a hunt.
+CREATE TABLE IF NOT EXISTS document_hunts (
+  document_id  INTEGER NOT NULL REFERENCES documents(id),
+  tried        TEXT NOT NULL,   -- the URL or site searched
+  note         TEXT,
+  created_at   TEXT NOT NULL
+);
+
+-- One row per subject; a document about several models carries several
+-- rows. A row stands alone with only a flipcommons_pk (Flipcommons holds
+-- models IPDB doesn't); the ipdb_* columns are optional provenance. Scope
+-- is corporate_entity rather than "manufacturer" because IPDB's
+-- ManufacturerId is corporate-entity-grained and the Manufacturer rollup is
+-- one derivable FK hop away in Flipcommons.
+CREATE TABLE IF NOT EXISTS document_subjects (
+  document_id           INTEGER NOT NULL REFERENCES documents(id),
+  scope                 TEXT NOT NULL CHECK (scope IN ('model', 'corporate_entity')),
+  flipcommons_pk        INTEGER,  -- machinemodel PK on model scope, corporateentity PK
+                                  -- on corporate_entity scope; re-derivable via ipdb ids
+  label                 TEXT,     -- local searchable name snapshot; a PK-only subject has
+                                  -- no IPDB name and search never opens Flipcommons
+  ipdb_machine_id       INTEGER CHECK (ipdb_machine_id IS NULL OR scope = 'model'),
+  ipdb_manufacturer_id  INTEGER CHECK (ipdb_manufacturer_id IS NULL OR scope = 'corporate_entity'),
+  ipdb_machine_name     TEXT,
+  ipdb_manufacturer     TEXT,
+  created_at            TEXT NOT NULL,
+  CHECK (flipcommons_pk IS NOT NULL OR ipdb_machine_id IS NOT NULL
+         OR ipdb_manufacturer_id IS NOT NULL),
+  -- A PK-only subject's label is its ONLY searchable name (metadata FTS
+  -- indexes labels and IPDB names; search never opens Flipcommons), so when
+  -- no IPDB identity supplies a name, the label is mandatory and must carry
+  -- at least one non-whitespace character — "   " tokenizes to nothing.
+  CHECK (ipdb_machine_id IS NOT NULL OR ipdb_manufacturer_id IS NOT NULL
+         OR (label IS NOT NULL AND trim(label) <> ''))
+);
+-- Partial unique indexes make the re-runnable attachment/enrichment scripts
+-- idempotent: they guard the insert paths, while enrichment UPDATEs in place.
+CREATE UNIQUE INDEX IF NOT EXISTS document_subjects_by_pk
+  ON document_subjects(document_id, scope, flipcommons_pk)
+  WHERE flipcommons_pk IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS document_subjects_by_ipdb_machine
+  ON document_subjects(document_id, scope, ipdb_machine_id)
+  WHERE ipdb_machine_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS document_subjects_by_ipdb_manufacturer
+  ON document_subjects(document_id, scope, ipdb_manufacturer_id)
+  WHERE ipdb_manufacturer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS document_subjects_by_document
+  ON document_subjects(document_id);
+
+-- The metadata tier's own index — a third bm25 space beside pages_fts and
+-- ocr_fts, for the same reason those two are separate: metadata-only rows
+-- (the un-acquired trove) would swamp or be swamped inside the text index.
+-- It covers EVERY document, acquired or not: acquisition state is a display
+-- partition, not an index boundary. A regular FTS5 table, not
+-- external-content: its text derives from four tables, so there is no one
+-- content table to mirror — the registration library rebuilds a document's
+-- row on every metadata mutation (via _touch_document), and init_schema
+-- heals any count drift with a full rebuild. The default unicode61
+-- tokenizer splits class names on '_', so `operations_manual` answers a
+-- search for "manual".
+CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
+  title, names, subjects, classes, urls, document_id UNINDEXED
+);
 """
 
 
@@ -481,12 +683,538 @@ def init_schema(con: sqlite3.Connection) -> None:
             "UPDATE pages SET ocr_text = text, text = NULL, text_source = NULL "
             "WHERE text_source = 'ocr'"
         )
+    _backfill_documents(con)
+    # Heal metadata-FTS drift: a cache whose documents predate docs_fts (or
+    # whose index was damaged) reindexes whole. Count equality is the cheap
+    # proxy — every indexed document has exactly one row.
+    docs = con.execute("SELECT count(*) FROM documents").fetchone()[0]
+    indexed = con.execute("SELECT count(*) FROM docs_fts").fetchone()[0]
+    if docs != indexed:
+        rebuild_documents_fts(con)
     con.commit()
 
 
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
+
+
+def ensure_document_for_url(
+    con: sqlite3.Connection,
+    url: NormalizedUrl,
+    *,
+    title: str | None = None,
+    role: str | None = "reference",
+) -> int:
+    """Return the id of the document owning ``url``, minting one if none does.
+
+    One URL, one document: ``document_urls.url`` is the primary key, so a URL
+    can never mark two documents acquired. A second registrar — the trove
+    seed, a refetch — therefore attaches to whatever document already owns
+    the URL, and the supplied ``title``/``role`` apply only when the URL is
+    new. Does not commit; runs inside the caller's transaction so a page
+    write and its registration land or fail together.
+    """
+    row = con.execute(
+        "SELECT document_id FROM document_urls WHERE url = ?", (url,)
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    now = now_iso()
+    cur = con.execute(
+        "INSERT INTO documents (title, created_at, updated_at) VALUES (?, ?, ?)",
+        (title, now, now),
+    )
+    doc_id = cur.lastrowid
+    assert doc_id is not None  # INTEGER PRIMARY KEY always yields a rowid
+    con.execute(
+        "INSERT INTO document_urls (url, document_id, role, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (url, doc_id, role, now),
+    )
+    _refresh_document_fts(con, doc_id)
+    return doc_id
+
+
+def _backfill_documents(con: sqlite3.Connection) -> int:
+    """Mint a document for every ``pages`` row no document owns yet.
+
+    Runs on every writable open (from ``init_schema``), so the
+    every-page-has-a-document invariant self-heals for rows written by code
+    that predates the document tables — or by a writer that crashed between
+    its page write and its registration. Role ``reference``: at backfill time
+    the document *is* the page at that URL, so the URL is definitionally its
+    canonical address (re-judged only when someone declares the capture to be
+    another publisher's work). Returns how many documents it minted.
+    """
+    # NOT EXISTS, not NOT IN: a NULL in the subquery would make NOT IN
+    # three-valued and silently adopt nothing — the failure mode a self-heal
+    # must be robust against, even though document_urls.url is NOT NULL.
+    rows = con.execute(
+        "SELECT p.url, p.title FROM pages AS p WHERE NOT EXISTS "
+        "(SELECT 1 FROM document_urls AS u WHERE u.url = p.url)"
+    ).fetchall()
+    for row in rows:
+        ensure_document_for_url(con, row["url"], title=row["title"])
+    return len(rows)
+
+
+# --------------------------------------------------------------------------- #
+# Document metadata writes (the registration library — web_docs.py's engine)
+#
+# None of these commit: a CLI command or script commits once at the end, so a
+# multi-statement operation (a merge, a seed batch) lands or fails whole.
+# Anything that changes what the metadata FTS will derive from bumps the
+# document's updated_at through _touch_document.
+# --------------------------------------------------------------------------- #
+
+# Sentinel distinguishing "leave this field alone" from an explicit None.
+_UNSET: object = object()
+
+
+def resolve_document(con: sqlite3.Connection, ref: str) -> int | None:
+    """Document id for a CLI-style reference: a numeric id, or any URL it owns.
+
+    URLs are normalized on the way in, like every other lookup here. Returns
+    None when nothing matches — the caller decides how loudly to say so.
+    """
+    if ref.isdigit():
+        row = con.execute(
+            "SELECT id FROM documents WHERE id = ?", (int(ref),)
+        ).fetchone()
+        return int(row[0]) if row else None
+    row = con.execute(
+        "SELECT document_id FROM document_urls WHERE url = ?", (normalize_url(ref),)
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def _refresh_document_fts(con: sqlite3.Connection, document_id: int) -> None:
+    """Rebuild one document's metadata-FTS row from its current tables.
+
+    The library is the index's maintainer — every metadata mutation funnels
+    through ``_touch_document`` (or the insert paths), so triggers over four
+    tables are machinery this can do without. A document that no longer
+    exists simply has its row deleted.
+    """
+    con.execute("DELETE FROM docs_fts WHERE document_id = ?", (document_id,))
+    doc = con.execute(
+        "SELECT title FROM documents WHERE id = ?", (document_id,)
+    ).fetchone()
+    if doc is None:
+        return
+
+    def _texts(sql: str) -> str:
+        parts: list[str] = []
+        for row in con.execute(sql, (document_id,)):
+            parts.extend(str(v) for v in row if v is not None and str(v) not in parts)
+        return " ".join(parts)
+
+    con.execute(
+        "INSERT INTO docs_fts (title, names, subjects, classes, urls, document_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            doc["title"] or "",
+            _texts(
+                "SELECT ipdb_name, machine_name, machine_manufacturer "
+                "FROM document_ipdb_listings WHERE document_id = ?"
+            ),
+            _texts(
+                "SELECT label, ipdb_machine_name, ipdb_manufacturer "
+                "FROM document_subjects WHERE document_id = ?"
+            ),
+            _texts("SELECT document_class FROM document_classes WHERE document_id = ?"),
+            _texts("SELECT url FROM document_urls WHERE document_id = ?"),
+            document_id,
+        ),
+    )
+
+
+def rebuild_documents_fts(con: sqlite3.Connection) -> int:
+    """Full metadata-FTS rebuild — the repair command; returns rows indexed."""
+    con.execute("DELETE FROM docs_fts")
+    ids = [r[0] for r in con.execute("SELECT id FROM documents").fetchall()]
+    for document_id in ids:
+        _refresh_document_fts(con, document_id)
+    return len(ids)
+
+
+def _touch_document(con: sqlite3.Connection, document_id: int) -> None:
+    con.execute(
+        "UPDATE documents SET updated_at = ? WHERE id = ?", (now_iso(), document_id)
+    )
+    _refresh_document_fts(con, document_id)
+
+
+def set_document_fields(
+    con: sqlite3.Connection,
+    document_id: int,
+    *,
+    title: object = _UNSET,
+    publisher: object = _UNSET,
+    citation_ref: object = _UNSET,
+) -> None:
+    """Update a document's authored fields; unset arguments stay untouched.
+
+    The sentinel keeps "don't change" apart from an explicit None, so a field
+    can be deliberately cleared. Static SQL with per-field guards, not an
+    assembled SET list — there is nothing dynamic worth an injection surface.
+    """
+    if title is _UNSET and publisher is _UNSET and citation_ref is _UNSET:
+        return
+    con.execute(
+        "UPDATE documents SET "
+        "  title        = CASE WHEN ? THEN ? ELSE title END, "
+        "  publisher    = CASE WHEN ? THEN ? ELSE publisher END, "
+        "  citation_ref = CASE WHEN ? THEN ? ELSE citation_ref END "
+        "WHERE id = ?",
+        (
+            int(title is not _UNSET),
+            None if title is _UNSET else title,
+            int(publisher is not _UNSET),
+            None if publisher is _UNSET else publisher,
+            int(citation_ref is not _UNSET),
+            None if citation_ref is _UNSET else citation_ref,
+            document_id,
+        ),
+    )
+    _touch_document(con, document_id)
+
+
+def add_document_class(
+    con: sqlite3.Connection, document_id: int, document_class: str, source: str
+) -> bool:
+    """Record a class judgment; returns False when it was already recorded.
+
+    The vocabulary FK rejects a class the vocabulary doesn't hold — a
+    misspelling fails loudly instead of minting a phantom class. An existing
+    judgment is left as-is, keeping its original source and date.
+    """
+    cur = con.execute(
+        "INSERT OR IGNORE INTO document_classes "
+        "(document_id, document_class, source, created_at) VALUES (?, ?, ?, ?)",
+        (document_id, document_class, source, now_iso()),
+    )
+    if cur.rowcount:
+        _touch_document(con, document_id)
+    return bool(cur.rowcount)
+
+
+def remove_document_class(
+    con: sqlite3.Connection, document_id: int, document_class: str
+) -> bool:
+    """Withdraw a class judgment; returns False when there was none."""
+    cur = con.execute(
+        "DELETE FROM document_classes WHERE document_id = ? AND document_class = ?",
+        (document_id, document_class),
+    )
+    if cur.rowcount:
+        _touch_document(con, document_id)
+    return bool(cur.rowcount)
+
+
+def attach_document_subject(
+    con: sqlite3.Connection,
+    document_id: int,
+    scope: str,
+    *,
+    flipcommons_pk: int | None = None,
+    label: str | None = None,
+    ipdb_machine_id: int | None = None,
+    ipdb_manufacturer_id: int | None = None,
+    ipdb_machine_name: str | None = None,
+    ipdb_manufacturer: str | None = None,
+) -> bool:
+    """Attach a subject, unifying every row that shares one of its identities.
+
+    A subject has two identity paths — the Flipcommons PK and the
+    scope-matching IPDB id — and an attachment naming both may find them on
+    *different* rows (a PK-only attachment and an IPDB-seeded row that were
+    never linked before). All matching rows are collapsed into one, then the
+    incoming values apply:
+
+    - **IPDB ids are senior**: they fill NULLs only, and a non-NULL value
+      that disagrees — between two matched rows, or between a row and the
+      incoming attachment — raises ValueError, because an incompatible
+      mapping must be resolved by a person, never absorbed.
+    - **The PK is a resolvable pointer**, re-derivable from the IPDB
+      identity, so an incoming PK overwrites: that is what lets enrichment
+      repair PKs after a Flipcommons rebuild. (A differing PK is only ever
+      reachable through an IPDB-id match — a PK-matched row is equal by
+      construction, and a cross-row PK disagreement raises above.)
+    - **``label`` overwrites when supplied** — a refreshable display/search
+      snapshot, not provenance; IPDB names fill NULLs only.
+
+    Returns True when a new row was inserted, False when existing row(s)
+    absorbed the attachment. The scope CHECKs and the PK-only-needs-a-label
+    rule surface as IntegrityError.
+    """
+    rows = con.execute(
+        "SELECT rowid, * FROM document_subjects "
+        "WHERE document_id = ? AND scope = ? AND ("
+        "  flipcommons_pk = ? OR ipdb_machine_id = ? OR ipdb_manufacturer_id = ?)",
+        (document_id, scope, flipcommons_pk, ipdb_machine_id, ipdb_manufacturer_id),
+    ).fetchall()
+    if rows:
+        rows = sorted(rows, key=lambda r: r["rowid"])
+        merged = dict(rows[0])
+        original = dict(merged)
+        fold_cols = (
+            "flipcommons_pk",
+            "ipdb_machine_id",
+            "ipdb_manufacturer_id",
+            "label",
+            "ipdb_machine_name",
+            "ipdb_manufacturer",
+        )
+        for other in rows[1:]:
+            for col in ("flipcommons_pk", "ipdb_machine_id", "ipdb_manufacturer_id"):
+                if (
+                    merged[col] is not None
+                    and other[col] is not None
+                    and merged[col] != other[col]
+                ):
+                    raise ValueError(
+                        f"document {document_id}: conflicting {scope} subject "
+                        f"identities ({col} {merged[col]} vs {other[col]}) — "
+                        "resolve by hand before attaching"
+                    )
+            for col in fold_cols:
+                if merged[col] is None:
+                    merged[col] = other[col]
+            con.execute(
+                "DELETE FROM document_subjects WHERE rowid = ?", (other["rowid"],)
+            )
+        for col, val in (
+            ("ipdb_machine_id", ipdb_machine_id),
+            ("ipdb_manufacturer_id", ipdb_manufacturer_id),
+        ):
+            if val is not None:
+                if merged[col] is not None and merged[col] != val:
+                    raise ValueError(
+                        f"document {document_id}: {scope} subject already maps "
+                        f"to {col} {merged[col]}, refusing {val} — resolve by "
+                        "hand before attaching"
+                    )
+                merged[col] = val
+        if flipcommons_pk is not None:
+            merged["flipcommons_pk"] = flipcommons_pk
+        if label is not None:
+            merged["label"] = label
+        if ipdb_machine_name is not None and merged["ipdb_machine_name"] is None:
+            merged["ipdb_machine_name"] = ipdb_machine_name
+        if ipdb_manufacturer is not None and merged["ipdb_manufacturer"] is None:
+            merged["ipdb_manufacturer"] = ipdb_manufacturer
+        # An attachment that changed nothing writes nothing: updated_at means
+        # "metadata changed", and a seed rerun must not restamp every
+        # document it re-walks. A collapse always counts as a change (rows
+        # were deleted even if the keeper's fields kept their values).
+        if len(rows) > 1 or merged != original:
+            con.execute(
+                "UPDATE document_subjects SET "
+                "  flipcommons_pk = ?, label = ?, ipdb_machine_id = ?, "
+                "  ipdb_manufacturer_id = ?, ipdb_machine_name = ?, "
+                "  ipdb_manufacturer = ? "
+                "WHERE rowid = ?",
+                (
+                    merged["flipcommons_pk"],
+                    merged["label"],
+                    merged["ipdb_machine_id"],
+                    merged["ipdb_manufacturer_id"],
+                    merged["ipdb_machine_name"],
+                    merged["ipdb_manufacturer"],
+                    merged["rowid"],
+                ),
+            )
+            _touch_document(con, document_id)
+        return False
+    con.execute(
+        "INSERT INTO document_subjects "
+        "(document_id, scope, flipcommons_pk, label, ipdb_machine_id, "
+        " ipdb_manufacturer_id, ipdb_machine_name, ipdb_manufacturer, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            document_id,
+            scope,
+            flipcommons_pk,
+            label,
+            ipdb_machine_id,
+            ipdb_manufacturer_id,
+            ipdb_machine_name,
+            ipdb_manufacturer,
+            now_iso(),
+        ),
+    )
+    _touch_document(con, document_id)
+    return True
+
+
+def record_document_hunt(
+    con: sqlite3.Connection, document_id: int, tried: str, note: str | None = None
+) -> None:
+    """Record a dated negative result: looked at ``tried``, the document isn't there.
+
+    Deliberately not a ``document_urls`` row — that table asserts the work
+    DOES live at an address, and its primary key would let a wrong guess own
+    the address forever. A known address that merely couldn't be reached
+    (403, auth) belongs in ``document_urls`` + its failed ``fetches``.
+    """
+    con.execute(
+        "INSERT INTO document_hunts (document_id, tried, note, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (document_id, tried, note, now_iso()),
+    )
+
+
+# The documents columns merged scalar-wise: the survivor's non-NULL value
+# wins, the loser's fills a NULL, and a conflicting loser value is reported
+# to the caller rather than silently dropped.
+_MERGE_SCALAR_COLS = (
+    "title",
+    "publisher",
+    "ipdb_machines_referencing",
+    "catalog_titles_referencing",
+    "catalog_systems_referencing",
+    "patent_jurisdiction",
+    "patent_number",
+    "article_publication",
+    "article_issue_date",
+    "article_pages",
+    "citation_ref",
+)
+
+
+def merge_documents(
+    con: sqlite3.Connection, survivor_id: int, loser_id: int
+) -> dict[str, object]:
+    """Fold ``loser_id`` into ``survivor_id`` and delete the loser.
+
+    The deliberate act the whole design defers to: URLs, IPDB listings and
+    hunts move wholesale; class judgments union (the survivor's copy wins a
+    tie, keeping its source and date); subjects re-attach through the
+    reconciler so identities dedup instead of colliding. Scalar fields fill
+    the survivor's NULLs only — a loser value that conflicts is returned in
+    the result dict as ``dropped``, because a merge must never silently
+    rewrite the surviving document's metadata. Runs in the caller's
+    transaction; nothing is committed here, so a failure rolls the whole
+    merge back.
+    """
+    if survivor_id == loser_id:
+        raise ValueError("cannot merge a document into itself")
+    docs = {
+        int(r["id"]): r
+        for r in con.execute(
+            "SELECT * FROM documents WHERE id IN (?, ?)", (survivor_id, loser_id)
+        ).fetchall()
+    }
+    if set(docs) != {survivor_id, loser_id}:
+        missing = {survivor_id, loser_id} - set(docs)
+        raise ValueError(f"no such document: {sorted(missing)}")
+
+    dropped: dict[str, object] = {}
+    for col in _MERGE_SCALAR_COLS:
+        s_val, l_val = docs[survivor_id][col], docs[loser_id][col]
+        if l_val is not None and s_val is not None and s_val != l_val:
+            dropped[col] = l_val
+    # coalesce is the fill-only rule in SQL: the survivor's value stands, the
+    # loser's fills a blank. Parameter order mirrors _MERGE_SCALAR_COLS.
+    con.execute(
+        "UPDATE documents SET "
+        "  title                       = coalesce(title, ?), "
+        "  publisher                   = coalesce(publisher, ?), "
+        "  ipdb_machines_referencing   = coalesce(ipdb_machines_referencing, ?), "
+        "  catalog_titles_referencing  = coalesce(catalog_titles_referencing, ?), "
+        "  catalog_systems_referencing = coalesce(catalog_systems_referencing, ?), "
+        "  patent_jurisdiction         = coalesce(patent_jurisdiction, ?), "
+        "  patent_number               = coalesce(patent_number, ?), "
+        "  article_publication         = coalesce(article_publication, ?), "
+        "  article_issue_date          = coalesce(article_issue_date, ?), "
+        "  article_pages               = coalesce(article_pages, ?), "
+        "  citation_ref                = coalesce(citation_ref, ?) "
+        "WHERE id = ?",
+        (*(docs[loser_id][col] for col in _MERGE_SCALAR_COLS), survivor_id),
+    )
+
+    con.execute(
+        "UPDATE document_urls SET document_id = ? WHERE document_id = ?",
+        (survivor_id, loser_id),
+    )
+    con.execute(
+        "UPDATE document_ipdb_listings SET document_id = ? WHERE document_id = ?",
+        (survivor_id, loser_id),
+    )
+    con.execute(
+        "UPDATE document_hunts SET document_id = ? WHERE document_id = ?",
+        (survivor_id, loser_id),
+    )
+    # Classes union; on a shared class the survivor's row (source, date) wins.
+    con.execute(
+        "UPDATE OR IGNORE document_classes SET document_id = ? WHERE document_id = ?",
+        (survivor_id, loser_id),
+    )
+    con.execute("DELETE FROM document_classes WHERE document_id = ?", (loser_id,))
+    for row in con.execute(
+        "SELECT * FROM document_subjects WHERE document_id = ?", (loser_id,)
+    ).fetchall():
+        attach_document_subject(
+            con,
+            survivor_id,
+            row["scope"],
+            flipcommons_pk=row["flipcommons_pk"],
+            label=row["label"],
+            ipdb_machine_id=row["ipdb_machine_id"],
+            ipdb_manufacturer_id=row["ipdb_manufacturer_id"],
+            ipdb_machine_name=row["ipdb_machine_name"],
+            ipdb_manufacturer=row["ipdb_manufacturer"],
+        )
+    con.execute("DELETE FROM document_subjects WHERE document_id = ?", (loser_id,))
+    con.execute("DELETE FROM documents WHERE id = ?", (loser_id,))
+    # The loser's document row is gone, so this deletes its FTS row.
+    _refresh_document_fts(con, loser_id)
+    _touch_document(con, survivor_id)
+    return {"dropped": dropped}
+
+
+def document_record(con: sqlite3.Connection, document_id: int) -> dict | None:
+    """One document with all its children, for display — None if absent."""
+    doc = con.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if doc is None:
+        return None
+    rec = dict(doc)
+    for key, sql in (
+        ("urls", "SELECT * FROM document_urls WHERE document_id = ? ORDER BY url"),
+        (
+            "classes",
+            "SELECT * FROM document_classes WHERE document_id = ? "
+            "ORDER BY document_class",
+        ),
+        (
+            "subjects",
+            "SELECT * FROM document_subjects WHERE document_id = ? "
+            "ORDER BY scope, label, ipdb_machine_name",
+        ),
+        (
+            "ipdb_listings",
+            "SELECT * FROM document_ipdb_listings WHERE document_id = ? "
+            "ORDER BY ipdb_id, ipdb_category",
+        ),
+        (
+            "hunts",
+            "SELECT * FROM document_hunts WHERE document_id = ? ORDER BY created_at",
+        ),
+    ):
+        rec[key] = [dict(r) for r in con.execute(sql, (document_id,)).fetchall()]
+    captured = {
+        r[0]
+        for r in con.execute(
+            "SELECT u.url FROM document_urls AS u "
+            "JOIN pages AS p ON p.url = u.url WHERE u.document_id = ?",
+            (document_id,),
+        ).fetchall()
+    }
+    for u in rec["urls"]:
+        u["captured"] = u["url"] in captured
+    return rec
 
 
 def upsert_page(
@@ -580,6 +1308,48 @@ def upsert_page(
             "imported": None if imported is None else int(imported),
         },
     )
+    # Same transaction as the page write: every writer that reaches pages —
+    # the fetcher, the importer — upholds the page→document invariant without
+    # knowing about it, and a crash can't strand a page documentless (and if
+    # one somehow does, init_schema's backfill self-heals on the next open).
+    #
+    # Redirects must not split a work in two: the row is keyed on the
+    # post-redirect URL, but the *requested* URL may already own a document —
+    # the registered-before-acquired trove case, finally fetched and 301'd.
+    # An unowned final URL therefore attaches to the requested URL's
+    # document (inheriting its role — a catalog URL's redirect target is
+    # still the catalog serving it); when both URLs own *different*
+    # documents, that is a real identity claim nobody has judged, so it is
+    # surfaced for a deliberate `web_docs.py merge`, never merged silently.
+    raw_normalized = normalize_url(raw_url)
+    if raw_normalized != url:
+        raw_owner = con.execute(
+            "SELECT document_id, role FROM document_urls WHERE url = ?",
+            (raw_normalized,),
+        ).fetchone()
+        final_owner = con.execute(
+            "SELECT document_id FROM document_urls WHERE url = ?", (url,)
+        ).fetchone()
+        if raw_owner is not None and final_owner is None:
+            con.execute(
+                "INSERT INTO document_urls (url, document_id, role, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (url, raw_owner["document_id"], raw_owner["role"], now_iso()),
+            )
+            _touch_document(con, raw_owner["document_id"])
+        elif (
+            raw_owner is not None
+            and final_owner is not None
+            and raw_owner["document_id"] != final_owner["document_id"]
+        ):
+            print(
+                f"WARNING: {raw_normalized} (document {raw_owner['document_id']}) "
+                f"redirected to {url} (document {final_owner['document_id']}) — "
+                "if they are one work, fold them: web_docs.py merge "
+                f"{raw_owner['document_id']} {final_owner['document_id']}",
+                file=sys.stderr,
+            )
+    ensure_document_for_url(con, url, title=title)
     con.commit()
 
 
@@ -1987,6 +2757,7 @@ def search(
                     raise
                 if row is not None:
                     tiers[url][tier] = _TierData(None, row["snippet"], row["hl"])
+        decorations = _document_decorations(con, ranked)
     finally:
         if own:
             con.close()
@@ -2024,9 +2795,171 @@ def search(
                 ocr_sections=ocr_sections,
                 has_text=bool((rec["text"] or "").strip()),
                 has_ocr=bool((rec.get("ocr_text") or "").strip()),
+                document_id=decorations.get(url, {}).get("document_id"),
+                classes=decorations.get(url, {}).get("classes", []),
+                subjects=decorations.get(url, {}).get("subjects", []),
             )
         )
     return hits
+
+
+def _missing_document_schema(exc: sqlite3.OperationalError) -> bool:
+    """True when the error is only that the document tables don't exist yet.
+
+    A cache last written by pre-document-library code can still be searched
+    read-only; its hits simply carry no decoration and the metadata tier is
+    empty. Any other operational error propagates.
+    """
+    return "no such table" in str(exc).lower()
+
+
+def _document_decorations(
+    con: sqlite3.Connection, urls: list[NormalizedUrl]
+) -> dict[NormalizedUrl, dict]:
+    """Per-URL document decoration for search hits: id, classes, subjects."""
+    if not urls:
+        return {}
+    marks = ",".join("?" * len(urls))
+    try:
+        owners = con.execute(
+            f"SELECT url, document_id FROM document_urls WHERE url IN ({marks})",  # noqa: S608 — placeholders only
+            urls,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _missing_document_schema(exc):
+            return {}
+        raise
+    if not owners:
+        return {}
+    doc_ids = sorted({int(r["document_id"]) for r in owners})
+    id_marks = ",".join("?" * len(doc_ids))
+    classes: dict[int, list[str]] = {}
+    for row in con.execute(
+        f"SELECT document_id, document_class FROM document_classes "  # noqa: S608 — placeholders only
+        f"WHERE document_id IN ({id_marks}) ORDER BY document_class",
+        doc_ids,
+    ):
+        classes.setdefault(int(row["document_id"]), []).append(row["document_class"])
+    subjects: dict[int, list[str]] = {}
+    for row in con.execute(
+        f"SELECT document_id, "  # noqa: S608 — placeholders only
+        f"  coalesce(label, ipdb_machine_name, ipdb_manufacturer) AS name "
+        f"FROM document_subjects WHERE document_id IN ({id_marks}) "
+        f"ORDER BY scope, name",
+        doc_ids,
+    ):
+        if row["name"] is not None:
+            names = subjects.setdefault(int(row["document_id"]), [])
+            if row["name"] not in names:
+                names.append(row["name"])
+    return {
+        r["url"]: {
+            "document_id": int(r["document_id"]),
+            "classes": classes.get(int(r["document_id"]), []),
+            "subjects": subjects.get(int(r["document_id"]), []),
+        }
+        for r in owners
+    }
+
+
+def _display_title(title: str | None, subjects: list[str], fallback: str) -> str:
+    """Synthesized at read time, never stored: lead with the subject.
+
+    IPDB names repeat across machines ("Schematic Diagram (continuous)"
+    appears hundreds of times), so a bare title cannot identify a document in
+    a result list. When the first subject's name isn't already in the title,
+    it leads.
+    """
+    if not title:
+        return subjects[0] if subjects else fallback
+    if subjects and subjects[0].lower() not in title.lower():
+        return f"{subjects[0]} — {title}"
+    return title
+
+
+def search_documents(
+    term: str, limit: int = 20, con: sqlite3.Connection | None = None
+) -> list[DocumentHit]:
+    """BM25-ranked documents in the metadata tier — titles, IPDB names,
+    subjects, classes, URLs. The third search space beside text and ocr.
+
+    Covers every document; the caller partitions on ``captured`` (the CLI
+    shows un-acquired hits as its "not acquired" block, and captured hits
+    whose text tiers said nothing as metadata-only matches). Each hit carries
+    the failed-hunt history the design asks for: a URL whose *latest* fetch
+    failed is ``blocked``, and ``hunts`` are the dated "looked, not there"
+    records. ``limit <= 0`` returns every hit.
+    """
+    query = _fts_query(term)
+    if not query:
+        return []
+    own = con is None
+    con = con or connect(read_only=True)
+    try:
+        try:
+            rows = con.execute(
+                "SELECT document_id, "
+                "  snippet(docs_fts, -1, '[', ']', ' … ', 12) AS snippet "
+                "FROM docs_fts WHERE docs_fts MATCH ? "
+                "ORDER BY bm25(docs_fts) LIMIT ?",
+                (query, limit if limit > 0 else -1),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_document_schema(exc):
+                return []
+            raise
+        hits: list[DocumentHit] = []
+        for row in rows:
+            document_id = int(row["document_id"])
+            rec = document_record(con, document_id)
+            if rec is None:  # pragma: no cover — index drift, healed on open
+                continue
+            classes = [c["document_class"] for c in rec["classes"]]
+            subjects: list[str] = []
+            for s in rec["subjects"]:
+                name = s["label"] or s["ipdb_machine_name"] or s["ipdb_manufacturer"]
+                if name and name not in subjects:
+                    subjects.append(name)
+            urls = []
+            for u in rec["urls"]:
+                last = con.execute(
+                    "SELECT http_status, fetched_at FROM fetches "
+                    "WHERE url = ? ORDER BY id DESC LIMIT 1",
+                    (u["url"],),
+                ).fetchone()
+                blocked = None
+                if (
+                    not u["captured"]
+                    and last is not None
+                    and last["http_status"] != _HTTP_OK
+                ):
+                    status = last["http_status"]
+                    blocked = f"@ {last['fetched_at'][:10]}" + (
+                        f" (HTTP {status})" if status is not None else ""
+                    )
+                urls.append({"url": u["url"], "role": u["role"], "blocked": blocked})
+            hits.append(
+                DocumentHit(
+                    document_id=document_id,
+                    title=rec["title"],
+                    display_title=_display_title(
+                        rec["title"], subjects, f"document {document_id}"
+                    ),
+                    captured=any(u["captured"] for u in rec["urls"]),
+                    classes=classes,
+                    subjects=subjects,
+                    urls=urls,
+                    hunts=[
+                        f"not at {h['tried']} @ {h['created_at'][:10]}"
+                        for h in rec["hunts"]
+                    ],
+                    snippet=row["snippet"],
+                )
+            )
+        return hits
+    finally:
+        if own:
+            con.close()
 
 
 def _sheet_ordinal(name: str | None) -> int | None:
@@ -2665,18 +3598,119 @@ def _ocr_coverage_note(con: sqlite3.Connection | None = None) -> str | None:
     )
 
 
+# The "not acquired" block is deliberately smaller than the held list: it is
+# a lead sheet ("this exists, go get it"), not a result set, and the trove's
+# metadata-only rows number in the thousands.
+_UNACQUIRED_CAP = 10
+
+
+def _print_document_hit(doc: DocumentHit) -> None:
+    print(f"title: {doc['display_title']}")
+    if doc["classes"]:
+        print(f"classes: {', '.join(doc['classes'])}")
+    if doc["subjects"]:
+        print(f"subjects: {', '.join(doc['subjects'])}")
+    if doc["snippet"]:
+        print(f"snippet (metadata): {' '.join(doc['snippet'].split())}")
+    for u in doc["urls"]:
+        role = f"  [{u['role']}]" if u["role"] else ""
+        print(f"get: {u['url']}{role}")
+        if u["blocked"]:
+            print(f"     blocked {u['blocked']}")
+    for hunt in doc["hunts"]:
+        print(f"hunt: {hunt}")
+
+
+def _text_tier_matched_urls(
+    query: str, urls: list[NormalizedUrl], con: sqlite3.Connection
+) -> set[NormalizedUrl]:
+    """Which of ``urls`` match ``query`` in the text or OCR tier at all.
+
+    The metadata-only label depends on this being about the *tiers*, not
+    about a limited result list: a held document below the shown limit still
+    matched on text, and calling it a metadata match would misread it.
+    """
+    if not urls:
+        return set()
+    matched: set[NormalizedUrl] = set()
+    marks = ",".join("?" * len(urls))
+    for fts in ("pages_fts", "ocr_fts"):
+        try:
+            rows = con.execute(
+                f"SELECT p.url FROM {fts} AS f "  # noqa: S608 — table names from a literal tuple
+                f"JOIN pages AS p ON p.rowid = f.rowid "
+                f"WHERE {fts} MATCH ? AND p.url IN ({marks})",
+                (query, *urls),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if fts == "ocr_fts" and _missing_ocr_schema(exc):
+                continue
+            raise
+        matched.update(r["url"] for r in rows)
+    return matched
+
+
 def _cmd_search(term: str, limit: int) -> int:
     _warn_unbalanced(term)
-    hits = search(term, limit=limit)
+    # Over-fetched so the document limit is applied AFTER aggregation: a
+    # merged work with several matching captures occupies one slot, and its
+    # siblings must not push other works out of the truncated URL-grain list.
+    # The same over-fetch trade the tier merge makes — twice the limit loses
+    # nothing unless one result page is dominated by multi-capture works.
+    hits = search(term, limit=limit * 2 if limit > 0 else 0)
+    groups: dict[object, list[SearchHit]] = {}
+    for hit in hits:
+        key: object = (
+            hit["document_id"] if hit["document_id"] is not None else hit["url"]
+        )
+        groups.setdefault(key, []).append(hit)
+    held_groups = list(groups.values())
+    if limit > 0:
+        held_groups = held_groups[:limit]
+    hits = [hit for group in held_groups for hit in group]
+    doc_hits = search_documents(term, limit=0)
+    held_urls = {hit["url"] for hit in hits}
+    # Metadata-only matches on held documents: acquired, but the term lives in
+    # the title/subject/class rather than any text tier — without these, an
+    # acquired scan whose subject appears only in metadata would be invisible.
+    # A held document that matched on text but fell below --limit is neither
+    # shown nor relabeled: it is reachable by raising the limit.
+    candidates = [
+        d
+        for d in doc_hits
+        if d["captured"] and not any(u["url"] in held_urls for u in d["urls"])
+    ]
+    metadata_only: list[DocumentHit] = []
+    if candidates:
+        query = _fts_query(term)
+        candidate_urls = [u["url"] for d in candidates for u in d["urls"]]
+        # sqlite3's context manager manages transactions, not closing.
+        check_con = connect(read_only=True)
+        try:
+            text_matched = _text_tier_matched_urls(query, candidate_urls, check_con)
+        finally:
+            check_con.close()
+        metadata_only = [
+            d
+            for d in candidates
+            if not any(u["url"] in text_matched for u in d["urls"])
+        ]
+    unacquired = [d for d in doc_hits if not d["captured"]]
     coverage = _ocr_coverage_note()
-    if not hits:
+    if not hits and not metadata_only and not unacquired:
         print(f"no pages match: {term}", file=sys.stderr)
         if coverage:
             print(coverage, file=sys.stderr)
         return 1
-    for i, hit in enumerate(hits):
-        if i:
+    # Held documents aggregate by document, not URL: after a merge one work
+    # can own several captured URLs, and it occupies one slot — the lead
+    # capture in full, every other matching capture named beneath it.
+    printed = 0
+    for group in held_groups:
+        hit, *siblings = group
+        if printed:
             print()
+        printed += 1
         print(f"url: {hit['url']}")
         print(f"title: {hit['title'] or '(no title)'}")
         if hit["last_updated"]:
@@ -2691,6 +3725,10 @@ def _cmd_search(term: str, limit: int) -> int:
             # layer, a caption track, or a transcription — so the reader knows
             # to weigh it before quoting.
             print(f"text_source: {hit['text_source']}")
+        if hit["classes"]:
+            print(f"classes: {', '.join(hit['classes'])}")
+        if hit["subjects"]:
+            print(f"subjects: {', '.join(hit['subjects'])}")
         print(f"matches: {_match_label(hit)}")
         if hit["snippet"]:
             # The snippet spans stored line breaks; collapse for one line. The
@@ -2698,6 +3736,37 @@ def _cmd_search(term: str, limit: int) -> int:
             # trusting the words, and quote what you read there, not this string.
             label = "snippet (ocr)" if hit["snippet_tier"] == _OCR_TIER else "snippet"
             print(f"{label}: {' '.join(hit['snippet'].split())}")
+        for sibling in siblings:
+            print(f"also matches: {sibling['url']} (same document)")
+    shown_metadata = metadata_only if limit <= 0 else metadata_only[:_UNACQUIRED_CAP]
+    for doc in shown_metadata:
+        if printed:
+            print()
+        printed += 1
+        print("held, matched on metadata only:")
+        _print_document_hit(doc)
+    if len(shown_metadata) < len(metadata_only):
+        sys.stdout.flush()
+        print(
+            f"{len(metadata_only) - len(shown_metadata)} more metadata-only "
+            "matches not shown; narrow the term",
+            file=sys.stderr,
+        )
+    if unacquired:
+        if printed:
+            print()
+        print(f"--- not acquired ({len(unacquired)} matching) ---")
+        for i, doc in enumerate(unacquired[:_UNACQUIRED_CAP]):
+            if i:
+                print()
+            _print_document_hit(doc)
+        if len(unacquired) > _UNACQUIRED_CAP:
+            sys.stdout.flush()
+            print(
+                f"{len(unacquired) - _UNACQUIRED_CAP} more un-acquired matches "
+                "not shown; narrow the term",
+                file=sys.stderr,
+            )
     if coverage:
         sys.stdout.flush()
         print(coverage, file=sys.stderr)
