@@ -1401,10 +1401,10 @@ def get_by_raw_url(
             con.close()
 
 
-def capture_for_citation_ref(
+def captures_for_citation_ref(
     ref: str, con: sqlite3.Connection | None = None
-) -> PageRow | None:
-    """The cached capture behind a citation ref (``williams:some-manual-slug``).
+) -> list[PageRow]:
+    """Every cached capture behind a citation ref (``williams:some-manual-slug``).
 
     Resolves every document library row whose ``citation_ref`` is *ref* —
     the column is not unique, and enrichment legitimately stamps one ref onto
@@ -1412,17 +1412,20 @@ def capture_for_citation_ref(
     front and back) that a merge has not yet folded — then tries each
     document's URLs: under their own normalized form first, then as the
     ``raw_url`` of a fetch that redirected, the shape every archive.org
-    download URL takes when it lands on a datanode host. The first captured
-    page wins, in (document id, URL) order so ties resolve deterministically;
-    a ref no document carries, or one none of whose URLs is captured — the
-    trove's normal state — is ``None``.
+    download URL takes when it lands on a datanode host. Captures return in
+    (document id, URL) order so callers see a deterministic sequence; a merged
+    multi-sheet document (a flyer's front and back as separate image captures)
+    yields one row per captured sheet, which is why the plural exists — a
+    quote may sit on any sheet, so the gates must see them all. Uncaptured
+    URLs are simply absent; a ref no document carries resolves to ``[]``.
 
     This is the join flippatch's quote gates resolve a ``<publisher>:<slug>``
-    cite through, so its contract is deliberately: one ref in, at most one
-    ``PageRow`` out, no schema knowledge required of the caller.
+    cite through: one ref in, the captured copies out, no schema knowledge
+    required of the caller.
     """
     own = con is None
     con = con or connect(read_only=True)
+    pages: list[PageRow] = []
     try:
         for row in con.execute(
             "SELECT u.url FROM documents AS d "
@@ -1432,11 +1435,24 @@ def capture_for_citation_ref(
         ).fetchall():
             page = get(row["url"], con=con) or get_by_raw_url(row["url"], con=con)
             if page is not None:
-                return page
-        return None
+                pages.append(page)
+        return pages
     finally:
         if own:
             con.close()
+
+
+def capture_for_citation_ref(
+    ref: str, con: sqlite3.Connection | None = None
+) -> PageRow | None:
+    """The first cached capture behind a citation ref, else ``None``.
+
+    The single-copy view of :func:`captures_for_citation_ref` — the first row
+    of its deterministic order — for callers that need one representative
+    capture rather than every sheet.
+    """
+    pages = captures_for_citation_ref(ref, con=con)
+    return pages[0] if pages else None
 
 
 def _fts_units(term: str) -> tuple[list[str], bool]:

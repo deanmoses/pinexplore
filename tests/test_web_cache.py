@@ -253,7 +253,8 @@ def test_capture_for_citation_ref_scans_every_document_carrying_the_ref(cache):
     # document row carries it, in deterministic order — an arbitrary
     # fetchone() here read a cached document as missing.
     uncaptured = wc.ensure_document_for_url(
-        cache, wc.normalize_url("https://www.ipdb.org/images/1/front.jpg"),
+        cache,
+        wc.normalize_url("https://www.ipdb.org/images/1/front.jpg"),
         role="catalog",
     )
     stored = wc.normalize_url("https://www.ipdb.org/images/1/back.jpg")
@@ -266,12 +267,46 @@ def test_capture_for_citation_ref_scans_every_document_carrying_the_ref(cache):
     assert hit["url"] == stored
 
 
+def test_captures_for_citation_ref_returns_every_captured_copy_in_order(cache):
+    # A merged multi-sheet document (a flyer's front and back as two image
+    # captures) owns several URLs, and a quote may sit on any sheet — the
+    # gates need every captured copy, in the same deterministic (document id,
+    # URL) order the singular resolver picks its winner by. Uncaptured URLs
+    # ride along without blocking or appearing.
+    front = wc.normalize_url("https://news.test/uploads/024-front.jpg")
+    back = wc.normalize_url("https://news.test/uploads/025-back.jpg")
+    _seed(cache, url=front, content_type="image/jpeg")
+    _seed(cache, url=back, content_type="image/jpeg")
+    doc_id = wc.ensure_document_for_url(cache, front, role="catalog")
+    wc.merge_documents(
+        cache, doc_id, wc.ensure_document_for_url(cache, back, role="catalog")
+    )
+    cache.execute(
+        "INSERT INTO document_urls (url, document_id, role, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            wc.normalize_url("https://www.ipdb.org/images/9/uncaptured.jpg"),
+            doc_id,
+            "catalog",
+            wc.now_iso(),
+        ),
+    )
+    wc.set_document_fields(cache, doc_id, citation_ref="hexa-pinball:spec-sheet")
+    hits = wc.captures_for_citation_ref("hexa-pinball:spec-sheet", con=cache)
+    assert [hit["url"] for hit in hits] == [front, back]
+    # The singular resolver stays the plural's first row.
+    first = wc.capture_for_citation_ref("hexa-pinball:spec-sheet", con=cache)
+    assert first is not None
+    assert first["url"] == front
+
+
 def test_capture_for_citation_ref_misses_cleanly(cache):
     # Unknown ref: no document carries it.
     assert wc.capture_for_citation_ref("williams:absent", con=cache) is None
     # Known document, nothing captured: the trove's normal state.
     doc_id = wc.ensure_document_for_url(
-        cache, wc.normalize_url("https://www.ipdb.org/files/2/handbook.pdf"),
+        cache,
+        wc.normalize_url("https://www.ipdb.org/files/2/handbook.pdf"),
         role="catalog",
     )
     wc.set_document_fields(cache, doc_id, citation_ref="williams:handbook")
