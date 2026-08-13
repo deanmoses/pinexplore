@@ -1,27 +1,10 @@
 #!/usr/bin/env python3
-"""Document metadata CLI: the human face of the registration library.
+"""Document metadata CLI: register, classify, attach subjects, hunt, merge.
 
-The document library's write surface (design: docs/plans/ManufacturerDocs.md).
 Every command is a thin wrapper over the shared functions in ``web_cache.py``
-— the same functions ``upsert_page`` registration, the trove seed and the
-enrichment scripts go through — so there is exactly one metadata write path.
-
-A ``<doc>`` argument is a document id or any URL the document owns (URLs are
-normalized on the way in). Commands:
-
-    show <doc>                      the document with all its children
-    register <url> [...]            ensure a document exists for a URL
-    set <doc> [...]                 title / publisher / citation ref
-    classify <doc> <class> [...]    add or withdraw a class judgment
-    subject <doc> --scope ... [...] attach a subject (reconciles identities)
-    hunt <doc> <tried> [...]        record a dated "looked, not there"
-    merge <survivor> <loser>        fold one document into another
-    classes                         per-class document counts
-
-Classification is always a guess with provenance (--source), never a verdict;
-the vocabulary FK makes a misspelled class fail loudly. Scope vocabulary is
-the catalog's: model and corporate_entity ("machine" is IPDB-only naming and
-appears here solely in the ipdb_-prefixed provenance flags).
+— the same write path the fetcher's registration and the seed/enrichment
+scripts use — so there is exactly one metadata write path. A ``<doc>``
+argument is a document id or any URL the document owns.
 """
 
 from __future__ import annotations
@@ -214,8 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Edit document metadata in the web evidence cache "
-        "(see docs/plans/ManufacturerDocs.md)."
+        description="Edit document metadata in the web evidence cache."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -1,11 +1,4 @@
-"""The Flipcommons enrichment core (web_enrich_flipcommons.enrich), offline.
-
-``collect()`` is the only Flipcommons-touching function; these tests feed
-``enrich()`` hand-built maps shaped like its output. Covered: PK + label
-resolution on both scopes, PK repair after a simulated Flipcommons rebuild,
-unresolved subjects left standing, citation-ref fill vs. mismatch-report,
-and stateful idempotency (a rerun that changes nothing restamps nothing).
-"""
+"""The enrichment core (web_enrich_flipcommons.enrich), fed synthetic maps."""
 
 from __future__ import annotations
 

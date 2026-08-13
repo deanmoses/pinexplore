@@ -1,28 +1,15 @@
 #!/usr/bin/env python3
-"""Enrichment: resolve document subjects and citation refs against Flipcommons.
+"""Resolve document subjects and citation refs against the Flipcommons dev DB.
 
-Re-runnable (design: docs/plans/ManufacturerDocs.md). Reads the Flipcommons
-dev DB once per run and fills what only it can supply:
-
-- **``document_subjects.flipcommons_pk``** — model scope joins IPDB machine
-  ids against ``catalog_machinemodel.ipdb_id``; corporate-entity scope joins
-  IPDB manufacturer ids against
-  ``catalog_corporateentity.ipdb_manufacturer_id``. Writes go through
-  ``attach_document_subject``, whose semantics are exactly what enrichment
-  needs: the PK is a resolvable pointer and overwrites (repairing a
-  Flipcommons rebuild), the label refreshes as a snapshot of the current
-  catalog name, and an attachment that changes nothing writes nothing.
-- **``documents.citation_ref``** — a document URL matching a slug-addressed
-  citation source's link resolves to that source's cite ref
-  (``parent-slug:child-slug``). Fill-only: refs are frozen by flipcommons
-  doctrine, so a stored ref that *disagrees* with the join is reported as a
-  mismatch for a person to resolve, never overwritten. Web-type sources are
-  skipped — their cite ref is the URL itself, so there is nothing to store.
-
-Subjects that resolve to nothing (models or makers Flipcommons doesn't hold
-under that IPDB id) are counted and left for a future run — day-to-day search
-never needs Flipcommons, so an unresolved subject still finds by its IPDB
-name.
+Re-runnable. Subjects join their IPDB ids against ``catalog_machinemodel``
+(model scope) and ``catalog_corporateentity`` (corporate-entity scope);
+writes go through ``attach_document_subject``, so PKs overwrite (repairing a
+Flipcommons rebuild), labels refresh to the current catalog name, and an
+unchanged row is untouched. ``documents.citation_ref`` resolves by URL join
+against slug-addressed citation sources, fill-only: refs are frozen, so a
+stored ref that disagrees is reported for a person, never overwritten.
+Unresolved subjects are counted and left standing — they still search by
+their IPDB names.
 
 Usage:
     uv run python scripts/web_scrape/web_enrich_flipcommons.py [--flipcommons-db PATH] [--dry-run]
@@ -44,8 +31,7 @@ def collect(flipcommons_db: Path) -> dict[str, Any]:
     """Pull the resolution maps out of the Flipcommons dev DB as plain data.
 
     The only function that touches Flipcommons, so ``enrich()`` stays
-    testable offline — and so the dependency stays a build-time enrichment,
-    never a query-time read.
+    testable offline and the dependency stays enrichment-time only.
     """
     con = sqlite3.connect(f"file:{flipcommons_db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row

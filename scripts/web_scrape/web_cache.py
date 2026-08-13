@@ -10,11 +10,8 @@ Stdlib only (sqlite3, hashlib, urllib.parse, re). The SQLite ``fts5`` extension
 ships with the standard CPython build.
 
 Layout (all under ingest_sources/web/, R2-backed and gitignored):
-    cache.sqlite        pages + fetches + pages_fts/ocr_fts (FTS5), plus the
-                        document-library tables (documents, document_urls,
-                        document_ipdb_listings, document_classes,
-                        document_subjects, document_hunts, the class
-                        vocabulary) — see docs/plans/ManufacturerDocs.md
+    cache.sqlite        pages + fetches + the document-library tables +
+                        three FTS5 indexes (schema below)
     raw/<sha>.<ext>     raw page blobs, content-addressed (sha = sha256(raw
                         bytes)) so every distinct version of a page is preserved.
                         The extension is derived from a row's content_type, not
@@ -162,9 +159,7 @@ class DocumentHit(TypedDict):
     """One document in the metadata tier — ``search_documents()``'s unit.
 
     Covers acquired and un-acquired documents alike; ``captured`` is the
-    display partition. An un-acquired hit is the trove's whole point: the
-    document is findable by title/subject/class before a byte is fetched,
-    and ``urls`` says where to go get it.
+    display partition, and ``urls`` says where an un-acquired one lives.
     """
 
     document_id: int
@@ -408,22 +403,18 @@ CREATE TRIGGER IF NOT EXISTS ocr_au AFTER UPDATE ON pages BEGIN
 END;
 
 -- ------------------------------------------------------------------------- --
--- Document library: the work-grain index over the corpus (design:
--- docs/plans/ManufacturerDocs.md). Every pages row belongs to a document
--- (enforced in upsert_page and self-healed by init_schema's backfill); a
--- document can also exist with no capture at all — the un-acquired trove,
--- known by metadata before a byte is fetched. There is no source-kind
--- column anywhere: kind derives from classes, and citation routing is the
--- class-based prose rule in the design doc.
+-- Document library: the work-grain index over the corpus. Every pages row
+-- belongs to a document (upsert_page registers; init_schema's backfill
+-- self-heals), and a document can exist with no capture — findable by
+-- metadata before a byte is fetched. A document's kind (manual vs patent
+-- vs article) is not a column; it derives from its classes.
 
 CREATE TABLE IF NOT EXISTS documents (
   id            INTEGER PRIMARY KEY,
-  title         TEXT,               -- the work's own title where known; display titles
-                                    -- are synthesized at read time, never stored
+  title         TEXT,               -- the work's own title where known; display
+                                    -- titles are synthesized at read time
   publisher     TEXT,
-  -- merge hints, measured at seed time across shared IPDB basenames.
-  -- ipdb_machines_referencing counts IPDB's own listings; the catalog_*
-  -- pair counts the catalog titles/systems those listings resolve to.
+  -- merge hints from IPDB basenames shared across machine pages
   ipdb_machines_referencing   INTEGER,
   catalog_titles_referencing  INTEGER,
   catalog_systems_referencing INTEGER,
@@ -433,18 +424,17 @@ CREATE TABLE IF NOT EXISTS documents (
   article_publication TEXT,
   article_issue_date  TEXT,
   article_pages       TEXT,
-  -- the Flipcommons citation source as its cite ref — a ref, not a PK:
-  -- catalog slugs change (so subjects hold PKs), citation slugs are frozen
-  -- by flipcommons doctrine. NULL until enrichment resolves it by URL join.
+  -- the Flipcommons citation source as its cite ref, not a PK: catalog slugs
+  -- change (so subjects hold PKs) but citation slugs are frozen — patches
+  -- replay against them. Filled by enrichment via URL join.
   citation_ref  TEXT,
-  created_at    TEXT NOT NULL,      -- distinguishes seed-era rows from later registrations
+  created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
 
--- The class vocabulary, as data (seeded from pinexplore's 01_reference.sql;
--- the detection patterns stay there — they read IPDB naming habits and run
--- only at seed). Parent edges are one row per edge so a class may later
--- carry two parents without a schema change.
+-- Class vocabulary, seeded from pinexplore's classification reference (the
+-- detection patterns stay there; they read IPDB naming habits). One row per
+-- parent edge so a class may carry two parents without a schema change.
 CREATE TABLE IF NOT EXISTS document_class_vocab (
   document_class  TEXT PRIMARY KEY
 );
@@ -454,15 +444,14 @@ CREATE TABLE IF NOT EXISTS document_class_parents (
   PRIMARY KEY (document_class, parent_class)
 );
 
--- The original IPDB dump listings, verbatim, at the dump's own grain: one
--- row per (machine, file, category) listing. A URL can be listed under
--- several machines and several categories, so these facts cannot live as
--- scalars on documents. This table is the "retain all IPDB data"
--- requirement: reclassification and re-attachment never need a re-ingest.
+-- IPDB's listings verbatim, at the dump's own grain: a URL can be listed
+-- under several machines and several categories, so these facts cannot be
+-- scalars on documents. Holding every raw field here means reclassification
+-- never needs a re-ingest.
 CREATE TABLE IF NOT EXISTS document_ipdb_listings (
   document_id          INTEGER NOT NULL REFERENCES documents(id),
   ipdb_id              INTEGER NOT NULL,  -- the machine page the file was listed under
-  file_url             TEXT NOT NULL,     -- the seed-grain identity
+  file_url             TEXT NOT NULL,
   ipdb_category        TEXT NOT NULL,
   ipdb_name            TEXT,              -- display name; holds date/language/revision text
   container            TEXT,
@@ -486,15 +475,13 @@ CREATE TABLE IF NOT EXISTS document_classes (
 );
 
 -- One row per address the work lives at, fetched or not. url is the primary
--- key: a capture belongs to exactly one document, which keeps "acquired"
--- well-defined; a merge moves URLs to the surviving document. Roles are
--- DocumentCitations' link-type vocabulary: reference = the document's own
--- canonical address, catalog = a third-party index holding a copy (IPDB),
--- archive = a preserved snapshot. No sheet_order: the parts structure is
--- designed with the deferred sheet-assembly work that consumes it.
+-- key — a capture belongs to exactly one document, so "acquired" is
+-- well-defined. Roles: reference = the document's own canonical address,
+-- catalog = a third-party index holding a copy (IPDB), archive = a
+-- preserved snapshot.
 CREATE TABLE IF NOT EXISTS document_urls (
   -- NOT NULL is not implied: in a rowid table only INTEGER PRIMARY KEY
-  -- implies it, and one NULL here would turn the backfill's membership test
+  -- implies it, and one NULL would turn the backfill's NOT EXISTS test
   -- three-valued.
   url          TEXT PRIMARY KEY NOT NULL,  -- normalized; joins pages.url when captured
   document_id  INTEGER NOT NULL REFERENCES documents(id),
@@ -504,11 +491,11 @@ CREATE TABLE IF NOT EXISTS document_urls (
 CREATE INDEX IF NOT EXISTS document_urls_by_document
   ON document_urls(document_id);
 
--- Dated negative results: a hunt tried somewhere and concluded the document
--- is NOT there. Separate from document_urls, which asserts the work DOES
--- live at its URL — and whose primary key would let a wrong guess
--- permanently own an address. A known address that can't be reached (403,
--- auth) is a document_urls row plus its failed fetches, not a hunt.
+-- Dated negative results: looked at `tried`, the document isn't there. Not
+-- a document_urls row — that table asserts presence, and its primary key
+-- would let a wrong guess own an address forever. A real address that
+-- merely couldn't be reached (403, auth) is a document_urls row plus its
+-- failed fetches.
 CREATE TABLE IF NOT EXISTS document_hunts (
   document_id  INTEGER NOT NULL REFERENCES documents(id),
   tried        TEXT NOT NULL,   -- the URL or site searched
@@ -516,19 +503,17 @@ CREATE TABLE IF NOT EXISTS document_hunts (
   created_at   TEXT NOT NULL
 );
 
--- One row per subject; a document about several models carries several
--- rows. A row stands alone with only a flipcommons_pk (Flipcommons holds
--- models IPDB doesn't); the ipdb_* columns are optional provenance. Scope
--- is corporate_entity rather than "manufacturer" because IPDB's
--- ManufacturerId is corporate-entity-grained and the Manufacturer rollup is
--- one derivable FK hop away in Flipcommons.
+-- One row per subject; several per document. A row may hold only a
+-- flipcommons_pk (Flipcommons has models IPDB doesn't) or only IPDB
+-- provenance ids. The scope is corporate_entity, not manufacturer: IPDB's
+-- ManufacturerId is corporate-entity-grained, and the Manufacturer rollup
+-- is one FK hop away in Flipcommons.
 CREATE TABLE IF NOT EXISTS document_subjects (
   document_id           INTEGER NOT NULL REFERENCES documents(id),
   scope                 TEXT NOT NULL CHECK (scope IN ('model', 'corporate_entity')),
-  flipcommons_pk        INTEGER,  -- machinemodel PK on model scope, corporateentity PK
-                                  -- on corporate_entity scope; re-derivable via ipdb ids
-  label                 TEXT,     -- local searchable name snapshot; a PK-only subject has
-                                  -- no IPDB name and search never opens Flipcommons
+  flipcommons_pk        INTEGER,  -- machinemodel / corporateentity PK by scope;
+                                  -- re-derivable via the ipdb ids
+  label                 TEXT,     -- searchable name snapshot; search never opens Flipcommons
   ipdb_machine_id       INTEGER CHECK (ipdb_machine_id IS NULL OR scope = 'model'),
   ipdb_manufacturer_id  INTEGER CHECK (ipdb_manufacturer_id IS NULL OR scope = 'corporate_entity'),
   ipdb_machine_name     TEXT,
@@ -536,15 +521,13 @@ CREATE TABLE IF NOT EXISTS document_subjects (
   created_at            TEXT NOT NULL,
   CHECK (flipcommons_pk IS NOT NULL OR ipdb_machine_id IS NOT NULL
          OR ipdb_manufacturer_id IS NOT NULL),
-  -- A PK-only subject's label is its ONLY searchable name (metadata FTS
-  -- indexes labels and IPDB names; search never opens Flipcommons), so when
-  -- no IPDB identity supplies a name, the label is mandatory and must carry
-  -- at least one non-whitespace character — "   " tokenizes to nothing.
+  -- with no IPDB name to index, the label is the row's only searchable
+  -- name, so it must hold a non-whitespace character
   CHECK (ipdb_machine_id IS NOT NULL OR ipdb_manufacturer_id IS NOT NULL
          OR (label IS NOT NULL AND trim(label) <> ''))
 );
--- Partial unique indexes make the re-runnable attachment/enrichment scripts
--- idempotent: they guard the insert paths, while enrichment UPDATEs in place.
+-- Partial uniques are what make re-runnable attachment/enrichment
+-- idempotent: they guard the insert paths; enrichment UPDATEs in place.
 CREATE UNIQUE INDEX IF NOT EXISTS document_subjects_by_pk
   ON document_subjects(document_id, scope, flipcommons_pk)
   WHERE flipcommons_pk IS NOT NULL;
@@ -557,17 +540,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS document_subjects_by_ipdb_manufacturer
 CREATE INDEX IF NOT EXISTS document_subjects_by_document
   ON document_subjects(document_id);
 
--- The metadata tier's own index — a third bm25 space beside pages_fts and
--- ocr_fts, for the same reason those two are separate: metadata-only rows
--- (the un-acquired trove) would swamp or be swamped inside the text index.
--- It covers EVERY document, acquired or not: acquisition state is a display
--- partition, not an index boundary. A regular FTS5 table, not
--- external-content: its text derives from four tables, so there is no one
--- content table to mirror — the registration library rebuilds a document's
--- row on every metadata mutation (via _touch_document), and init_schema
--- heals any count drift with a full rebuild. The default unicode61
--- tokenizer splits class names on '_', so `operations_manual` answers a
--- search for "manual".
+-- The metadata tier: a third bm25 space beside pages_fts/ocr_fts, separate
+-- for the same reason those two are — metadata-only rows would swamp or be
+-- swamped inside the text index. Not external-content: the text derives
+-- from four tables, so the write functions rebuild a document's row per
+-- mutation and init_schema heals count drift. unicode61 splits on '_', so
+-- operations_manual answers a search for "manual".
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
   title, names, subjects, classes, urls, document_id UNINDEXED
 );
@@ -739,13 +717,9 @@ def ensure_document_for_url(
 def _backfill_documents(con: sqlite3.Connection) -> int:
     """Mint a document for every ``pages`` row no document owns yet.
 
-    Runs on every writable open (from ``init_schema``), so the
-    every-page-has-a-document invariant self-heals for rows written by code
-    that predates the document tables — or by a writer that crashed between
-    its page write and its registration. Role ``reference``: at backfill time
-    the document *is* the page at that URL, so the URL is definitionally its
-    canonical address (re-judged only when someone declares the capture to be
-    another publisher's work). Returns how many documents it minted.
+    Runs on every writable open, so the every-page-has-a-document invariant
+    self-heals whatever wrote the page. Role ``reference``: at backfill time
+    the document *is* the page at that URL. Returns how many it minted.
     """
     # NOT EXISTS, not NOT IN: a NULL in the subquery would make NOT IN
     # three-valued and silently adopt nothing — the failure mode a self-heal
@@ -792,10 +766,9 @@ def resolve_document(con: sqlite3.Connection, ref: str) -> int | None:
 def _refresh_document_fts(con: sqlite3.Connection, document_id: int) -> None:
     """Rebuild one document's metadata-FTS row from its current tables.
 
-    The library is the index's maintainer — every metadata mutation funnels
-    through ``_touch_document`` (or the insert paths), so triggers over four
-    tables are machinery this can do without. A document that no longer
-    exists simply has its row deleted.
+    Every metadata mutation funnels through ``_touch_document``, so this is
+    cheaper than triggers over four tables. A deleted document's row is
+    simply removed.
     """
     con.execute("DELETE FROM docs_fts WHERE document_id = ?", (document_id,))
     doc = con.execute(
@@ -927,27 +900,16 @@ def attach_document_subject(
 ) -> bool:
     """Attach a subject, unifying every row that shares one of its identities.
 
-    A subject has two identity paths — the Flipcommons PK and the
-    scope-matching IPDB id — and an attachment naming both may find them on
-    *different* rows (a PK-only attachment and an IPDB-seeded row that were
-    never linked before). All matching rows are collapsed into one, then the
-    incoming values apply:
-
-    - **IPDB ids are senior**: they fill NULLs only, and a non-NULL value
-      that disagrees — between two matched rows, or between a row and the
-      incoming attachment — raises ValueError, because an incompatible
-      mapping must be resolved by a person, never absorbed.
-    - **The PK is a resolvable pointer**, re-derivable from the IPDB
-      identity, so an incoming PK overwrites: that is what lets enrichment
-      repair PKs after a Flipcommons rebuild. (A differing PK is only ever
-      reachable through an IPDB-id match — a PK-matched row is equal by
-      construction, and a cross-row PK disagreement raises above.)
-    - **``label`` overwrites when supplied** — a refreshable display/search
-      snapshot, not provenance; IPDB names fill NULLs only.
+    An attachment naming both identity paths (PK and IPDB id) may find them
+    on different rows; all matches collapse into one. Then: IPDB ids fill
+    NULLs only, and any disagreement raises ValueError — an incompatible
+    mapping is resolved by a person, never absorbed. The PK overwrites — it
+    is re-derivable from the IPDB id, which is how enrichment repairs PKs
+    after a Flipcommons rebuild. ``label`` overwrites (a refreshable
+    snapshot, not provenance); IPDB names fill NULLs only.
 
     Returns True when a new row was inserted, False when existing row(s)
-    absorbed the attachment. The scope CHECKs and the PK-only-needs-a-label
-    rule surface as IntegrityError.
+    absorbed the attachment.
     """
     rows = con.execute(
         "SELECT rowid, * FROM document_subjects "
@@ -1054,10 +1016,10 @@ def record_document_hunt(
 ) -> None:
     """Record a dated negative result: looked at ``tried``, the document isn't there.
 
-    Deliberately not a ``document_urls`` row — that table asserts the work
-    DOES live at an address, and its primary key would let a wrong guess own
-    the address forever. A known address that merely couldn't be reached
-    (403, auth) belongs in ``document_urls`` + its failed ``fetches``.
+    Never filed as a ``document_urls`` row, which would assert presence — and
+    whose primary key would let a wrong guess own the address forever. An
+    address that merely couldn't be reached (403, auth) belongs in
+    ``document_urls`` plus its failed ``fetches``.
     """
     con.execute(
         "INSERT INTO document_hunts (document_id, tried, note, created_at) "
@@ -1089,15 +1051,11 @@ def merge_documents(
 ) -> dict[str, object]:
     """Fold ``loser_id`` into ``survivor_id`` and delete the loser.
 
-    The deliberate act the whole design defers to: URLs, IPDB listings and
-    hunts move wholesale; class judgments union (the survivor's copy wins a
-    tie, keeping its source and date); subjects re-attach through the
-    reconciler so identities dedup instead of colliding. Scalar fields fill
-    the survivor's NULLs only — a loser value that conflicts is returned in
-    the result dict as ``dropped``, because a merge must never silently
-    rewrite the surviving document's metadata. Runs in the caller's
-    transaction; nothing is committed here, so a failure rolls the whole
-    merge back.
+    URLs, listings and hunts move wholesale; classes union (a tie keeps the
+    survivor's row); subjects re-attach through the reconciler. Scalar
+    fields fill the survivor's NULLs only — a conflicting loser value is
+    returned as ``dropped``, never silently overwriting the survivor. Does
+    not commit, so a failure rolls the whole merge back.
     """
     if survivor_id == loser_id:
         raise ValueError("cannot merge a document into itself")
@@ -1308,19 +1266,16 @@ def upsert_page(
             "imported": None if imported is None else int(imported),
         },
     )
-    # Same transaction as the page write: every writer that reaches pages —
-    # the fetcher, the importer — upholds the page→document invariant without
-    # knowing about it, and a crash can't strand a page documentless (and if
-    # one somehow does, init_schema's backfill self-heals on the next open).
+    # Registration rides the page write's transaction so every writer —
+    # fetcher, importer — upholds the page→document invariant, and a crash
+    # can't strand a page documentless.
     #
     # Redirects must not split a work in two: the row is keyed on the
-    # post-redirect URL, but the *requested* URL may already own a document —
-    # the registered-before-acquired trove case, finally fetched and 301'd.
-    # An unowned final URL therefore attaches to the requested URL's
-    # document (inheriting its role — a catalog URL's redirect target is
-    # still the catalog serving it); when both URLs own *different*
-    # documents, that is a real identity claim nobody has judged, so it is
-    # surfaced for a deliberate `web_docs.py merge`, never merged silently.
+    # post-redirect URL, but the requested URL may already own a document
+    # (registered before acquired, then 301'd). An unowned final URL
+    # attaches to that document, inheriting its role; two different owners
+    # is an identity claim nobody has judged, so it warns instead of
+    # silently merging.
     raw_normalized = normalize_url(raw_url)
     if raw_normalized != url:
         raw_owner = con.execute(
@@ -2883,12 +2838,9 @@ def search_documents(
     """BM25-ranked documents in the metadata tier — titles, IPDB names,
     subjects, classes, URLs. The third search space beside text and ocr.
 
-    Covers every document; the caller partitions on ``captured`` (the CLI
-    shows un-acquired hits as its "not acquired" block, and captured hits
-    whose text tiers said nothing as metadata-only matches). Each hit carries
-    the failed-hunt history the design asks for: a URL whose *latest* fetch
-    failed is ``blocked``, and ``hunts`` are the dated "looked, not there"
-    records. ``limit <= 0`` returns every hit.
+    Covers every document; the caller partitions on ``captured``. A URL
+    whose *latest* fetch failed is ``blocked``; ``hunts`` are the dated
+    "looked, not there" records. ``limit <= 0`` returns every hit.
     """
     query = _fts_query(term)
     if not query:
@@ -3652,11 +3604,8 @@ def _text_tier_matched_urls(
 
 def _cmd_search(term: str, limit: int) -> int:
     _warn_unbalanced(term)
-    # Over-fetched so the document limit is applied AFTER aggregation: a
-    # merged work with several matching captures occupies one slot, and its
-    # siblings must not push other works out of the truncated URL-grain list.
-    # The same over-fetch trade the tier merge makes — twice the limit loses
-    # nothing unless one result page is dominated by multi-capture works.
+    # Over-fetch so --limit applies after grouping by document: a merged
+    # work's sibling captures must not push other works out of the list.
     hits = search(term, limit=limit * 2 if limit > 0 else 0)
     groups: dict[object, list[SearchHit]] = {}
     for hit in hits:
@@ -3670,11 +3619,9 @@ def _cmd_search(term: str, limit: int) -> int:
     hits = [hit for group in held_groups for hit in group]
     doc_hits = search_documents(term, limit=0)
     held_urls = {hit["url"] for hit in hits}
-    # Metadata-only matches on held documents: acquired, but the term lives in
-    # the title/subject/class rather than any text tier — without these, an
-    # acquired scan whose subject appears only in metadata would be invisible.
-    # A held document that matched on text but fell below --limit is neither
-    # shown nor relabeled: it is reachable by raising the limit.
+    # Held documents whose term lives only in metadata (a scan whose subject
+    # never appears in its text). One that matched on text but fell below
+    # --limit is neither shown nor relabeled — raising the limit reaches it.
     candidates = [
         d
         for d in doc_hits
@@ -3702,9 +3649,7 @@ def _cmd_search(term: str, limit: int) -> int:
         if coverage:
             print(coverage, file=sys.stderr)
         return 1
-    # Held documents aggregate by document, not URL: after a merge one work
-    # can own several captured URLs, and it occupies one slot — the lead
-    # capture in full, every other matching capture named beneath it.
+    # One work, one slot: the lead capture in full, siblings named beneath.
     printed = 0
     for group in held_groups:
         hit, *siblings = group

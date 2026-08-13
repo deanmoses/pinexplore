@@ -1,12 +1,4 @@
-"""The metadata search tier: docs_fts maintenance and the search partition.
-
-The third bm25 space beside text and ocr. Covered: the library keeping the
-index current through every mutation path (register, classify, subject,
-set, merge), init_schema healing drift, the captured/un-acquired partition,
-metadata-only matches on held documents, held-hit decoration, blocked and
-hunt annotations, and class-name tokenization (operations_manual answers
-"manual"). Offline throughout.
-"""
+"""The metadata search tier: docs_fts maintenance and the search partition."""
 
 from __future__ import annotations
 
@@ -42,20 +34,20 @@ def _found(cache, term):
 
 def test_every_mutation_path_keeps_the_index_current(cache):
     doc = _register(cache, "https://a.test/m.pdf", title="Operations Manual")
-    assert doc in _found(cache, "operations")  # register indexed the title
+    assert doc in _found(cache, "operations")
 
     cache.execute("INSERT INTO document_class_vocab VALUES ('schematic')")
     web_cache.add_document_class(cache, doc, "schematic", "manual")
-    assert doc in _found(cache, "schematic")  # classify
+    assert doc in _found(cache, "schematic")
 
     web_cache.attach_document_subject(
         cache, doc, "model", flipcommons_pk=7, label="Yukon Yeti"
     )
-    assert doc in _found(cache, "yukon")  # subject label
+    assert doc in _found(cache, "yukon")
 
     web_cache.set_document_fields(cache, doc, title="Renamed Entirely")
     assert doc in _found(cache, "renamed")
-    assert doc not in _found(cache, "operations")  # stale text is gone
+    assert doc not in _found(cache, "operations")
 
     web_cache.remove_document_class(cache, doc, "schematic")
     assert doc not in _found(cache, "schematic")

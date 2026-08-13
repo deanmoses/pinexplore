@@ -1,12 +1,4 @@
-"""The IPDB trove seed's core (web_seed_ipdb.seed), fed synthetic rows.
-
-``collect()`` is the only DuckDB-touching function and is deliberately thin;
-these tests exercise ``seed()`` offline with hand-built rows shaped like its
-output, covering the rules the design doc pins: one document per URL with
-duplicate listings collapsing, verbatim listing retention, model-only
-subjects, the backfill collision (enrich in place, title stands), kind
-fields, and idempotent re-runs.
-"""
+"""The trove seed's core (web_seed_ipdb.seed), fed synthetic collect()-shaped rows."""
 
 from __future__ import annotations
 
@@ -96,9 +88,7 @@ def test_seed_enriches_a_backfill_owned_document_in_place(cache):
     assert len(rec["ipdb_listings"]) == 1
     assert len(rec["subjects"]) == 1
     assert rec["ipdb_machines_referencing"] == 1
-    # The backfill's mechanical `reference` judgment is rejudged: the seed is
-    # the act that identifies this URL as an IPDB catalog copy.
-    assert rec["urls"][0]["role"] == "catalog"
+    assert rec["urls"][0]["role"] == "catalog"  # backfill's `reference` rejudged
 
 
 def test_patent_and_article_fields_land_on_their_documents(cache):

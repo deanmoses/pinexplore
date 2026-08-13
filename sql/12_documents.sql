@@ -68,9 +68,9 @@ shared AS (
   -- "sightings" of a file that was never one file. The same goes for a URL that
   -- ends in a path segment rather than a filename.
   --
-  -- Titles are what separates the two shapes the plan doc names. A document
-  -- under many titles is about a platform; one under many machines of a single
-  -- title is about that title's editions. Systems cannot tell them apart —
+  -- Titles are what separates two kinds of shared document. One under many
+  -- titles is about a platform; one under many machines of a single title is
+  -- about that title's editions. Systems cannot tell them apart —
   -- editions of one game share a system by definition — so the count is carried
   -- for corroboration and the conclusion is left to the reader.
   --
@@ -111,23 +111,15 @@ SELECT
   coalesce(c.class_matches_rolled_up, []::VARCHAR[]) AS class_matches_rolled_up,
   coalesce(c.source_kinds, []::VARCHAR[]) AS source_kinds,
 
-  -- Who published it, read off IPDB's `Maker_Year_Title_...` filename habit.
-  -- NULL where the name opens with the year instead
-  -- ("2020_Guns_N_Roses_Not_In_This_Lifetime_Standard_..."), which carries no
-  -- maker at all.
+  -- Who published it, read off IPDB's `Maker_Year_Title_...` filename habit;
+  -- NULL where the name opens with the year and carries no maker. The year is
+  -- the machine's, not the document's — an anchor, never projected.
   --
-  -- The year in that convention is the machine's, not the document's, so it is
-  -- consumed as an anchor here and not projected. A document's own date, where
-  -- IPDB recorded one, is in `file_name`.
-  --
-  -- The maker is one to three letter-initial words rather than anything at all,
-  -- because plenty of names carry no machine year and the first `_YYYY_` in one
-  -- of those is the document's own date near the end — an unbounded prefix then
-  -- reads the whole title as the publisher. Bounding it answers NULL instead,
-  -- which is the right answer for a name whose maker cannot be read positionally
-  -- ("Williams_WPC_95_Schematic_Manual_July_1_1997.pdf" — a platform document,
-  -- so no machine year exists to anchor on). Recovering those needs a
-  -- manufacturer vocabulary, not a wider pattern.
+  -- The maker is capped at three letter-initial words: in names with no
+  -- machine year, the first `_YYYY_` is the document's own date near the end,
+  -- and an unbounded prefix would read the whole title as the publisher.
+  -- Names whose maker can't be read positionally answer NULL; recovering them
+  -- needs a manufacturer vocabulary, not a wider pattern.
   nullif(
     regexp_extract(
       f.file_basename,

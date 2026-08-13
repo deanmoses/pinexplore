@@ -1,11 +1,4 @@
-"""The document metadata library and its CLI (web_docs.py).
-
-Exercises the write path web_docs.py, the seed and the enrichment scripts all
-share: subject attachment with identity reconciliation, class judgments
-against the vocabulary, merges that move children and refuse to silently
-rewrite metadata, and the id-or-URL document addressing. Offline, like every
-test here.
-"""
+"""The document metadata library and its CLI (web_docs.py)."""
 
 from __future__ import annotations
 
@@ -46,8 +39,7 @@ def test_attach_reconciles_on_pk_instead_of_duplicating(cache, doc):
     )
     rows = _subjects(cache, doc)
     assert len(rows) == 1
-    # label refreshes (it is a snapshot, not provenance)…
-    assert rows[0]["label"] == "Yukon Yeti (2024)"
+    assert rows[0]["label"] == "Yukon Yeti (2024)"  # labels refresh
 
 
 def test_attach_pk_fills_the_ipdb_seeded_row(cache, doc):
@@ -148,7 +140,6 @@ def test_class_judgments_add_once_and_withdraw(cache, doc):
     cache.execute("INSERT INTO document_class_vocab VALUES ('manual')")
     assert web_cache.add_document_class(cache, doc, "manual", "manual")
     assert not web_cache.add_document_class(cache, doc, "manual", "ai")
-    # The original judgment's provenance survives the re-add attempt.
     assert (
         cache.execute("SELECT source FROM document_classes").fetchone()[0] == "manual"
     )

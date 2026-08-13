@@ -597,11 +597,9 @@ def _apply_document_metadata(
 ) -> None:
     """Apply the --doc-class / --subject flags to the URL's document.
 
-    Sugar over the shared registration library — never a second metadata
-    path. Applies whether the URL was fetched this run or freshness-skipped
-    (the metadata is about the work, not the fetch); a URL that failed to
-    cache at all is reported and skipped. Refusals (an unknown class, a
-    constraint) are per-URL warnings so one bad flag doesn't kill a batch.
+    Sugar over the shared registration library. Applies even to a
+    freshness-skipped URL (the metadata is about the work, not the fetch);
+    refusals are per-URL warnings so one bad flag doesn't kill a batch.
     """
     if not (args.doc_class or args.subject_pk is not None):
         return
@@ -683,10 +681,8 @@ def main() -> int:
     )
     doc_group = parser.add_argument_group(
         "document metadata",
-        "Thin sugar over web_docs.py, applied to every URL this run touches "
-        "(fetched or already cached): the same registration library, called "
-        "on the row just written. Classification is a guess with provenance; "
-        "the class must exist in the vocabulary.",
+        "Sugar over web_docs.py, applied to every URL this run touches "
+        "(fetched or already cached). The class must exist in the vocabulary.",
     )
     doc_group.add_argument(
         "--doc-class",

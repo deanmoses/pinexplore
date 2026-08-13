@@ -1,12 +1,4 @@
-"""Document-library tables: registration, backfill, and constraint behavior.
-
-Covers the work-grain layer added by docs/plans/ManufacturerDocs.md — the
-page→document invariant (every ``pages`` row is owned by exactly one
-document), the one-URL-one-document rule, and the constraints that keep
-judgment tables honest (vocabulary FK on classes, scope CHECKs and partial
-unique indexes on subjects). All offline against the tmp SQLite, like every
-other test here.
-"""
+"""Document-library tables: registration, backfill, and constraint behavior."""
 
 from __future__ import annotations
 
@@ -184,7 +176,7 @@ def test_a_document_may_own_several_urls(cache):
 
 
 # --------------------------------------------------------------------------- #
-# Constraint behavior: the schema refuses what the design forbids
+# Constraint behavior
 # --------------------------------------------------------------------------- #
 
 

@@ -1,33 +1,18 @@
 #!/usr/bin/env python3
-"""One-time seed: the IPDB document trove into the web cache's document index.
+"""Seed the IPDB document trove into the web cache's document index.
 
-Reads pinexplore's ``explore.duckdb`` (the classified trove — ``ipdb_documents``,
-``ipdb_patents``, ``ipdb_trade_articles`` and the class vocabulary) and writes
-the document-library tables through the same registration functions every
-other writer uses. Design: docs/plans/ManufacturerDocs.md.
+Reads pinexplore's ``explore.duckdb`` (the classified trove) and writes
+through the same registration functions as every other writer. One document
+per ``file_url``, never merged here; every listing retained verbatim;
+classes recorded as ``ipdb_pattern`` guesses; and one model-scope subject
+per distinct machine a listing appears under — the seed asserts only what
+IPDB asserts, so corporate-entity subjects are later judgments. The subset
+is non-image listings minus ROM sets, plus image listings carrying a class
+match. A URL already owned by a captured page is enriched in place.
+``publisher`` stays NULL: the filename-derived prefix misreads enough names
+that it cannot be asserted as fact.
 
-The rules it implements, all decided there:
-
-- **One document per ``file_url``; no merging.** Duplicate IPDB listings of a
-  URL collapse into one document; every listing lands verbatim in
-  ``document_ipdb_listings``.
-- **The v1 subset is defined by exclusion from seeding**: non-image listings
-  minus ROM sets (``ipdb_category = 'rom'`` OR a ``rom_set`` class match),
-  plus image listings carrying at least one class match. A URL qualifies if
-  any of its listings does; all its listings are then retained.
-- **The seed asserts only what IPDB asserts**: one model-scope subject per
-  distinct machine a listing appears under; never a corporate-entity subject.
-- **Collision rule**: a URL already owned (the corpus backfill got there
-  first) is enriched in place — listings, classes and subjects attach to the
-  existing document, whose title stands.
-- **Classes are guesses**: every judgment lands with source ``ipdb_pattern``.
-- **Publisher stays NULL**: ``publisher_prefix`` carries measured defects
-  (it misses the flagship WPC-95 case and swallows titles on ~2% of rows),
-  so it is not asserted as fact here; the field is enrichment work.
-
-Idempotent by construction — registration reuses, classes and listings
-INSERT OR IGNORE, subjects reconcile, scalar fills coalesce — so a re-run
-(including a widened subset later) is safe.
+Idempotent; a re-run (including a widened subset) is safe.
 
 Usage:
     uv run python scripts/web_scrape/web_seed_ipdb.py [--explore-db PATH] [--dry-run]
@@ -72,8 +57,7 @@ def collect(explore_db: Path) -> dict[str, Any]:
     """Pull the seed's inputs out of DuckDB as plain rows.
 
     The only function that touches DuckDB, so ``seed()`` stays testable
-    offline. The analytics layer is consulted here once — the cache never
-    depends on it at query time.
+    offline and the cache never depends on the analytics DB at query time.
     """
     import duckdb
 
@@ -150,10 +134,8 @@ def seed(con: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int]:
             con, url, title=title, role="catalog"
         )
         if existed:
-            # The backfill judged this URL `reference` mechanically (the
-            # document was the page at that URL). The seed is the deliberate
-            # act that identifies it as an IPDB catalog copy — the role
-            # rejudge is part of that act.
+            # The backfill defaulted this URL to `reference`; identifying it
+            # as an IPDB catalog copy re-judges the role too.
             con.execute(
                 "UPDATE document_urls SET role = 'catalog' WHERE url = ?", (url,)
             )
