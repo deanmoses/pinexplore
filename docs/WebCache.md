@@ -158,6 +158,8 @@ The failed live attempt stays in the `fetches` audit log next to the capture tha
 
 Two lookups the fallback keeps loudly apart, because only one of them may ever be recorded as "we looked and it is not there" (a `document_hunts` row): **"no archive capture"** is a genuine negative; **"archive lookup refused … not evidence of absence"** is archive.org's rate limiter protecting itself, and means retry later. Never turn a refusal into a hunt.
 
+One failure shape the automatic escalation cannot see: a **soft 404** — a host answering a dead page with a live HTTP 200 and a "page not found" stub body (sternpinball.com does this). The fetch "succeeds", stores the stub, and the stub then counts as the row's newest evidence. `--from-archive` is the explicit override: it skips the live fetch entirely and stores the newest capture, downgrade guard waived — the operator is saying the stored row is the thing to replace. Pair with `--force` when the stub is cached and fresh.
+
 The archive is also the only index of the dead web there is — a site that no longer exists cannot be crawled or searched. `web_archive.py list` enumerates what it holds, which is the research move when you suspect a dead site documented something but don't know its URLs:
 
 ```bash

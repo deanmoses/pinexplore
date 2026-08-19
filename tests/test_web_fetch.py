@@ -83,6 +83,7 @@ def _run(
     force_render: bool = False,
     thin_chars: int = web_render.THIN_TEXT_CHARS,
     archive: bool = True,
+    from_archive: bool = False,
 ) -> None:
     web_fetch.fetch_one(
         con,
@@ -94,6 +95,7 @@ def _run(
         force_render=force_render,
         thin_chars=thin_chars,
         archive=archive,
+        from_archive=from_archive,
     )
 
 
@@ -1136,3 +1138,31 @@ def test_stale_archive_row_skips_redownloading_its_own_capture(cache, monkeypatc
     row = _page(cache, url)
     assert calls["newer_than"] == "20240314120000"  # derived from raw_url
     assert row["last_fetched_at"] == before["last_fetched_at"]  # untouched
+
+
+def test_from_archive_skips_live_and_the_downgrade_guard(cache, monkeypatch):
+    # The soft-404 shape: a fresh live-fetched stub sits on the row, newer
+    # than every capture, so the automatic path would defend it. The explicit
+    # verb never touches the origin and passes no bound.
+    url = "https://x.com/soft-404"
+    _stub_get(monkeypatch, body=b"<html><body><p>404: not found</p></body></html>")
+    _run(cache, url)  # the stub lands, freshly fetched
+
+    def _no_live(u: str) -> web_http.Resp:
+        raise AssertionError("live fetch attempted despite --from-archive")
+
+    monkeypatch.setattr(web_fetch, "http_get", _no_live)
+    calls = _stub_archive_hit(monkeypatch, timestamp="20111203043615")
+    _run(cache, url, force=True, from_archive=True)
+    row = _page(cache, url)
+    assert calls["newer_than"] is None  # unbounded: the stored stub must lose
+    assert wc.archive_capture_date(row) == "2011-12-03"
+    assert "Rich readable article text" in (row["text"] or "")
+
+
+def test_from_archive_still_respects_freshness_without_force(cache, monkeypatch):
+    url = "https://x.com/fresh-stub"
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, url)
+    _forbid_archive(monkeypatch)
+    _run(cache, url, from_archive=True)  # fresh + no --force → skip, no lookup

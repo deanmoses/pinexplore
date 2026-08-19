@@ -364,6 +364,7 @@ def _archive_fallback(
     existing: web_cache.PageRow | None,
     query: str | None,
     thin_chars: int,
+    bounded: bool = True,
 ) -> None:
     """Escalate a failed live fetch to archive.org's newest capture.
 
@@ -416,8 +417,11 @@ def _archive_fallback(
         return
     # The bound an acceptable capture must beat: what the row already holds —
     # a prior capture's own timestamp, else the live/import fetch time.
+    # ``bounded=False`` is --from-archive's explicit operator judgment that the
+    # stored row is the thing to replace (a soft-404 stub is *newer* than every
+    # capture, so the guard would protect exactly the wrong row).
     newer_than: str | None = None
-    if existing is not None:
+    if bounded and existing is not None:
         newer_than = web_cache.archive_capture_timestamp(existing)
         if newer_than is None and existing["last_fetched_at"]:
             newer_than = _parse_iso(existing["last_fetched_at"]).strftime(
@@ -450,7 +454,8 @@ def _archive_fallback(
     # its relative links/dates belong to the origin site, not to web.archive.org.
     meta = handler.extract(resp.raw, resp.text, url)
     date = web_archive.capture_date(hit.timestamp)
-    print(f"live fetch failed; using archive capture from {date}: {url}")
+    why = "live fetch failed" if bounded else "archive requested (--from-archive)"
+    print(f"{why}; using archive capture from {date}: {url}")
     _store_result(
         con,
         url=url,
@@ -479,6 +484,7 @@ def fetch_one(
     force_render: bool = False,
     thin_chars: int = THIN_TEXT_CHARS,
     archive: bool = True,
+    from_archive: bool = False,
 ) -> None:
     try:
         url, host = _web_url(raw_url)
@@ -510,6 +516,23 @@ def fetch_one(
             canonical = fresh_row["url"]
             print(f"skip (fresh, {age_days}d): {canonical}")
             return
+
+    # --from-archive: an explicit operator judgment that the live answer is
+    # wrong — a host serving soft 404s (HTTP 200, "page not found" body)
+    # never trips the automatic escalation, and its stub, once stored, is
+    # *newer* than every capture, so the downgrade guard would defend it.
+    # Skips the live fetch (no request to the origin at all) and stores the
+    # newest capture unbounded, keyed as ever under the requested URL.
+    if from_archive:
+        _archive_fallback(
+            con,
+            url,
+            existing=existing,
+            query=query,
+            thin_chars=thin_chars,
+            bounded=False,
+        )
+        return
 
     _rate_limit(domain)
     fetched_at = web_cache.now_iso()
@@ -896,12 +919,23 @@ def main() -> int:
             f"and a render is tried (default: {THIN_TEXT_CHARS})."
         ),
     )
-    parser.add_argument(
+    archive_group = parser.add_mutually_exclusive_group()
+    archive_group.add_argument(
         "--no-archive",
         action="store_true",
         help=(
             "Disable the archive.org fallback (on by default: a failed live "
             "fetch escalates to the newest Wayback capture)."
+        ),
+    )
+    archive_group.add_argument(
+        "--from-archive",
+        action="store_true",
+        help=(
+            "Skip the live fetch and store the newest Wayback capture — for a "
+            "host that answers a dead page with a live 200 stub (a soft 404), "
+            "which the automatic fallback can't detect. Pair with --force if "
+            "the URL is cached and fresh."
         ),
     )
     doc_group = parser.add_argument_group(
@@ -966,6 +1000,7 @@ def main() -> int:
                     force_render=args.render,
                     thin_chars=args.thin_chars,
                     archive=not args.no_archive,
+                    from_archive=args.from_archive,
                 )
             except BrowserUnavailableError as exc:
                 # Render setup failed (no Chromium / no playwright). It won't fix
