@@ -334,3 +334,35 @@ JOIN themes th ON it.theme = th.name
 WHERE (m.theme_slugs IS NULL OR len(m.theme_slugs) = 0)
   AND it.theme NOT IN (SELECT theme FROM ref_themes_dropped)
 GROUP BY m.slug, m.name;
+
+------------------------------------------------------------
+-- Missing: IPDB dates held only in the header line
+------------------------------------------------------------
+
+-- Machines whose only date is the one in the IPDB page header. IPDB pages carry
+-- either a "Date Of Manufacture" row or a "Project Date" row and the header
+-- renders whichever exists, but xantari scraped only the former -- so these are
+-- the machines where the header is the sole surviving date.
+--
+-- These are NOT manufacture dates. Spot-checking against IPDB pages in the web
+-- cache found both kinds here: pages carrying a Project Date and no manufacture
+-- row at all (Acapulco, Zodiac -- Bally bingos, which is where the bulk of these
+-- sit), and pages that do show a Date Of Manufacture the dump simply missed
+-- (Ice Castle). A project date precedes release, so the two cannot be pooled.
+-- Confirm against the machine's IPDB page before using one as a manufacture
+-- date in a patch.
+CREATE OR REPLACE VIEW ipdb_dates_only_in_additional_details AS
+SELECT
+  i.IpdbId,
+  i.Title,
+  i.Manufacturer,
+  m.slug AS model_slug,
+  ad.additional_details_date_string,
+  ad.additional_details_date_year,
+  ad.additional_details_date_month,
+  ad.additional_details_date_day
+FROM ipdb_machines AS i
+JOIN ipdb_machine_additional_details AS ad ON ad.IpdbId = i.IpdbId
+LEFT JOIN models AS m ON m.ipdb_id = i.IpdbId
+WHERE i.DateOfManufacture IS NULL
+  AND ad.additional_details_date_year IS NOT NULL;

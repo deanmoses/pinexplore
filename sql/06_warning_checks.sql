@@ -114,3 +114,26 @@ SELECT 'gameplay_feature_max_parent_depth', md FROM (
   )
 ) WHERE md > 5;
 
+
+-- The IPDB header line no longer matches the grammar parsed in
+-- `ipdb_machine_additional_details`. Warns rather than aborting: the shape of
+-- this string is xantari's to change, and a reformat upstream should not stop a
+-- build. It does mean the parsed date columns are silently empty for those rows.
+-- Details: SELECT IpdbId, AdditionalDetails FROM ipdb_machines i
+--   WHERE NOT EXISTS (SELECT 1 FROM ipdb_machine_additional_details ad
+--     WHERE ad.IpdbId = i.IpdbId AND ad.additional_details_ipd_no IS NOT NULL)
+INSERT INTO _warnings
+SELECT 'ipdb_additional_details_unparsed', count(*)
+FROM ipdb_machines AS i
+JOIN ipdb_machine_additional_details AS ad ON ad.IpdbId = i.IpdbId
+WHERE i.AdditionalDetails IS NOT NULL
+  AND ad.additional_details_ipd_no IS NULL;
+
+-- A date segment matched the grammar but no month name recognised it, so the
+-- year/month/day columns are NULL while the string is present. Signals a date
+-- format IPDB has started using that try_strptime does not cover.
+INSERT INTO _warnings
+SELECT 'ipdb_additional_details_date_unrecognised', count(*)
+FROM ipdb_machine_additional_details
+WHERE additional_details_date_string IS NOT NULL
+  AND additional_details_date_year IS NULL;

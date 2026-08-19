@@ -548,6 +548,23 @@ FROM opdb_machines AS om
 WHERE om.is_machine = true AND om.physical_machine = 1
   AND NOT EXISTS (SELECT 1 FROM models AS m WHERE m.opdb_id = om.opdb_id);
 
+-- The IPDB header line parsed in `ipdb_machine_additional_details` restates the
+-- IPD number and player count, both of which we already hold as typed columns.
+-- That redundancy is the only way to tell a correct parse from a misaligned one:
+-- if the capture groups ever slip a segment, these disagree, and the date
+-- captured alongside them is wrong in the same way but has nothing to check it
+-- against. Guarded on a non-NULL ipd_no so this fires only when a row parsed and
+-- disagreed -- a row that does not match the grammar at all is upstream drift,
+-- which warns in 06 rather than stopping the build.
+INSERT INTO _violations
+SELECT 'source_dumps', 'ipdb_additional_details_parse_misaligned',
+  'IpdbId ' || i.IpdbId || ': ' || i.AdditionalDetails
+FROM ipdb_machines AS i
+JOIN ipdb_machine_additional_details AS ad ON ad.IpdbId = i.IpdbId
+WHERE ad.additional_details_ipd_no IS NOT NULL
+  AND (ad.additional_details_ipd_no != i.IpdbId
+       OR ad.additional_details_players IS DISTINCT FROM i.Players);
+
 ------------------------------------------------------------
 -- Mojibake checks
 ------------------------------------------------------------

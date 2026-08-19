@@ -117,15 +117,86 @@ WHERE len(keywords) > 0;
 -- IPDB staged
 ------------------------------------------------------------
 
--- Add technology generation slug and system/subgeneration via MPU match.
+-- Parse the IPDB page header line, which xantari captured verbatim into
+-- `AdditionalDetails` without modelling its parts:
+--
+--     IPD No. 5755 / 2011 / 4 Players
+--
+-- The date segment is the reason to parse this. IPDB pages carry either a
+-- "Date Of Manufacture" row or a "Project Date" row, and the header renders
+-- whichever one exists; xantari scraped only the former into
+-- `DateOfManufacture`. So a run of machines has a date here and NULL there --
+-- see `ipdb_dates_only_in_additional_details` in 09_quality.sql.
+--
+-- Year/month/day are split rather than emitted as a DATE because the header
+-- states three different precisions ("March 21, 1961", "August, 1941",
+-- "1932"). A DATE would have to pad the missing parts to 1 and would then be
+-- indistinguishable from a genuine January 1st; a NULL month or day says
+-- plainly that IPDB does not know it.
+--
+-- Built over the unfiltered `ipdb_machines`, not `ipdb_machines_staged`: that
+-- view drops ManufacturerId 0 and 328, which excludes machines that do have
+-- header dates.
+--
+-- The grammar below is strict, admitting exactly four shapes (id alone;
+-- id + date; id + players; all three), which is what every row currently
+-- matches. Strictness is what makes upstream drift visible instead of silently
+-- mis-binding -- a permissive date group swallows "1 Player" as a date on the
+-- id + players shape. Month names are validated by try_strptime rather than a
+-- hand-written month table, so an unfamiliar one lands as a NULL year and
+-- trips the warning in 06.
+CREATE OR REPLACE VIEW ipdb_machine_additional_details AS
+WITH parsed AS (
+  SELECT
+    im.IpdbId,
+    regexp_extract(
+      im.AdditionalDetails,
+      '^IPD No\. (\d+)(?: / ([A-Za-z]+ \d{1,2}, \d{4}|[A-Za-z]+, \d{4}|\d{4}))?(?: / (\d+) Players?)?$',
+      ['ipd_no', 'date_text', 'players']
+    ) AS g
+  FROM ipdb_machines AS im
+),
+typed AS (
+  SELECT
+    IpdbId,
+    TRY_CAST(nullif(g.ipd_no, '') AS INTEGER)   AS additional_details_ipd_no,
+    TRY_CAST(nullif(g.players, '') AS UTINYINT) AS additional_details_players,
+    nullif(g.date_text, '')                     AS additional_details_date_string,
+    try_strptime(nullif(g.date_text, ''), '%B %d, %Y') AS d_day,
+    try_strptime(nullif(g.date_text, ''), '%B, %Y')    AS d_month,
+    try_strptime(nullif(g.date_text, ''), '%Y')        AS d_year
+  FROM parsed
+)
+SELECT
+  IpdbId,
+  -- Redundant with IpdbId and Players on every row today. Kept because that
+  -- redundancy is the tripwire asserted in 05: if the capture groups ever slip,
+  -- these disagree and the date is wrong too.
+  additional_details_ipd_no,
+  additional_details_players,
+  additional_details_date_string,
+  CAST(year(COALESCE(d_day, d_month, d_year)) AS SMALLINT) AS additional_details_date_year,
+  CAST(month(COALESCE(d_day, d_month)) AS UTINYINT)        AS additional_details_date_month,
+  CAST(day(d_day) AS UTINYINT)                             AS additional_details_date_day
+FROM typed;
+
+
+-- Add technology generation slug and system/subgeneration via MPU match,
+-- plus the parsed header date.
 -- Filters out unknown/null manufacturers (ManufacturerId 0 or 328).
 CREATE OR REPLACE VIEW ipdb_machines_staged AS
 SELECT
   im.*,
   COALESCE(tg1.slug, tg2.slug) AS technology_generation_slug,
   ps.slug AS system_slug,
-  ps.technology_subgeneration_slug
+  ps.technology_subgeneration_slug,
+  ad.additional_details_date_string,
+  ad.additional_details_date_year,
+  ad.additional_details_date_month,
+  ad.additional_details_date_day
 FROM ipdb_machines AS im
+LEFT JOIN ipdb_machine_additional_details AS ad
+  ON ad.IpdbId = im.IpdbId
 LEFT JOIN ref_ipdb_technology_generation AS tg1
   ON im.TypeShortName = tg1.type_short_name AND tg1.type_short_name IS NOT NULL
 LEFT JOIN ref_ipdb_technology_generation AS tg2
