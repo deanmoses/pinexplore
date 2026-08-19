@@ -23,6 +23,11 @@ skeleton), the fetcher escalates to a headless-Chromium render and stores that
 DOM, marked ``rendered``. The fallback is on by default; ``--no-render`` disables
 it, ``--render`` forces it, ``--thin-chars`` tunes the threshold.
 
+Dead or blocking pages: when the live fetch fails outright (a 403/404, a dead
+host), the fetcher escalates to archive.org's newest capture (``web_archive``)
+and stores it keyed under the URL that was asked for, with the capture address
+in ``raw_url``. On by default; ``--no-archive`` disables it.
+
 Each document type is a handler in ``content_types`` (one file per type): it
 claims its content types, recognizes itself from a magic-byte signature, and owns
 how its body is decoded, extracted, stored, and warned about. PDFs (rulesheets,
@@ -47,6 +52,7 @@ from typing import NamedTuple
 
 # Allow sibling imports whether run as a script or imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import web_archive
 import web_cache
 import web_video
 from content_types import ContentHandler, ExtractedMeta, handler_for
@@ -267,6 +273,201 @@ def _web_url(raw_url: str) -> tuple[web_cache.NormalizedUrl, str]:
     return url, host
 
 
+def _store_result(
+    con: sqlite3.Connection,
+    *,
+    url: web_cache.NormalizedUrl,
+    raw_url: str,
+    resp: Resp,
+    handler: ContentHandler,
+    meta: ExtractedMeta,
+    existing: web_cache.PageRow | None,
+    query: str | None,
+    fetched_at: str,
+    rendered: bool,
+    render_attempted: bool,
+    thin_chars: int,
+    note: str | None = None,
+) -> None:
+    """Store one successful fetch: blob, page row, audit row, stdout report.
+
+    The shared tail of the live path and the archive fallback. Content-addresses
+    the blob so each distinct version of a page is preserved: an unchanged
+    refetch resolves to the same file (no rewrite), a changed one writes a new
+    blob alongside the old — ``changed`` is relative to the version last stored.
+    (Rendered DOM is rarely byte-stable, so renders are usually 'changed'.)
+    ``note`` joins the printed state so an archive row announces itself.
+    """
+    assert resp.raw is not None
+    content_sha = web_cache.content_sha(resp.raw)
+    changed = existing is None or existing.get("content_sha") != content_sha
+    # The blob keeps its type's extension (a PDF as .pdf) so it re-opens in the
+    # right viewer on verify rather than being mislabeled .html.
+    blob = web_cache.blob_path(content_sha, ext=handler.extension)
+    if not blob.exists():
+        blob.write_bytes(resp.raw)
+
+    meta, text_source = _resolve_text(meta, existing, changed=changed, handler=handler)
+
+    web_cache.upsert_page(
+        con,
+        url=url,
+        raw_url=raw_url,
+        content_sha=content_sha,
+        fetched_at=fetched_at,
+        last_updated=meta.last_updated,
+        title=meta.title,
+        http_status=resp.status,
+        content_type=resp.content_type,
+        text=meta.text,
+        # None for most types: a fetch never OCRs a PDF (that is web_pdfocr's
+        # separate pass), and upsert_page keeps or clears the stored tier by
+        # whether the bytes changed. The image handlers supply a value.
+        ocr_text=meta.ocr_text,
+        rendered=rendered,
+        text_source=text_source,
+        imported=False,
+    )
+    web_cache.append_fetch(
+        con,
+        url=url,
+        fetched_at=fetched_at,
+        search_query=query,
+        http_status=resp.status,
+        content_sha=content_sha,
+        changed=changed,
+        rendered=rendered,
+    )
+    state = "new" if existing is None else ("changed" if changed else "unchanged")
+    if rendered:
+        state += ", rendered"
+    if note:
+        state += f", {note}"
+    title = meta.title or "(no title)"
+    print(f"fetched [{resp.status}] ({state}): {url}\n    {title}")
+    # Loud failure: a still-thin page is the silent-200 bug surfacing. The handler
+    # phrases its type's warning (a scanned PDF vs a JS-only page) given whether a
+    # render was tried, and returns None to stay quiet (a render attempted+failed —
+    # render already logged why).
+    if is_thin(_thin_probe(meta), thin_chars):
+        warning = handler.thin_warning(
+            url, rendered=rendered, render_attempted=render_attempted
+        )
+        if warning is not None:
+            print(warning, file=sys.stderr)
+
+
+def _archive_fallback(
+    con: sqlite3.Connection,
+    url: web_cache.NormalizedUrl,
+    *,
+    existing: web_cache.PageRow | None,
+    query: str | None,
+    thin_chars: int,
+) -> None:
+    """Escalate a failed live fetch to archive.org's newest capture.
+
+    The same shape as the thin-body/render escalation, for a different failure
+    mode: the escalation order is live fetch → archive fallback → human import.
+    The failed live attempt was already logged by the caller — the audit keeps
+    it, since a dead live page is a finding, not an obstacle.
+
+    The row keys on the URL the session asked for; the capture address goes in
+    ``raw_url`` (as fetched, pre-normalization — exactly its meaning), which is
+    what makes the fallback invisible to readers (``have`` answers yes, search
+    attributes to the origin site) while keeping the provenance derivable, the
+    capture timestamp included. ``web_archive`` already said why on stderr when
+    there is nothing to store — and it says it loudly enough to keep "the
+    archive holds nothing" apart from "the archive refused to answer", because
+    only the former is a negative anyone may record.
+
+    A capture never *downgrades* the cache: when the row already holds
+    evidence at least as new (a live fetch from after the archive's newest
+    capture, or that very capture itself), the fallback reports the capture
+    and keeps what is stored — otherwise a page cached live in August whose
+    site then dies would have its text silently replaced by an older capture
+    on the next routine refetch (and quotes already cited against it could
+    stop verifying), and a permanently dead page would re-download its own
+    byte-identical capture every freshness window.
+
+    The stored ``http_status`` is the capture fetch's own, real 200 — unlike an
+    import (status NULL, no request was made), a request was made and answered.
+    A SQL consumer that means "live successes only" must also exclude
+    ``raw_url LIKE 'http%://web.archive.org/web/%'``, which is the row's whole
+    archive marking (no dedicated column, by design).
+
+    Known gap, owned by Phase 3's identity adapter: CDX is asked about the
+    *normalized* URL, and ``normalize_url`` mangles legacy positional IPDB
+    spellings (``machine.cgi?1000`` → ``?1000=``), so such a URL can print "no
+    archive capture" for a page the archive does hold under its original
+    spelling. Nothing records that negative automatically — a hunt stays a
+    human/session judgment — so the cost is a missed fallback, not a poisoned
+    corpus.
+    """
+    # A URL carrying credentials must not be sent to a third party — and an
+    # authenticated page can't be in the public archive anyway, so the lookup
+    # would leak the secret for nothing.
+    if urllib.parse.urlsplit(url).username:
+        print(
+            f"archive fallback skipped (URL carries credentials, not sent to "
+            f"archive.org): {url}",
+            file=sys.stderr,
+        )
+        return
+    # The bound an acceptable capture must beat: what the row already holds —
+    # a prior capture's own timestamp, else the live/import fetch time.
+    newer_than: str | None = None
+    if existing is not None:
+        newer_than = web_cache.archive_capture_timestamp(existing)
+        if newer_than is None and existing["last_fetched_at"]:
+            newer_than = _parse_iso(existing["last_fetched_at"]).strftime(
+                "%Y%m%d%H%M%S"
+            )
+    hit = web_archive.try_capture(url, newer_than=newer_than)
+    if hit is None:
+        return
+    resp = hit.resp
+    fetched_at = web_cache.now_iso()
+    if resp.skip:
+        why = (
+            f"unsupported content-type {resp.content_type}"
+            if resp.skip == "content-type"
+            else _too_large_reason(resp)
+        )
+        print(f"skip archive capture ({why}): {url}", file=sys.stderr)
+        web_cache.append_fetch(
+            con,
+            url=url,
+            fetched_at=fetched_at,
+            search_query=query,
+            http_status=resp.status,
+        )
+        return
+    handler = handler_for(resp.content_type)
+    assert handler is not None
+    assert resp.raw is not None
+    # Extraction sees the *original* URL: the capture is that page's bytes, and
+    # its relative links/dates belong to the origin site, not to web.archive.org.
+    meta = handler.extract(resp.raw, resp.text, url)
+    date = web_archive.capture_date(hit.timestamp)
+    print(f"live fetch failed; using archive capture from {date}: {url}")
+    _store_result(
+        con,
+        url=url,
+        raw_url=hit.capture_url,
+        resp=resp,
+        handler=handler,
+        meta=meta,
+        existing=existing,
+        query=query,
+        fetched_at=fetched_at,
+        rendered=False,
+        render_attempted=False,
+        thin_chars=thin_chars,
+        note=f"archive {date}",
+    )
+
+
 def fetch_one(
     con: sqlite3.Connection,
     raw_url: str,
@@ -277,6 +478,7 @@ def fetch_one(
     browser: LazyBrowser | None = None,
     force_render: bool = False,
     thin_chars: int = THIN_TEXT_CHARS,
+    archive: bool = True,
 ) -> None:
     try:
         url, host = _web_url(raw_url)
@@ -322,6 +524,15 @@ def fetch_one(
             search_query=query,
             http_status=exc.code,
         )
+        # Any HTTP failure escalates: a 404 is the classic archive candidate, a
+        # 403/503 is how a blocking host (ipdb.org serves both) says no to the
+        # fetcher. Escalating on a transient 5xx costs one CDX lookup and
+        # self-heals — live is always tried first, so the next post-max-age
+        # fetch restores the live page.
+        if archive:
+            _archive_fallback(
+                con, url, existing=existing, query=query, thin_chars=thin_chars
+            )
         return
     except (
         urllib.error.URLError,
@@ -339,6 +550,12 @@ def fetch_one(
         web_cache.append_fetch(
             con, url=url, fetched_at=fetched_at, search_query=query, http_status=None
         )
+        # A dead host is where the archive earns its keep: much of what
+        # documented pinball lives on sites that no longer resolve.
+        if archive:
+            _archive_fallback(
+                con, url, existing=existing, query=query, thin_chars=thin_chars
+            )
         return
 
     if resp.skip:
@@ -417,65 +634,20 @@ def fetch_one(
 
     # raw is guaranteed non-None for both a plain fetch (skip is None) and a render.
     assert resp.raw is not None
-    # Content-address the blob so each distinct version is preserved. An unchanged
-    # refetch resolves to the same file (no rewrite); a changed one writes a new
-    # blob alongside the old. `changed` is relative to the version last stored.
-    # (Rendered DOM is rarely byte-stable, so renders are usually 'changed'.)
-    content_sha = web_cache.content_sha(resp.raw)
-    changed = existing is None or existing.get("content_sha") != content_sha
-    # The blob keeps its type's extension (a PDF as .pdf) so it re-opens in the
-    # right viewer on verify rather than being mislabeled .html.
-    ext = handler.extension
-    blob = web_cache.blob_path(content_sha, ext=ext)
-    if not blob.exists():
-        blob.write_bytes(resp.raw)
-
-    meta, text_source = _resolve_text(meta, existing, changed=changed, handler=handler)
-
-    web_cache.upsert_page(
+    _store_result(
         con,
         url=url,
         raw_url=raw_url,
-        content_sha=content_sha,
+        resp=resp,
+        handler=handler,
+        meta=meta,
+        existing=existing,
+        query=query,
         fetched_at=fetched_at,
-        last_updated=meta.last_updated,
-        title=meta.title,
-        http_status=resp.status,
-        content_type=resp.content_type,
-        text=meta.text,
-        # None for most types: a fetch never OCRs a PDF (that is web_pdfocr's
-        # separate pass), and upsert_page keeps or clears the stored tier by
-        # whether the bytes changed. The image handlers supply a value.
-        ocr_text=meta.ocr_text,
         rendered=rendered,
-        text_source=text_source,
-        imported=False,
+        render_attempted=render_attempted,
+        thin_chars=thin_chars,
     )
-    web_cache.append_fetch(
-        con,
-        url=url,
-        fetched_at=fetched_at,
-        search_query=query,
-        http_status=resp.status,
-        content_sha=content_sha,
-        changed=changed,
-        rendered=rendered,
-    )
-    state = "new" if existing is None else ("changed" if changed else "unchanged")
-    if rendered:
-        state += ", rendered"
-    title = meta.title or "(no title)"
-    print(f"fetched [{resp.status}] ({state}): {url}\n    {title}")
-    # Loud failure: a still-thin page is the silent-200 bug surfacing. The handler
-    # phrases its type's warning (a scanned PDF vs a JS-only page) given whether a
-    # render was tried, and returns None to stay quiet (a render attempted+failed —
-    # render already logged why).
-    if is_thin(_thin_probe(meta), thin_chars):
-        warning = handler.thin_warning(
-            url, rendered=rendered, render_attempted=render_attempted
-        )
-        if warning is not None:
-            print(warning, file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -724,6 +896,14 @@ def main() -> int:
             f"and a render is tried (default: {THIN_TEXT_CHARS})."
         ),
     )
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help=(
+            "Disable the archive.org fallback (on by default: a failed live "
+            "fetch escalates to the newest Wayback capture)."
+        ),
+    )
     doc_group = parser.add_argument_group(
         "document metadata",
         "Sugar over web_docs.py, applied to every URL this run touches "
@@ -785,6 +965,7 @@ def main() -> int:
                     browser=browser,
                     force_render=args.render,
                     thin_chars=args.thin_chars,
+                    archive=not args.no_archive,
                 )
             except BrowserUnavailableError as exc:
                 # Render setup failed (no Chromium / no playwright). It won't fix

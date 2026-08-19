@@ -11,9 +11,11 @@ test_web_render.
 from __future__ import annotations
 
 import http.client
+import urllib.error
 from typing import TYPE_CHECKING
 
 import pytest
+import web_archive
 import web_cache as wc
 import web_fetch
 import web_http
@@ -34,6 +36,14 @@ FetchRow = tuple[str, int | None, str | None, int | None]
 def _no_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     # Never sleep in tests (the real per-domain limiter would on repeat fetches).
     monkeypatch.setattr(web_fetch, "_rate_limit", lambda domain: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_archive_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failed fetch now escalates to archive.org; stub the whole client so no
+    # test touches the network. "None" = the archive had nothing — the archive
+    # tests below override this with crafted hits.
+    monkeypatch.setattr(web_archive, "try_capture", lambda url, newer_than=None: None)
 
 
 def _stub_get(
@@ -72,6 +82,7 @@ def _run(
     browser: object | None = None,
     force_render: bool = False,
     thin_chars: int = web_render.THIN_TEXT_CHARS,
+    archive: bool = True,
 ) -> None:
     web_fetch.fetch_one(
         con,
@@ -82,6 +93,7 @@ def _run(
         browser=browser,  # type: ignore[arg-type]  # tests pass a sentinel; render is stubbed
         force_render=force_render,
         thin_chars=thin_chars,
+        archive=archive,
     )
 
 
@@ -916,3 +928,211 @@ def test_successful_empty_ocr_keeps_the_stored_reading_on_unchanged_bytes(
 
     row = _page(cache, "https://x.com/flyer.jpg")
     assert row["ocr_text"] == "O MELHOR FLIPPER JAMAIS FABRICADO"
+
+
+# --------------------------------------------------------------------------- #
+# archive fallback (web_archive.try_capture stubbed — no network)
+# --------------------------------------------------------------------------- #
+
+
+def _stub_archive_hit(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    body: bytes | None = None,
+    timestamp: str = "20141006120618",
+    original: str | None = None,
+) -> dict[str, str]:
+    """Install a try_capture returning a crafted capture; returns a call log.
+
+    The returned dict records the URL and newer_than bound try_capture was
+    asked with (empty until called), so tests can assert the archive was — or
+    was not — consulted, and with what evidence bound. The stub honors
+    ``newer_than`` the way the real try_capture does (the bound itself is
+    unit-tested in test_web_archive); what these tests pin is fetch_one's side
+    — which bound it computes and how it behaves when the archive declines.
+    """
+    payload = RICH_HTML if body is None else body
+    calls: dict[str, str | None] = {}
+
+    def _hit(
+        url: str, *, newer_than: str | None = None
+    ) -> web_archive.ArchiveHit | None:
+        calls["url"] = url
+        calls["newer_than"] = newer_than
+        if newer_than is not None and timestamp <= newer_than:
+            return None
+        capture_url = f"https://web.archive.org/web/{timestamp}id_/{original or url}"
+        resp = web_http.Resp(
+            200, "text/html", capture_url, payload, payload.decode(), None
+        )
+        return web_archive.ArchiveHit(resp, capture_url, timestamp)
+
+    monkeypatch.setattr(web_archive, "try_capture", _hit)
+    return calls
+
+
+def _stub_get_http_error(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    def _get(url: str) -> web_http.Resp:
+        raise urllib.error.HTTPError(url, code, "blocked", None, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(web_fetch, "http_get", _get)
+
+
+def _forbid_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(url: str, *, newer_than: str | None = None) -> None:
+        raise AssertionError(f"archive consulted for {url}")
+
+    monkeypatch.setattr(web_archive, "try_capture", _fail)
+
+
+def test_http_failure_falls_back_to_archive_keyed_on_requested_url(
+    cache, monkeypatch, capsys
+):
+    # The heart of the fallback: the session asked for an IPDB URL and gets a
+    # row at that URL — `have` answers yes, search attributes to IPDB — while
+    # raw_url records the capture address the bytes actually came from.
+    url = "https://www.ipdb.org/machine.cgi?id=125"
+    _stub_get_http_error(monkeypatch, 403)
+    _stub_archive_hit(monkeypatch, original="http://www.ipdb.org/machine.cgi?id=125")
+    _run(cache, url)
+
+    row = _page(cache, url)
+    assert row["raw_url"] == (
+        "https://web.archive.org/web/20141006120618id_/"
+        "http://www.ipdb.org/machine.cgi?id=125"
+    )
+    assert row["http_status"] == 200
+    assert not row["imported"]
+    assert not row["rendered"]
+    assert wc.archive_capture_date(row) == "2014-10-06"
+    # The audit keeps both: the dead live page is a finding, then the capture.
+    logged = _fetches(cache)
+    assert logged[0][:2] == (row["url"], 403)
+    assert logged[1][1] == 200
+    assert logged[1][2] is not None
+    # The escalation is reported on stdout, capture date included.
+    out = capsys.readouterr().out
+    assert "archive capture from 2014-10-06" in out
+    assert "archive 2014-10-06" in out
+
+
+def test_transport_failure_falls_back_to_archive(cache, monkeypatch):
+    def boom(url):
+        raise urllib.error.URLError("host is gone")
+
+    monkeypatch.setattr(web_fetch, "http_get", boom)
+    _stub_archive_hit(monkeypatch)
+    _run(cache, "https://deadsite.com/page.html")
+    row = _page(cache, "https://deadsite.com/page.html")
+    assert wc.archive_capture_date(row) == "2014-10-06"
+
+
+def test_live_success_never_consults_archive(cache, monkeypatch):
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _forbid_archive(monkeypatch)
+    _run(cache, "https://x.com/alive")  # must not raise
+    assert _page(cache, "https://x.com/alive")["raw_url"] == "https://x.com/alive"
+
+
+def test_no_archive_disables_the_fallback(cache, monkeypatch):
+    _stub_get_http_error(monkeypatch, 404)
+    _forbid_archive(monkeypatch)
+    _run(cache, "https://x.com/gone", archive=False)  # must not raise
+    assert wc.get("https://x.com/gone", con=cache) is None
+
+
+def test_unsupported_content_type_does_not_consult_archive(cache, monkeypatch):
+    # The live site answered; the archive's copy won't be more cacheable.
+    _stub_get(monkeypatch, content_type="video/mp4", skip="content-type")
+    _forbid_archive(monkeypatch)
+    _run(cache, "https://x.com/clip.mp4")  # must not raise
+
+
+def test_archive_empty_handed_stores_nothing(cache, monkeypatch):
+    # The autouse stub answers None ("the archive had nothing"): only the
+    # failed live attempt is recorded, and no page row pretends otherwise.
+    _stub_get_http_error(monkeypatch, 404)
+    _run(cache, "https://x.com/gone")
+    assert wc.get("https://x.com/gone", con=cache) is None
+    assert _fetches(cache) == [("https://x.com/gone", 404, None, None)]
+
+
+def test_archive_row_refreshes_to_live_when_the_page_recovers(cache, monkeypatch):
+    # Self-healing: live is always tried first, so once the page is back a
+    # forced refetch replaces the capture and the provenance reads live again.
+    url = "https://x.com/flaky"
+    _stub_get_http_error(monkeypatch, 503)
+    _stub_archive_hit(monkeypatch)
+    _run(cache, url)
+    assert wc.archive_capture_date(_page(cache, url)) == "2014-10-06"
+
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _forbid_archive(monkeypatch)
+    _run(cache, url, force=True)
+    row = _page(cache, url)
+    assert row["raw_url"] == url
+    assert wc.archive_capture_date(row) is None
+
+
+def test_archive_capture_never_downgrades_newer_cached_evidence(
+    cache, monkeypatch, capsys
+):
+    # A page cached live whose site then dies: the archive's newest capture
+    # predates our live fetch, so storing it would replace newer text with
+    # older — and a quote already cited against the row could stop verifying.
+    # The fallback passes the row's evidence timestamp as the bound and keeps
+    # what is stored when the archive can't beat it.
+    url = "https://x.com/died-recently"
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, url)
+    live = _page(cache, url)
+
+    _stub_get_http_error(monkeypatch, 404)
+    calls = _stub_archive_hit(monkeypatch, timestamp="20240314000000")
+    _run(cache, url, force=True)
+
+    row = _page(cache, url)
+    fetched_ts = web_fetch._parse_iso(live["last_fetched_at"]).strftime("%Y%m%d%H%M%S")
+    assert calls["newer_than"] == fetched_ts  # today, not 2024
+    assert row["text"] == live["text"]
+    assert row["raw_url"] == url  # still the live row, no capture address
+    assert wc.archive_capture_date(row) is None
+
+
+def test_newer_capture_may_replace_a_stale_live_row(cache, monkeypatch):
+    # The floor is a floor, not a lock: a capture from after our live fetch is
+    # newer evidence of the page's state and stores normally.
+    url = "https://x.com/died-long-ago"
+    _stub_get(monkeypatch, body=RICH_HTML)
+    _run(cache, url)
+
+    _stub_get_http_error(monkeypatch, 404)
+    _stub_archive_hit(monkeypatch, timestamp="20991231000000")
+    _run(cache, url, force=True)
+    assert wc.archive_capture_date(_page(cache, url)) == "2099-12-31"
+
+
+def test_credentialed_url_never_reaches_the_archive(cache, monkeypatch, capsys):
+    # userinfo in the URL is a secret; sending it to archive.org would leak it
+    # for nothing (an authenticated page is not in the public archive).
+    _stub_get_http_error(monkeypatch, 403)
+    _forbid_archive(monkeypatch)
+    _run(cache, "https://user:hunter2@private.example/report")  # must not raise
+    assert "carries credentials" in capsys.readouterr().err
+
+
+def test_stale_archive_row_skips_redownloading_its_own_capture(cache, monkeypatch):
+    # A permanently dead page: its row's evidence bound derives from raw_url at
+    # full timestamp precision, so the post-freshness refetch re-checks live
+    # (self-healing) and CDX, but never re-downloads the identical capture.
+    url = "https://x.com/dead-forever"
+    _stub_get_http_error(monkeypatch, 404)
+    _stub_archive_hit(monkeypatch, timestamp="20240314120000")
+    _run(cache, url)
+    before = _page(cache, url)
+
+    calls = _stub_archive_hit(monkeypatch, timestamp="20240314120000")
+    _run(cache, url, force=True)
+    row = _page(cache, url)
+    assert calls["newer_than"] == "20240314120000"  # derived from raw_url
+    assert row["last_fetched_at"] == before["last_fetched_at"]  # untouched

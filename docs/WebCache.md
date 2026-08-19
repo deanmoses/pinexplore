@@ -23,7 +23,8 @@ web_cache.py have --from-file urls.tsv                      # which of these do 
 web_cache.py links <url>                                    # what documents does a cached page point at?
 web_cache.py links <url> --ext pdf                          # …just the PDFs
 web_cache.py links <url> --ext pdf --limit 0 | cut -f1 | web_cache.py have --from-file -  # …which does cache already hold
-web_import.py <file> --url <url>                            # hand-saved copy, for a site that refuses the fetcher
+web_archive.py list <url-or-prefix> [--prefix]              # what archive.org holds for a (dead) URL or site; fetch falls back to it on its own
+web_import.py <file> --url <url>                            # hand-saved copy — the last resort, after live fetch and archive fallback both fail
 web_pdfocr.py                                               # OCR cached PDFs' sheet images into the searchable ocr tier (macOS)
 web_pdfocr.py --url <url> [--force]                         # …one document; --force re-reads one already OCR'd
 
@@ -147,6 +148,34 @@ uv run playwright install chromium    # one-time: download the browser binary (~
 
 Flags: `--no-render` (pure stdlib, never render), `--render` (force a render for sites known to be JS-only — pair with `--force` if the page is already cached and fresh), `--thin-chars N`. Rendered blobs are the rendered DOM, not what the server sent — the `rendered` flag keeps a citation's provenance clear — and their `content_sha` is non-deterministic, so a `--force` on a JS page typically writes a new blob each time.
 
+#### Dead and blocking pages: the archive fallback
+
+When the live fetch fails outright — an HTTP error (`ipdb.org` answers 403/503 site-wide to the fetcher), a host that no longer resolves — the fetcher escalates to **archive.org's newest capture** of the page and stores that. Nothing to learn, no flags: the same command that fetches a live page caches a dead one, and the escalation order is **live fetch → archive fallback → [human import](#import-when-fetching-fails)**. `--no-archive` disables it.
+
+The stored row keys on **the URL you asked for**, so `have` answers yes, search attributes to the origin site, and a citation's `ref` is the real page address — the [citation policy](#citing--quoting) prefers live URLs, with the archive as evidence storage behind them. The capture address lands in `raw_url` (that column's exact meaning: as fetched, pre-normalization), which is where the provenance lives: every read path that describes the row says so — `have` appends `archive capture <date>`, `quote`/`section` lead with `stored from a Wayback capture dated <date>`, and `get` prints the derived `archive_capture:` line. Weigh a quote accordingly: the words are real evidence of what the page said **on that date**, not necessarily what it says today. Captures are fetched in the archive's `id_` (original-bytes) form, so the stored document is the origin server's own bytes — no Wayback banner, no injected chrome.
+
+The failed live attempt stays in the `fetches` audit log next to the capture that answered — a dead live page is a finding, not an obstacle, and the next post-freshness fetch tries live first again, so a page that comes back to life replaces its capture on its own. The fallback also never **downgrades**: when the cache already holds evidence at least as new (a live fetch from after the archive's newest capture — a page cached in August whose site dies in September — or that very capture itself), the capture is reported and the stored row kept, so a quote already cited against it keeps verifying and a permanently dead page never re-downloads its own byte-identical capture. A row's `http_status` is the capture fetch's own, real 200 (unlike an import's NULL — here a request was made and answered); a SQL consumer that means "live successes only" must also exclude `raw_url LIKE 'http%://web.archive.org/web/%'`, which is the row's whole archive marking.
+
+Two lookups the fallback keeps loudly apart, because only one of them may ever be recorded as "we looked and it is not there" (a `document_hunts` row): **"no archive capture"** is a genuine negative; **"archive lookup refused … not evidence of absence"** is archive.org's rate limiter protecting itself, and means retry later. Never turn a refusal into a hunt.
+
+The archive is also the only index of the dead web there is — a site that no longer exists cannot be crawled or searched. `web_archive.py list` enumerates what it holds, which is the research move when you suspect a dead site documented something but don't know its URLs:
+
+```bash
+uv run python scripts/web_scrape/web_archive.py list 'http://www.pinballmanufacturer.example/games.html'   # every capture of one URL
+uv run python scripts/web_scrape/web_archive.py list 'pinballmanufacturer.example/' --prefix               # every archived URL under a dead site
+```
+
+Feed a URL it lists back to `web_fetch.py` (the live fetch fails, the fallback stores the capture). Rows marked `revisit: content unchanged that day` are the archive's dedup records — evidence the content existed unchanged on that date, held at the capture they point back to.
+
+#### Fetching IPDB pages
+
+`ipdb.org` blocks the fetcher outright, so every IPDB page comes in through the archive fallback — no flags, just the URL. Four rules keep a partial IPDB fetch clean:
+
+- **One spelling: `https://www.ipdb.org/machine.cgi?id=<ipdb_id>`.** The archive holds the same machine page under several historical spellings (`?gid=N`, a bare `?N`, extra params like `&qh=checked`), and mixing them mints duplicate rows for one work. Construct machine-page URLs from the catalog's `ipdb_id`; never paste address spellings harvested out of forum links.
+- **Batch through one run** (`web_fetch.py --from-file`). Pacing toward archive.org is per-process state, so a subprocess per URL never rate-limits at all — and archive.org's index endpoint silently refuses fast requesters. One process paces itself correctly for any batch size.
+- **Verify with `have`, not exit codes.** `web_fetch.py` exits 0 on ordinary per-URL failures by design (one bad URL must not kill a batch); after a batch, run the same list through `web_cache.py have --from-file` to see what actually landed.
+- **"no archive capture" for `?id=N` is a verdict on that spelling, not the machine.** Before concluding the archive lacks a page, check an alternate spelling (`web_archive.py list 'ipdb.org/machine.cgi?gid=N'`). If the only capture lives under an alternate spelling, fetch that URL and note the duplicate-identity risk — `web_docs.py merge` folds the documents if the canonical spelling is ever fetched too.
+
 ### `have`: determine what documents the cache already holds
 
 The `have` command answers "which of these N sources am I already holding, and which still need fetching?":
@@ -188,7 +217,7 @@ showing 100 of 132 (--limit 0 for all; --ext/--host narrow better than truncatio
 
 ### Import: when fetching fails
 
-Some sources won't be fetched — `ipdb.org` answers HTTP 403 site-wide to the fetcher, others sit behind a login or a Cloudflare challenge — while a person with a browser gets the same document fine. `web_import.py` takes the file that person saved and files it as evidence like anything else: content-addressed blob, extracted text, FTS-indexed, quotable and citable. This is the minority path, not a routine alternative to fetching; any type the cache understands can come in this way. See `--help` for `--title`, `--date`, and `--force`.
+Some documents can't be fetched at all — a site behind a login or a Cloudflare challenge with no [archive capture](#dead-and-blocking-pages-the-archive-fallback), a paper scan that was never online — while a person with a browser (or a scanner) gets the same document fine. `web_import.py` takes the file that person saved and files it as evidence like anything else: content-addressed blob, extracted text, FTS-indexed, quotable and citable. This is the **last resort**, after the live fetch and the automatic archive fallback have both come up empty — never a routine alternative to fetching; any type the cache understands can come in this way. See `--help` for `--title`, `--date`, and `--force`.
 
 ```bash
 uv run python scripts/web_scrape/web_import.py flyer.jpg --url https://www.ipdb.org/images/4583/image-3.jpg --dry-run
@@ -496,7 +525,7 @@ sql/
   03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
 ```
 
-Two capture tables plus three FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)). The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank; the [document library](#document-library)'s metadata index (`docs_fts`) is a third bm25 space for the same reason. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. The [document library](#document-library)'s own tables (`documents`, `document_urls`, `document_ipdb_listings`, `document_classes`, `document_subjects`, `document_hunts`, the class vocabulary) live beside them in the same file. Blobs are content-addressed, so every distinct version of a document stays on disk.
+Two capture tables plus three FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)); a row stored through the [archive fallback](#dead-and-blocking-pages-the-archive-fallback) carries no flag — its provenance (the capture address, and so the capture date) is derived from `raw_url`, and the read paths print it. The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank; the [document library](#document-library)'s metadata index (`docs_fts`) is a third bm25 space for the same reason. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. The [document library](#document-library)'s own tables (`documents`, `document_urls`, `document_ipdb_listings`, `document_classes`, `document_subjects`, `document_hunts`, the class vocabulary) live beside them in the same file. Blobs are content-addressed, so every distinct version of a document stays on disk.
 
 ### Sync
 

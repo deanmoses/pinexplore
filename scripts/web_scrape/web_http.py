@@ -337,6 +337,12 @@ class Resp(NamedTuple):
     # because we never ask for a content encoding, so it counts the same bytes
     # we would have stored.
     declared_size: int | None = None
+    # The HTTP Content-Type charset, when the server sent one. ``text`` was
+    # already decoded with it; it rides along for the one consumer that must
+    # decode *again* — the archive client, whose ``id_`` replay can arrive
+    # content-encoded, so the first decode saw compressed bytes and the header
+    # is the only place a legacy page's charset may live.
+    header_charset: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -426,4 +432,6 @@ def http_get(url: str) -> Resp:
     # The handler decodes to text (HTML) or returns None for a binary type (a PDF),
     # whose bytes are stored verbatim and whose text the extractor fills in later.
     text = handler.decode(raw, header_charset)
-    return Resp(status, content_type, final_url, raw, text, None)
+    return Resp(
+        status, content_type, final_url, raw, text, None, header_charset=header_charset
+    )

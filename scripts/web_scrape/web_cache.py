@@ -1401,6 +1401,41 @@ def get_by_raw_url(
             con.close()
 
 
+# An archive-fallback row: keyed under the URL the session asked for, but its
+# bytes came from a Wayback capture whose address (and so its date) the fetcher
+# recorded in raw_url. Matching here is the whole provenance derivation — no
+# dedicated column — which is why the read paths must do it, not the reader.
+_ARCHIVE_RAW_URL = re.compile(
+    r"^https?://web\.archive\.org/web/(\d{8,14})(?:id_)?/", re.IGNORECASE
+)
+
+
+def archive_capture_timestamp(rec: PageRow) -> str | None:
+    """The Wayback timestamp (``yyyyMMddhhmmss``) a row was stored from, else None.
+
+    Full precision, for comparisons — the fetcher's downgrade guard must tell
+    "the very capture this row already holds" from a newer one, which a date
+    can't. Usually 14 digits; the archive accepts shorter, so a historical row
+    may carry fewer.
+    """
+    match = _ARCHIVE_RAW_URL.match(rec.get("raw_url") or "")
+    return match.group(1) if match else None
+
+
+def archive_capture_date(rec: PageRow) -> str | None:
+    """``YYYY-MM-DD`` of the Wayback capture a row was stored from, else None.
+
+    None means a live fetch (or an import). A date is provenance a reader must
+    see before quoting: the words are real evidence, but they are what the page
+    said on that date, not what it says today — the same reason ``rendered``
+    and ``imported`` print wherever a row is described.
+    """
+    ts = archive_capture_timestamp(rec)
+    if ts is None:
+        return None
+    return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+
+
 def captures_for_citation_ref(
     ref: str, con: sqlite3.Connection | None = None
 ) -> list[PageRow]:
@@ -3288,6 +3323,25 @@ def _link_ext(url: NormalizedUrl) -> str:
 def _resolution_base(rec: PageRow) -> str:
     """The address relative links in this row's blob resolve against."""
     raw_url = rec["raw_url"]
+    # An archive-fallback row's raw_url is the Wayback capture address; the
+    # base its links resolve against is the origin URL nested inside it. The
+    # capture's spelling may disagree with the row key on scheme alone (CDX
+    # returns http/https interchangeably for one page), so that comparison
+    # ignores the scheme — everything else must still match, or this is a
+    # redirect's raw_url and tells us nothing about the base.
+    if raw_url:
+        match = _ARCHIVE_RAW_URL.match(raw_url)
+        if match:
+            nested = raw_url[match.end() :]
+            try:
+                if nested.lower().startswith(("http://", "https://")) and (
+                    normalize_url(nested).partition("://")[2]
+                    == rec["url"].partition("://")[2]
+                ):
+                    return nested
+            except ValueError:
+                pass
+            return rec["url"]
     # Prefer raw_url, which keeps the trailing slash normalization strips:
     # `manual.pdf` means something different under /support/ than under
     # /support. Absolute only — a scheme-less base would resolve a
@@ -3483,6 +3537,15 @@ def _row_facts(rec: PageRow) -> list[str]:
     that are pictures, and nothing else can act on "read the blob" anyway.
     """
     facts: list[str] = []
+    # Archive provenance leads: everything below describes the document, and a
+    # reader must weigh it knowing these are a dated capture's words, not
+    # today's live page.
+    capture_date = archive_capture_date(rec)
+    if capture_date is not None:
+        facts.append(
+            f"stored from a Wayback capture dated {capture_date}, not the "
+            f"live page (which was unreachable when fetched)"
+        )
     is_pdf = rec["content_type"] == "application/pdf"
     line = _render_handoff_line(rec)
     blob_shown = line is not None
@@ -4193,6 +4256,9 @@ def _cmd_have(urls: list[str], from_file: str | None) -> int:
             facts.append("rendered")
         if page["imported"]:
             facts.append("imported")
+        capture_date = archive_capture_date(page)
+        if capture_date is not None:
+            facts.append(f"archive capture {capture_date}")
         print(f"cached   {h['asked']}  {'  '.join(facts)}")
         if h["stored_url"]:
             # Say so rather than quietly reporting a hit under another address:
@@ -4309,6 +4375,13 @@ def _cmd_get(url: str) -> int:
             print(f"{key}: {value}", file=sys.stderr)
     # Derived, so it follows the stored columns — and printed for every type,
     # since a full-record read withholds nothing.
+    capture_date = archive_capture_date(rec)
+    if capture_date is not None:
+        print(
+            f"archive_capture: {capture_date} (a Wayback capture, not the "
+            f"live page; derived from raw_url)",
+            file=sys.stderr,
+        )
     line = _blob_line(rec)
     if line is not None:
         print(line, file=sys.stderr)

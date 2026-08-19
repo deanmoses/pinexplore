@@ -97,6 +97,9 @@ ignore = [
 # The video transport downloads the caption URL yt-dlp extracted from YouTube —
 # an https URL of YouTube's own timedtext service, never user-supplied.
 "scripts/web_scrape/web_video.py" = ["S310"]
+# The archive client GETs one URL shape: the CDX endpoint constant (https)
+# plus urlencoded parameters — the scheme is fixed in this module.
+"scripts/web_scrape/web_archive.py" = ["S310"]
 
 [tool.ruff.lint.isort]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

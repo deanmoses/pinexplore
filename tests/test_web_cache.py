@@ -3138,3 +3138,88 @@ def test_cli_have_reads_urls_from_stdin(cache, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert f"cached   {url}" in captured.out
     assert "MISSING  https://a.com/absent" in captured.out
+
+
+# --------------------------------------------------------------------------- #
+# archive provenance (derived from raw_url — no dedicated column)
+# --------------------------------------------------------------------------- #
+
+
+def test_archive_capture_date_derives_from_the_capture_address(cache):
+    url = wc.normalize_url("https://www.ipdb.org/machine.cgi?id=125")
+    _seed(
+        cache,
+        url=url,
+        raw_url="https://web.archive.org/web/20141006120618id_/"
+        "http://www.ipdb.org/machine.cgi?id=125",
+        text="Project Date: October 11, 1982",
+    )
+    assert wc.archive_capture_date(_page(cache, url)) == "2014-10-06"
+
+
+def test_archive_capture_date_none_for_live_and_import_rows(cache):
+    live = _seed_html(cache, "https://a.com/live", "alive and well " * 10)
+    assert wc.archive_capture_date(_page(cache, live)) is None
+    # An archive.org URL elsewhere in the address must not read as provenance.
+    other = wc.normalize_url("https://blog.com/about-web.archive.org")
+    _seed(cache, url=other, text="an essay about the wayback machine")
+    assert wc.archive_capture_date(_page(cache, other)) is None
+
+
+def test_archive_capture_date_reads_the_bare_form_too(cache):
+    # The historical harvester rows used /web/<ts>/ with no id_; their dates
+    # derive the same way.
+    url = wc.normalize_url("https://deadsite.com/page")
+    _seed(
+        cache,
+        url=url,
+        raw_url="http://web.archive.org/web/20020606080443/http://deadsite.com/page",
+        text="old but real",
+    )
+    assert wc.archive_capture_date(_page(cache, url)) == "2002-06-06"
+
+
+def test_cli_have_and_quote_surface_the_capture_date(cache, capsys):
+    url = wc.normalize_url("https://www.ipdb.org/machine.cgi?id=125")
+    _seed(
+        cache,
+        url=url,
+        raw_url=f"https://web.archive.org/web/20141006120618id_/{url}",
+        text="## Details\n\nProject Date: October 11, 1982.",
+        content_type="text/html",
+    )
+    assert wc.main(["have", url]) == 0
+    assert "archive capture 2014-10-06" in capsys.readouterr().out
+    assert wc.main(["quote", url, "Project Date"]) == 0
+    err = capsys.readouterr().err
+    assert "Wayback capture dated 2014-10-06" in err
+
+
+def test_archived_links_resolve_against_the_nested_origin_url(cache):
+    # An archive row's raw_url is the Wayback capture address; the base its
+    # relative links resolve against is the origin URL nested inside it —
+    # trailing slash intact, which normalization strips from the row key.
+    # (The capture's original may spell the scheme differently; still the base.)
+    url = "https://dead.example/support/"
+    _seed_html(
+        cache,
+        url,
+        "<html><body><a href='manual.pdf'>Manual</a></body></html>",
+        raw_url="https://web.archive.org/web/20141006120618id_/"
+        "http://dead.example/support/",
+    )
+    found = wc.links(url, con=cache)
+    assert [link["url"] for link in found] == ["http://dead.example/support/manual.pdf"]
+
+
+def test_archive_capture_timestamp_keeps_full_precision(cache):
+    # The fetcher's downgrade guard compares timestamps, not dates: it must
+    # tell "the very capture this row holds" from a newer same-day one.
+    url = wc.normalize_url("https://deadsite.com/full-ts")
+    _seed_html(
+        cache,
+        url,
+        "<p>x</p>",
+        raw_url=f"https://web.archive.org/web/20141006120618id_/{url}",
+    )
+    assert wc.archive_capture_timestamp(_page(cache, url)) == "20141006120618"
