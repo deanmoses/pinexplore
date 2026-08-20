@@ -21,6 +21,32 @@ FROM models AS m
 WHERE m.ipdb_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM ipdb_machines AS i WHERE i.IpdbId = m.ipdb_id);
 
+-- Machines the newest IPDB snapshot dropped that an older one still has, so
+-- `ipdb_machines` is serving a stale observation of them (see 02_raw).
+--
+-- Each one is either a crawl miss or an upstream deletion, and only loading the
+-- URL tells them apart. The count is meant to be worked down, not lived with:
+-- confirm the machine is still on ipdb.org and leave it carried forward, or
+-- confirm it is gone and file it in ref_ipdb_retracted. Left alone, stale rows
+-- accumulate silently and absence stops meaning anything.
+INSERT INTO _warnings
+SELECT 'ipdb_records_carried_forward', count(*)
+FROM ipdb_machines
+WHERE carried_forward;
+
+-- A retraction that the newest snapshot contradicts: IPDB is serving the record
+-- again, and ref_ipdb_retracted is now suppressing a live machine. Stale
+-- exceptions fail silently by construction -- the row simply vanishes from
+-- `ipdb_machines` -- so the contradiction has to be checked for.
+INSERT INTO _warnings
+SELECT 'ipdb_retraction_contradicted', count(*)
+FROM ref_ipdb_retracted AS r
+WHERE EXISTS (
+  SELECT 1 FROM ipdb_machines_snapshots AS s
+  WHERE s.IpdbId = r.ipdb_id
+    AND s.snapshot_utc = (SELECT max(snapshot_utc) FROM ipdb_machines_snapshots)
+);
+
 INSERT INTO _warnings
 SELECT 'models_missing_corporate_entity', count(*)
 FROM models m

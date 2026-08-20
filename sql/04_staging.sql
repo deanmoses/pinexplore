@@ -372,9 +372,21 @@ WITH
       (im.Theme IN (SELECT name FROM themes)) AS is_canonical,
       CASE
         WHEN im.Theme IN (SELECT name FROM themes) THEN im.Theme
-        -- Replace mojibake (U+FFFD) separator with dash, then comma with dash
+        -- Normalise the three separators IPDB uses interchangeably to " - ":
+        -- en-dash, mojibake (U+FFFD), then comma.
+        --
+        -- The en-dash and the U+FFFD are the same separator seen through two
+        -- scrapes. Until the 2026-04 snapshot the scrape mangled every
+        -- non-ASCII character, so this arrived as U+FFFD; that snapshot fixed
+        -- the encoding and it now arrives as a real en-dash, mixed freely with
+        -- hyphens inside one string ("Activities – Family - Sports"). Both
+        -- forms are handled because both are still present: a record carried
+        -- forward from an older snapshot predates the encoding fix.
         ELSE replace(
-          replace(im.Theme, ' ' || chr(65533) || ' ', ' - '),
+          replace(
+            replace(im.Theme, ' ' || chr(8211) || ' ', ' - '),
+            ' ' || chr(65533) || ' ', ' - '
+          ),
           ', ', ' - '
         )
       END AS theme_clean

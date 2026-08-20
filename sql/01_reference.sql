@@ -187,6 +187,28 @@ SELECT * FROM (VALUES
 ) AS t(feature, reason);
 
 ------------------------------------------------------------
+-- Retracted IPDB listings
+------------------------------------------------------------
+
+-- IPDB records confirmed deleted upstream, which 02_raw drops from the merged
+-- `ipdb_machines` even though an older snapshot still carries them.
+--
+-- This list exists because a record's absence from the newest snapshot is
+-- ambiguous. When the 2026-04 scrape dropped six IDs, five were still live on
+-- ipdb.org (the crawl simply missed them, 2048/2049/2050 consecutively) and one
+-- was a real deletion. The merge therefore carries every dropped record forward
+-- by default and only forgets a record listed here -- so resurrecting a listing
+-- IPDB deliberately killed takes a deliberate edit, not a silent side effect.
+--
+-- Only add a row after loading the URL and confirming the machine is gone: a
+-- deleted record renders IPDB's bare page chrome with no machine in it, exactly
+-- as a nonexistent id like 99999 does.
+CREATE OR REPLACE VIEW ref_ipdb_retracted AS
+SELECT * FROM (VALUES
+  (3239, DATE '2026-04-11', 'IPDB deleted this listing, having announced the deletion in the record itself: "Sixty-Two Baseball" was a longhand-year artifact ("1962 Baseball") mistaken for a title, re-designated Not A Pinball pending removal. The real machine is Midway 1962 Deluxe Baseball, IPDB 656.', 'https://www.ipdb.org/machine.cgi?id=3239')
+) AS t(ipdb_id, first_absent_on, reason, evidence_url);
+
+------------------------------------------------------------
 -- Quality/tag cross-reference mappings
 ------------------------------------------------------------
 

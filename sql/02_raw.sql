@@ -135,13 +135,59 @@ SELECT
   images
 FROM read_json_auto(getvariable('ingest_base') || '/opdb_export_machines.json');
 
--- IPDB (Internet Pinball Database) export — xantari/Ipdb.Database scrape
-CREATE OR REPLACE TABLE ipdb_machines AS
-SELECT d.*
+-- IPDB (Internet Pinball Database) export — xantari/Ipdb.Database scrape.
+--
+-- The scrape ships as periodic full snapshots, kept side by side rather than
+-- overwritten: each one is a dated observation of IPDB, and holding two lets
+-- the build see what moved between them.
+--
+-- Snapshots are listed explicitly rather than globbed. A glob cannot be
+-- expanded over HTTP, which --remote needs (ingest_base is an R2 URL there),
+-- and an explicit list also stops a stray file from silently joining the union.
+-- Adding a snapshot is a deliberate edit here, and both files must be in R2
+-- (`make push`) or a fresh checkout won't reproduce the build.
+--
+-- `union_by_name` matters because these records are sparse: 36 distinct keys
+-- across the file, only 5 of them on every record, so two snapshots need not
+-- agree on the column set and a future one may add or drop keys.
+CREATE OR REPLACE TABLE ipdb_machines_snapshots AS
+SELECT
+  -- The snapshot's own timestamp, from the file's header rather than its name,
+  -- so the date is the scrape's claim about itself.
+  CAST(LastRefreshDateUtc AS TIMESTAMP) AS snapshot_utc,
+  d.*
 FROM (
-  SELECT unnest("Data") AS d
-  FROM read_json_auto(getvariable('ingest_base') || '/ipdb_xantari.json', (maximum_object_size = 67108864))
+  SELECT LastRefreshDateUtc, unnest("Data") AS d
+  FROM read_json_auto(
+    [
+      getvariable('ingest_base') || '/ipdb_xantari.json',
+      getvariable('ingest_base') || '/ipdb_xantari_2026_08_19.json'
+    ],
+    (maximum_object_size = 67108864),
+    (union_by_name = true)
+  )
 );
+
+-- One row per machine: the newest snapshot that observed it wins, whole.
+--
+-- The merge is record-level, never field-level. A snapshot is a single atomic
+-- observation, so a row that mixed fields across snapshots would describe a
+-- record that never existed upstream and could not be cited as evidence. Where
+-- both snapshots have a record, the newer one replaces it entirely.
+--
+-- An older snapshot therefore contributes exactly one thing: whole records the
+-- newest scrape missed. Those are flagged rather than blended in, because a
+-- carried-forward row is a stale observation -- it predates the encoding fix
+-- that landed between the 2025-02 and 2026-04 snapshots, so it can still hold
+-- the U+FFFD mojibake the fresh rows no longer have, and gap analysis should
+-- not read it as what IPDB says today.
+CREATE OR REPLACE TABLE ipdb_machines AS
+SELECT
+  s.*,
+  s.snapshot_utc < (SELECT max(snapshot_utc) FROM ipdb_machines_snapshots) AS carried_forward
+FROM ipdb_machines_snapshots AS s
+WHERE NOT EXISTS (SELECT 1 FROM ref_ipdb_retracted AS r WHERE r.ipdb_id = s.IpdbId)
+QUALIFY row_number() OVER (PARTITION BY s.IpdbId ORDER BY s.snapshot_utc DESC) = 1;
 
 -- Pinball glossaries
 CREATE OR REPLACE TABLE ipdb_glossary AS
