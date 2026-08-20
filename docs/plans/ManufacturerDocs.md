@@ -70,8 +70,6 @@ What the matrix establishes:
 
 This does not touch the metadata half of the plan, which is the larger win and is fully unblocked: the [trove seed](#seed-and-backfill-sequence) reads `explore.duckdb`, never the network. Knowing a document exists remains most of the battle, and a seeded-but-unacquired document is a first-class row here by design.
 
-Two things remain legitimate. A **human-driven browser session** picking up a specific document during research is ordinary use, and stays available as a one-off — it is how the sample PDF above was read. And **asking IPDB directly** for bulk access or a dump is the only route that makes the trove durably available rather than perpetually contested; it costs one email and should be tried before any engineering. Everything else routes to [non-IPDB sources](#fetching-un-acquired-docs-in-bulk), which [prefer archive copies](#prefer-archive-copies) already wanted for independent reasons.
-
 ## Each doc should exist exactly once
 
 Each distinct, unique doc needs to exist exactly once in our system. When citing a document, we should be able to choose from among all the URLs that link to that doc. In the document library, Pokemon LE and Premium link to the same copy of `Pokemon_LE_Pre_web.pdf`.
