@@ -548,9 +548,9 @@ CREATE TABLE IF NOT EXISTS documents (
   updated_at    TEXT NOT NULL
 );
 
--- Class vocabulary, seeded from pinexplore's classification reference (the
--- detection patterns stay there; they read IPDB naming habits). One row per
--- parent edge so a class may carry two parents without a schema change.
+-- Class vocabulary used by imported IPDB classifications and later judgments.
+-- One row per parent edge so a class may carry two parents without a schema
+-- change.
 CREATE TABLE IF NOT EXISTS document_class_vocab (
   document_class  TEXT PRIMARY KEY
 );
@@ -803,9 +803,9 @@ def ensure_document_for_url(
     """Return the id of the document owning ``url``, minting one if none does.
 
     One URL, one document: ``document_urls.url`` is the primary key, so a URL
-    can never mark two documents acquired. A second registrar — the trove
-    seed, a refetch — therefore attaches to whatever document already owns
-    the URL, and the supplied ``title``/``role`` apply only when the URL is
+    can never mark two documents acquired. A second registrar therefore
+    attaches to whatever document already owns the URL, and the supplied
+    ``title``/``role`` apply only when the URL is
     new. Does not commit; runs inside the caller's transaction so a page
     write and its registration land or fail together.
     """
@@ -853,7 +853,7 @@ def _backfill_documents(con: sqlite3.Connection) -> int:
 # Document metadata writes (the registration library — web_docs.py's engine)
 #
 # None of these commit: a CLI command or script commits once at the end, so a
-# multi-statement operation (a merge, a seed batch) lands or fails whole.
+# multi-statement operation (a merge, a registration batch) lands or fails whole.
 # Anything that changes what the metadata FTS will derive from bumps the
 # document's updated_at through _touch_document.
 # --------------------------------------------------------------------------- #
@@ -1084,8 +1084,8 @@ def attach_document_subject(
         if ipdb_manufacturer is not None and merged["ipdb_manufacturer"] is None:
             merged["ipdb_manufacturer"] = ipdb_manufacturer
         # An attachment that changed nothing writes nothing: updated_at means
-        # "metadata changed", and a seed rerun must not restamp every
-        # document it re-walks. A collapse always counts as a change (rows
+        # "metadata changed", and an unchanged update must not restamp the
+        # document. A collapse always counts as a change (rows
         # were deleted even if the keeper's fields kept their values).
         if len(rows) > 1 or merged != original:
             con.execute(
@@ -1579,8 +1579,8 @@ def captures_for_citation_ref(
 
     Resolves every document library row whose ``citation_ref`` is *ref* —
     the column is not unique, and enrichment legitimately stamps one ref onto
-    several rows when IPDB seeds one work as several documents (a flyer's
-    front and back) that a merge has not yet folded — then tries each
+    several rows when one imported IPDB work exists as several documents (a
+    flyer's front and back) that a merge has not yet folded — then tries each
     document's URLs: under their own normalized form first, then as the
     ``raw_url`` of a fetch that redirected, the shape every archive.org
     download URL takes when it lands on a datanode host. Captures return in

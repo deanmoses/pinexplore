@@ -1,6 +1,6 @@
-"""Check `ref_document_class_pattern`'s needles against its patterns.
+"""Check `ipdb_ref.document_class_pattern`'s needles against its patterns.
 
-`ipdb_file_class_matches` pairs a filename with a pattern only when one of that
+`ipdb_stg.file_class_matches` pairs a filename with a pattern only when one of that
 pattern's `required_any` literals appears in the name, then runs the real regex
 on what survives. That makes `required_any` a necessary condition, and an
 under-narrow one silently drops matches: the build stays green and the class
@@ -25,18 +25,20 @@ from pathlib import Path
 import duckdb
 import pytest
 
-PATTERN_VIEW = "ref_document_class_pattern"
-REFERENCE_SQL = Path(__file__).resolve().parents[1] / "sql" / "01_reference.sql"
+PATTERN_VIEW = "ipdb_ref.document_class_pattern"
+REFERENCE_SQL = Path(__file__).resolve().parents[1] / "sql" / "05_reference.sql"
 
 
 def _load_patterns() -> list[tuple[str, str, list[str]]]:
     """Return (document_class, pattern, required_any) straight from the SQL.
 
     The view is a bare VALUES list with no table dependencies, so it can be
-    created in an empty in-memory database. Only that one statement is run —
-    its neighbours in the file are not all self-contained.
+    created in an empty in-memory database given its schema. Only that one
+    statement is run — its neighbours in the file are not all self-contained,
+    and `01_schemas.sql` (which normally creates the schema) is not read here.
     """
     con = duckdb.connect()
+    con.execute("CREATE SCHEMA IF NOT EXISTS ipdb_ref")
     statements = con.extract_statements(REFERENCE_SQL.read_text(encoding="utf-8"))
     for statement in statements:
         if PATTERN_VIEW in statement.query:
@@ -45,7 +47,7 @@ def _load_patterns() -> list[tuple[str, str, list[str]]]:
     else:  # pragma: no cover - only reachable if the view is renamed
         pytest.fail(f"{PATTERN_VIEW} not found in {REFERENCE_SQL}")
     return con.execute(
-        "SELECT document_class, pattern, required_any FROM ref_document_class_pattern"
+        "SELECT document_class, pattern, required_any FROM ipdb_ref.document_class_pattern"
     ).fetchall()
 
 

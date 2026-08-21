@@ -1,55 +1,55 @@
 # DuckDB Explore Database
 
-The best way to explore the pindata catalog is via DuckDB.
+A read-only DuckDB database over dumps from external sources: IPDB, OPDB, Fandom, this project's web cache system, pinball glossaries.
 
-The project contains a read-only DuckDB database for validating pindata catalog data, comparing it against
-external sources (OPDB, IPDB, Fandom), and finding gaps.
-
-DuckDB is purely an audit and exploration tool; pindata is the source of truth.
+It holds no Flipcommons catalog data and reads none. Comparing this external data against the Flipcommons database is reconciliation, which is the job of Flippatch's external data sources layer.
 
 ## Using it
+
+Query it via python or the DuckDB CLI:
+
+```python
+import duckdb
+con = duckdb.connect("explore.duckdb", read_only=True)
+con.execute("FROM ipdb.models LIMIT 5").show()
+```
+
+Building it:
 
 ```bash
 make explore   # rebuild from SQL layers
 ```
 
-Query via the Python `duckdb` package (installed by uv):
-
-```python
-import duckdb
-con = duckdb.connect("explore.duckdb", read_only=True)
-con.execute("FROM machines LIMIT 5").show()
-```
-
-**Do NOT use MotherDuck or the DuckDB CLI.** The Python `duckdb` package is the only
-required dependency. AI agents should query through Python, not the CLI.
-
-The database is a build artifact (gitignored). Rebuild whenever the pindata catalog
-or source dumps change. The build **fails** if integrity checks don't pass —
-query `SELECT * FROM _violations` for details.
+The database is a build artifact (gitignored). Rebuild whenever the source dumps change. The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and the rows survive the abort, so a failed build can also be queried afterwards.
 
 ## SQL layers
 
-Files in `sql/` load in numeric order:
+Files in `sql/`. Load in numeric order.
 
-| File                    | Purpose                                              |
-| ----------------------- | ---------------------------------------------------- |
-| `01_reference.sql`      | Hand-maintained reference tables, macros, exceptions |
-| `02_raw.sql`            | Turn pindata & external JSON into tables             |
-| `03_raw_web.sql`        | Web evidence cache → raw source tables (local-only)  |
-| `04_staging.sql`        | Per-source normalization (no cross-source joins)     |
-| `05_error_checks.sql`   | Integrity checks. Hard violations abort the build    |
-| `06_warning_checks.sql` | Soft checks that warn but don't abort                |
-| `07_compare.sql`        | Cross-source comparison: do sources agree?           |
-| `08_gaps.sql`           | Gap analysis: what's missing from pindata?           |
-| `09_quality.sql`        | Slug quality, media audit, backfill proposals        |
-| `10_popularity.sql`     | Title popularity composite scoring                   |
-| `11_history.sql`        | Industry history: decade-level trends                |
-| `12_documents.sql`      | IPDB trove classified: documents, patents, articles  |
-| `90_print_warnings.sql` | Print accumulated warnings (always runs last)        |
+## Schemas
 
-The web cache layer (`03_raw_web.sql`) is local-only and skipped when its SQLite is
-absent — see [WebCache.md](WebCache.md).
+`main` is deliberately empty; every relation lives in a schema that says which layer it belongs to. Per external source:
+
+| schema         | what it holds                                                           | read it? |
+| -------------- | ----------------------------------------------------------------------- | -------- |
+| `<source>_raw` | reads of source **files**. If the `FROM` names a relation, it isn't raw | internal |
+| `<source>_stg` | parsing, merging and correcting the dump                                | internal |
+| `<source>_ref` | hand-curated lookups and exception lists                                | internal |
+| `<source>`     | the published mart — that source, in our vocabulary                     | **yes**  |
+
+Other schemas:
+
+- `web_cache`: the scrape cache, materialized
+- `ingest`: one row per ingested artifact, any source
+- `glossary`: the three pinball glossaries and their comparison
+- `checks`: the build's own internal verdicts
+
+## Related scripts
+
+- `scripts/rebuild_explore.py` — build `explore.duckdb` from the SQL layers
+- `scripts/cloud_store/{pull,push}_ingest_sources.py` — sync ingest sources with R2
+- `scripts/web_scrape/web_fetch.py` + `web_cache.py` — fetch and query the web evidence cache (see [WebCache.md](WebCache.md))
+- `scripts/glossary/parse_*_glossary.py` — parse saved glossary HTML dumps into JSON
 
 ## Remote data (Cloudflare R2)
 
@@ -60,16 +60,12 @@ make pull   # download R2 → local ingest_sources/
 make push   # upload local ingest_sources/ → R2 (requires credentials)
 ```
 
+AI sessions are NOT allowed to do this; these are human-only operations.
+
 ### Rebuilding from R2
 
 ```bash
 uv run python scripts/rebuild_explore.py --remote   # reads JSON from R2 instead of local files
 ```
 
-## Related scripts
-
-- `scripts/rebuild_explore.py` — build `explore.duckdb` from the SQL layers
-- `scripts/cloud_store/{pull,push}_ingest_sources.py` — sync ingest sources with R2
-- `scripts/web_scrape/web_fetch.py` + `web_cache.py` — fetch and query the web evidence cache (see [WebCache.md](WebCache.md))
-- `scripts/glossary/parse_*_glossary.py` — parse saved glossary HTML dumps into JSON
-- `scripts/apply_descriptions.py` — apply curated manufacturer descriptions to the pindata catalog
+AI sessions are NOT allowed to do this; these are human-only operations.

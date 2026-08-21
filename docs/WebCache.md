@@ -470,12 +470,12 @@ The cache's structured index of the documents themselves — the _works_, distin
 
 Three grains: a **document** is the work (title, publisher, classes, subjects, kind-specific identity like a patent number); a **document URL** is an address the work lives at, fetched or not, with a role (`reference` = its own canonical address, `catalog` = a third-party index holding a copy such as IPDB, `archive` = a preserved snapshot); a **capture** is the existing `pages` row. Every page belongs to exactly one document, and a document can exist with no capture at all — the un-acquired trove, findable by metadata before a byte is fetched.
 
-- **Classification is a guess with provenance, never a verdict.** Each class judgment records who made it (`ipdb_pattern` from the seed, `manual`, `ai`), and the vocabulary FK makes a misspelled class fail loudly.
+- **Classification is a guess with provenance, never a verdict.** Each class judgment records who made it (`ipdb_pattern` for imported IPDB classifications, `manual`, `ai`), and the vocabulary FK makes a misspelled class fail loudly.
 - **Subjects attach at the most granular true level** — `model` or `corporate_entity` rows, several per document where the work covers several models. A subject carries a resolved Flipcommons PK plus a searchable `label` snapshot, and/or its IPDB provenance ids.
 - **One URL, one document.** Merging duplicates (`web_docs.py merge`) is a deliberate act that moves URLs to the survivor and reports any metadata it declined to overwrite.
 - **Negative results are their own records.** A URL that _is_ the document's but couldn't be reached (IPDB's 403) is a document URL plus its failed fetches; "we looked and it isn't there" is a `hunt` — dated, and shown in search output.
 
-`web_seed_ipdb.py` seeds the trove from pinexplore's classified IPDB dump and `web_enrich_flipcommons.py` resolves subject PKs and labels against the Flipcommons dev DB by IPDB id and fills each document's `citation_ref` (e.g. `williams:some-manual-slug`) by URL join; both are idempotent, re-run to widen the subset or pick up new resolutions. Fetching a new document can annotate it in the same run: `web_fetch.py <url> --doc-class manual --subject-scope model --subject-pk 42 --subject-label "Yukon Yeti"` — thin sugar over the same library `web_docs.py` uses. The annotation lands whether or not the fetch did: a URL nothing was captured from is registered as a document the library holds but hasn't acquired, so a judgment about what the work is survives a 404, a dead host, or a content type we don't read. An address the fetcher itself refuses is refused here too.
+`web_enrich_flipcommons.py` resolves subject PKs and labels against the Flipcommons dev DB by IPDB id and fills each document's `citation_ref` (e.g. `williams:some-manual-slug`) by URL join; it is idempotent and can be re-run to pick up new resolutions. Fetching a new document can annotate it in the same run: `web_fetch.py <url> --doc-class manual --subject-scope model --subject-pk 42 --subject-label "Yukon Yeti"` — thin sugar over the same library `web_docs.py` uses. The annotation lands whether or not the fetch did: a URL nothing was captured from is registered as a document the library holds but hasn't acquired, so a judgment about what the work is survives a 404, a dead host, or a content type we don't read. An address the fetcher itself refuses is refused here too.
 
 ## Using from Python
 
@@ -495,7 +495,7 @@ The CLI prints; functions return structured data. The OCR tier rides that data r
 
 ## Architecture
 
-The **SQLite database is the system-of-record**; `make explore` materializes it into the `web_pages` / `web_fetches` DuckDB tables (via `03_raw_web.sql`) so web evidence can be joined against the IPDB/OPDB/pindata tables.
+The **SQLite database is the system-of-record**; `make explore` materializes it into the `web_cache.pages` / `web_cache.fetches` DuckDB tables (via `03_raw_web.sql`) so web evidence can be joined against the IPDB and OPDB marts.
 
 ```text
 ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
@@ -520,11 +520,10 @@ scripts/web_scrape/
   web_import.py              CLI: file a hand-obtained file as evidence
   web_docs.py                CLI: document metadata (show/register/set/classify/
                              subject/hunt/merge/classes/reindex)
-  web_seed_ipdb.py           idempotent seed: the classified IPDB trove
   web_enrich_flipcommons.py  re-runnable: subject PKs, labels, citation refs
 
 sql/
-  03_raw_web.sql             ATTACHes the sqlite, materializes web_pages/web_fetches
+  03_raw_web.sql             ATTACHes the sqlite, materializes web_cache.pages/.fetches
 ```
 
 Two capture tables plus three FTS indexes (schema and invariants documented in [`web_cache.py`](../scripts/web_scrape/web_cache.py)): **`pages`** is current state per normalized URL — the extracted `title`/`text`/`last_updated`, the machine-read `ocr_text` tier, plus provenance flags `rendered` (see [JS-rendered pages](#javascript-rendered-pages)), `text_source` (see [Weighing a quote](#weighing-a-quote-text_source)) and `imported` (see [Import](#import-when-fetching-fails)); a row stored through the [archive fallback](#dead-and-blocking-pages-the-archive-fallback) carries no flag — its provenance (the capture address, and so the capture date) is derived from `raw_url`, and the read paths print it. The OCR tier has its own FTS table (`ocr_fts`) rather than a column on `pages_fts`, so each tier ranks in its own bm25 space and OCR'ing a document can never depress its text-tier rank; the [document library](#document-library)'s metadata index (`docs_fts`) is a third bm25 space for the same reason. **`fetches`** is the append-only audit log: one row per fetch, with the `search_query` that drove it, the `content_sha` it saw, and a `changed` flag. The [document library](#document-library)'s own tables (`documents`, `document_urls`, `document_ipdb_listings`, `document_classes`, `document_subjects`, `document_hunts`, the class vocabulary) live beside them in the same file. Blobs are content-addressed, so every distinct version of a document stays on disk.

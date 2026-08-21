@@ -2,8 +2,8 @@
 """Document metadata CLI: register, classify, attach subjects, hunt, merge.
 
 Every command is a thin wrapper over the shared functions in ``web_cache.py``
-— the same write path the fetcher's registration and the seed/enrichment
-scripts use — so there is exactly one metadata write path. A ``<doc>``
+— the same write path the fetcher's registration and enrichment scripts use —
+so there is exactly one metadata write path. A ``<doc>``
 argument is a document id or any URL the document owns.
 """
 
@@ -193,7 +193,7 @@ def _cmd_classes(con: sqlite3.Connection, args: argparse.Namespace) -> int:
         "GROUP BY 1 ORDER BY docs DESC, v.document_class"
     ).fetchall()
     if not rows:
-        print("vocabulary is empty (the trove seed loads it)", file=sys.stderr)
+        print("document class vocabulary is empty", file=sys.stderr)
         return 1
     width = max(len(r["document_class"]) for r in rows)
     for r in rows:
@@ -255,8 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         "--source",
         choices=["manual", "ai"],
         default="manual",
-        help="who is making this judgment (default %(default)s; the seed "
-        "writes ipdb_pattern)",
+        help="who is making this judgment (default %(default)s)",
     )
     p_classify.add_argument(
         "--remove", action="store_true", help="withdraw the judgment instead"

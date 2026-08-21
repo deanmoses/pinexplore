@@ -5,9 +5,11 @@ Reads the raw HTML blobs behind the web cache's ``machine.cgi?id=N`` pages,
 runs each through :func:`parse_ipdb.parse_model_page`, and writes one JSON
 object per model to ``ingest_sources/ipdb_archive/models.jsonl``.
 
-The consumer is a patch-authoring session in flippatch, which reads this file
-from DuckDB alongside the Flipcommons analytics layer — the same cross-repo
-reach `flippatch/scripts/analysis/evidence.sql` already makes into this cache:
+Two consumers read it, both through ``read_json_auto``. This repo's own build
+folds it in beside the xantari dump as ``ipdb_raw.archive_models`` (see
+``sql/02_raw.sql``), and patch-authoring sessions in flippatch read it from
+DuckDB alongside the Flipcommons analytics layer — the same cross-repo reach
+`flippatch/scripts/analysis/evidence.sql` already makes into this cache:
 
     SELECT * FROM read_json_auto(
       '../pinexplore/ingest_sources/ipdb_archive/models.jsonl', sample_size = -1);

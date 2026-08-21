@@ -1,7 +1,7 @@
 """Tests for rebuild_explore's empty-schema stand-ins for the web cache tables.
 
 ``03_raw_web.sql`` is skipped in ``--remote`` mode and on a checkout with no
-local cache, so the build creates empty ``web_pages`` / ``web_fetches`` instead.
+local cache, so the build creates empty ``web_cache.pages`` / ``.fetches`` instead.
 Those stubs are a hand-written copy of the SQLite schema, which means they drift
 silently: a column added to ``web_cache._SCHEMA`` is simply absent in those build
 modes, and a query over it fails only there. This compares the two directly.
@@ -43,6 +43,9 @@ def _sqlite_columns(table: str) -> list[str]:
 def _stub_columns(table: str) -> list[str]:
     con = duckdb.connect(":memory:")
     try:
+        # The real build creates the schemas in 01_schemas.sql, before the stub
+        # ever runs; here the stub is executed on its own.
+        con.execute("CREATE SCHEMA IF NOT EXISTS web_cache")
         con.execute(_load_rebuild_explore().WEB_STUB_SQL)
         return [r[0] for r in con.execute(f"DESCRIBE {table}").fetchall()]
     finally:
@@ -50,7 +53,8 @@ def _stub_columns(table: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("stub_table", "sqlite_table"), [("web_pages", "pages"), ("web_fetches", "fetches")]
+    ("stub_table", "sqlite_table"),
+    [("web_cache.pages", "pages"), ("web_cache.fetches", "fetches")],
 )
 def test_stub_schema_matches_the_sqlite_cache(stub_table, sqlite_table):
     # Same columns, same order: the populated path is `SELECT *` off the SQLite
@@ -60,8 +64,8 @@ def test_stub_schema_matches_the_sqlite_cache(stub_table, sqlite_table):
 
 def test_legacy_cache_is_migrated_before_it_is_attached(tmp_path, monkeypatch):
     # 03_raw_web.sql ATTACHes the cache READ_ONLY and materializes SELECT *, so a
-    # cache written before these columns existed produces web_pages/web_fetches
-    # that simply lack them — and the documented `WHERE text_source = 'ocr'`
+    # cache written before these columns existed produces web_cache.pages and
+    # .fetches that simply lack them — and the documented `WHERE text_source = 'ocr'`
     # query fails until some unrelated fetch happens to migrate the file. That's
     # the shape `make pull` hands you until a migrated cache is pushed.
     web_dir = tmp_path / "web"

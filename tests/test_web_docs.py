@@ -42,8 +42,8 @@ def test_attach_reconciles_on_pk_instead_of_duplicating(cache, doc):
     assert rows[0]["label"] == "Yukon Yeti (2024)"  # labels refresh
 
 
-def test_attach_pk_fills_the_ipdb_seeded_row(cache, doc):
-    # The seed asserts what IPDB asserts; enrichment later brings the PK.
+def test_attach_pk_fills_the_ipdb_provenance_row(cache, doc):
+    # The imported row carries IPDB's assertion; enrichment later brings the PK.
     web_cache.attach_document_subject(
         cache, doc, "model", ipdb_machine_id=1062, ipdb_machine_name="Gorgar"
     )

@@ -44,13 +44,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "web_scrape"))
 # there — the mode nobody runs locally. tests/test_rebuild_explore.py compares
 # the two column lists so the drift fails loudly instead.
 WEB_STUB_SQL = """
-CREATE OR REPLACE TABLE web_pages (
+CREATE OR REPLACE TABLE web_cache.pages (
   url VARCHAR, raw_url VARCHAR, content_sha VARCHAR, first_fetched_at VARCHAR,
   last_fetched_at VARCHAR, last_updated VARCHAR, title VARCHAR,
   http_status BIGINT, content_type VARCHAR, text VARCHAR, ocr_text VARCHAR,
   rendered BIGINT, text_source VARCHAR, imported BIGINT
 );
-CREATE OR REPLACE TABLE web_fetches (
+CREATE OR REPLACE TABLE web_cache.fetches (
   id BIGINT, url VARCHAR, fetched_at VARCHAR, search_query VARCHAR,
   http_status BIGINT, content_sha VARCHAR, changed BIGINT, rendered BIGINT,
   imported BIGINT
@@ -63,7 +63,7 @@ def migrate_web_cache() -> None:
 
     ``03_raw_web.sql`` ATTACHes the cache READ_ONLY and materializes ``SELECT *``,
     so a cache file written before a column existed doesn't surface that column
-    as NULL — it produces ``web_pages`` / ``web_fetches`` that simply lack it, and
+    as NULL — it produces ``web_cache.pages`` / ``.fetches`` that lack it, and
     a documented query over it fails until some unrelated fetch happens to
     migrate the file. That's the state ``make pull`` leaves behind whenever R2
     still holds an older cache, which is exactly when a build is run.
@@ -99,11 +99,15 @@ def _make_timeout_handler(
 
 
 def _print_violations(con: duckdb.DuckDBPyConnection) -> None:
-    """Print what `05_error_checks.sql` recorded before the build gave up.
+    """Print what the check layers recorded before the build gave up.
 
-    `_violations` is a temp table, so the abort message's advice to query it is
-    only actionable from inside this connection — which closes moments later.
-    Without this the operator gets a count and no idea which rows failed.
+    ``checks.violations`` is a real table and the rows committed before the
+    ``error()`` that aborted, so they are still there afterwards — reopen
+    ``explore.duckdb`` and query it. This prints them anyway, because the
+    operator who just watched a build fail should not have to.
+
+    Absent when the failure came before ``07_source_error_checks.sql`` created the
+    table, which is why the read is guarded.
     """
     limit = 50
     try:
@@ -111,13 +115,13 @@ def _print_violations(con: duckdb.DuckDBPyConnection) -> None:
         # without carrying every row over to report a number.
         rows = con.execute(
             "SELECT category, check_name, detail, count(*) OVER () AS total"
-            " FROM _violations"
+            " FROM checks.violations"
             " ORDER BY category, check_name, detail"
             " LIMIT ?",
             [limit],
         ).fetchall()
     except duckdb.Error:
-        return  # a failure anywhere but the error-check layer
+        return  # the build died before the checks table existed
     for category, check_name, detail, _ in rows:
         print(f"    {category}/{check_name}: {detail}", file=sys.stderr)
     if rows and rows[0][3] > limit:
@@ -179,15 +183,19 @@ def main() -> None:
 
     con = duckdb.connect(DB)
 
+    # Layers that need special handling are matched by SUFFIX, never by their full
+    # name: the numbers are a running order and get renumbered when a layer is
+    # inserted or dropped, and an exact-name test silently stops matching when that
+    # happens — the preamble below would quietly not be injected.
     for sql_path in sql_files:
         layer = sql_path.name
         layer_start = time.time()
 
-        # 03_raw_web.sql ATTACHes the local web-cache SQLite, which we can't do
+        # The raw_web layer ATTACHes the local web-cache SQLite, which we can't do
         # over R2 (--remote) or when the cache doesn't exist yet (fresh checkout).
-        # In those modes, create empty web_pages/web_fetches stubs instead of
+        # In those modes, create empty web_cache stubs instead of
         # skipping outright, so any later layer that joins them stays green.
-        if layer == "03_raw_web.sql":
+        if layer.endswith("_raw_web.sql"):
             skip_reason = None
             if args.remote:
                 skip_reason = "--remote: can't ATTACH sqlite over R2"
@@ -195,14 +203,14 @@ def main() -> None:
                 skip_reason = "no web cache at ingest_sources/web/cache.sqlite"
             if skip_reason:
                 con.execute(WEB_STUB_SQL)
-                print(f"  {layer} → empty web_pages/web_fetches ({skip_reason})")
+                print(f"  {layer} → empty web_cache tables ({skip_reason})")
                 continue
             # The ATTACH below is read-only and materializes SELECT *, so the
             # cache's schema has to be current *before* it is read.
             migrate_web_cache()
 
         sql = sql_path.read_text()
-        if layer == "02_raw.sql":
+        if layer.endswith("_raw.sql"):
             sql = raw_preamble + "\n" + sql
 
         # Set a per-layer timeout via alarm
@@ -213,12 +221,12 @@ def main() -> None:
 
         try:
             con.execute(sql)
-            # After executing, print any rows from _warnings for
+            # After executing, print any rows from checks.warnings for
             # the warnings layer, and check for errors.
             if layer.endswith("_print_warnings.sql"):
                 for row in con.execute(
                     "SELECT 'WARNING: ' || check_name || ' (' || cnt || ' rows)'"
-                    " FROM _warnings WHERE cnt > 0"
+                    " FROM checks.warnings WHERE cnt > 0"
                 ).fetchall():
                     print(f"    {row[0]}")
         except TimeoutError:

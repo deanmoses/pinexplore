@@ -40,8 +40,9 @@ Pinexplore is the analytics/audit layer of a four-repo pinball catalog system:
   then kept current by replaying data patches. Source of truth for the _live_
   catalog (seed + patches).
 
-Pinexplore consumes pindata's JSON export (plus external dumps); it never modifies
-the catalog. Its job is to surface corrections.
+Pinexplore reads the external dumps and nothing else — it holds no catalog data and
+never modifies the catalog. Its job is to get each source into a shape worth comparing;
+the comparison itself runs in flippatch, beside the live records.
 
 ### How a finding becomes a fix
 
@@ -70,7 +71,7 @@ Use the Python `duckdb` package to query `explore.duckdb`. Do **not** use the Du
 ```python
 import duckdb
 con = duckdb.connect("explore.duckdb", read_only=True)
-con.execute("FROM machines LIMIT 5").show()
+con.execute("FROM ipdb.models LIMIT 5").show()
 ```
 
 **Do NOT use MotherDuck or any MotherDuck MCP tools to query this database.** The explore database is a local file built from source data. MotherDuck is not used in this project.
@@ -105,35 +106,27 @@ ingest_sources/   External data dumps (gitignored, pulled from R2)
 explore.duckdb    Build artifact (gitignored)
 ```
 
+## Schemas
+
+Every relation lives in a schema naming the layer it belongs to, and `main` is deliberately empty — a build that leaves anything there fails. Per external source: `<source>_raw` (reads of source **files**; if the `FROM` names a relation it isn't raw), `<source>_stg` (parsing, merging, correcting the dump), `<source>_ref` (hand-curated lookups and exception lists), and bare `<source>` — the published mart, that source in our vocabulary. Plus `glossary`, `web_cache`, `ingest` (one row per ingested artifact) and `checks` (the build's own verdicts).
+
+**Only the unsuffixed mart is a contract.** Flippatch's comparison layer reads it and nothing beneath, which is what lets everything below be reshaped without breaking another repo. The direction is one-way: a mart may read staging, staging must never read a mart. An empty layer is not created — there is no `opdb_stg` and no `fandom` mart. IPDB's word for a machine is **model** everywhere past its raw layer; OPDB keeps `machines`, because an OPDB row can be a title or a model.
+
+`ipdb.models` stars its staging view and renames the fields it knows, so a field the dump gains upstream propagates automatically rather than being silently dropped — and then fails the build until it is named. See `sql/09_mart.sql`.
+
 ## SQL Layers
 
-Files in `sql/` load in numeric order during `make explore`:
+Files in `sql/` load in numeric order during `make explore`, and the numbering is the pipeline: schemas, the raw source reads, the ingest watermarks that sit straight on them, reference and macros, per-source staging, the source-dump checks, the published marts, and finally the structural checks over the finished database. Raw comes before reference so that a missing or malformed dump — the likeliest breakage — stops the build before four hundred lines of vocabulary are executed. The tail is numbered 80/90 rather than sequentially, so a layer inserted later lands in the body without renumbering the gate. Each file states its own purpose in its first line, which is where to look rather than here — a list repeated in a doc goes stale the first time a layer is added, renamed or dropped.
 
-| File                    | Purpose                                               |
-| ----------------------- | ----------------------------------------------------- |
-| `01_reference.sql`      | Hand-maintained reference tables, macros, exceptions  |
-| `02_raw.sql`            | Turn pindata & external JSON data sources into tables |
-| `03_raw_web.sql`        | Web evidence cache → raw source tables (local-only)   |
-| `04_staging.sql`        | Per-source normalization (no cross-source joins)      |
-| `05_error_checks.sql`   | Integrity checks. Hard violations abort the build     |
-| `06_warning_checks.sql` | Soft checks that warn but don't abort                 |
-| `07_compare.sql`        | Cross-source comparison: do sources agree?            |
-| `08_gaps.sql`           | Gap analysis: what's missing from pindata?            |
-| `09_quality.sql`        | Slug quality, media audit, backfill proposals         |
-| `10_popularity.sql`     | Title popularity composite scoring                    |
-| `11_history.sql`        | Industry history: decade-level trends                 |
-| `12_documents.sql`      | IPDB trove classified: documents, patents, articles   |
-| `90_print_warnings.sql` | Print accumulated warnings (always runs last)         |
-
-The build **fails** if integrity checks don't pass — query `SELECT * FROM _violations` for details.
+The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
 
 ## Web Evidence Cache
 
-`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. When a live fetch fails (a blocking host like `ipdb.org`, a dead site), it falls back to archive.org's newest capture automatically — the row keys on the URL you asked for, with the capture address in `raw_url` and the capture date surfaced by every read path; `scripts/web_scrape/web_archive.py list` enumerates what the archive holds for a dead URL or site prefix. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_pages` / `web_fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). `search` itself narrows in three scopes: a term ranks documents with a match count each, `--url` lists that document's matching sections with theirs, and `--section` (or `--pages`, a sheet range) shows the matches with surrounding words. It searches three tiers: `text` (the document's own words), `ocr` (machine-read PDF sheets and images via `web_pdfocr.py`; hits labelled `(ocr)` are read by rendering the sheet with `Read(<blob>, pages=N)`), and `metadata` — the **document library**, a structured index of the documents themselves (titles, classes, model/manufacturer subjects, every URL a work lives at), which covers thousands of known-but-unfetched documents from the IPDB trove: search shows held documents first, then a capped "not acquired" block with the URL(s) to go get each. Document metadata is edited with `scripts/web_scrape/web_docs.py` (register/classify/subject/hunt/merge/classes). See [WebCache.md](WebCache.md) for the full guide.
+`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. When a live fetch fails (a blocking host like `ipdb.org`, a dead site), it falls back to archive.org's newest capture automatically — the row keys on the URL you asked for, with the capture address in `raw_url` and the capture date surfaced by every read path; `scripts/web_scrape/web_archive.py list` enumerates what the archive holds for a dead URL or site prefix. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_cache.pages` / `web_cache.fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). `search` itself narrows in three scopes: a term ranks documents with a match count each, `--url` lists that document's matching sections with theirs, and `--section` (or `--pages`, a sheet range) shows the matches with surrounding words. It searches three tiers: `text` (the document's own words), `ocr` (machine-read PDF sheets and images via `web_pdfocr.py`; hits labelled `(ocr)` are read by rendering the sheet with `Read(<blob>, pages=N)`), and `metadata` — the **document library**, a structured index of the documents themselves (titles, classes, model/manufacturer subjects, every URL a work lives at), which covers thousands of known-but-unfetched documents from the IPDB trove: search shows held documents first, then a capped "not acquired" block with the URL(s) to go get each. Document metadata is edited with `scripts/web_scrape/web_docs.py` (register/classify/subject/hunt/merge/classes). See [WebCache.md](WebCache.md) for the full guide.
 
 ### IPDB machine pages as structured data
 
-Two scripts turn cached IPDB machine pages into fields. `scripts/web_scrape/parse_ipdb.py` is the reader — one pure function, `parse_model_page(html) -> IpdbModel`, over a page's raw HTML blob (not its extracted text), carrying the fields the xantari dump never had: `Project Date`, a `Production` status like `Never Produced`, `Concept by`, `Specialty`, `Easter Eggs`, `Serial Number Database`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page and writes `ingest_sources/ipdb_archive/models.jsonl`, one object per model. That file is for **flippatch**, which reads it from DuckDB alongside the Flipcommons analytics layer — so its shape answers to `read_json_auto` (fixed key set on every row, no dynamic-key objects) rather than to this repo. It is derived: re-run it after a fetch campaign and the diff is what the campaign found.
+Two scripts turn cached IPDB machine pages into fields. `scripts/web_scrape/parse_ipdb.py` is the reader — one pure function, `parse_model_page(html) -> IpdbModel`, over a page's raw HTML blob (not its extracted text), carrying the fields the xantari dump never had: `Project Date`, a `Production` status like `Never Produced`, `Concept by`, `Specialty`, `Easter Eggs`, `Serial Number Database`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page and writes `ingest_sources/ipdb_archive/models.jsonl`, one object per model. Two consumers read it through `read_json_auto`, which is why its shape answers to that function — fixed key set on every row, no dynamic-key objects, and `sample_size = -1` on every read: this repo's own build, where `ipdb_raw.archive_models` folds it in beside the xantari dump, and patch-authoring sessions in **flippatch**, which read it alongside the Flipcommons analytics layer. It is derived: re-run it after a fetch campaign and the diff is what the campaign found. Two of its fields are worth the trip on their own. `additional_details_date_kind` is a LABEL rather than a value — IPDB marks its Project Date and Date Of Manufacture rows separately and the xantari header line does not, so the dump carries the date without saying which kind it is. `Specialty` is the opposite, a field the dump has no column for at all: basic machine classification we have otherwise had to synthesise from weaker signals. `ipdb_ref.specialty` decodes IPDB's whole Specialty dropdown into catalog vocabulary and `ipdb.specialties` / `ipdb.model_specialties` publish the rules and the per-model assignments. Where a decode names vocabulary the catalog lacks, the target is spelled as IPDB's own words instead of as a slug, which is both the signal and the worklist.
 
 ## Remote Data (Cloudflare R2)
 

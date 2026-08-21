@@ -818,10 +818,9 @@ def _apply_document_metadata(
     refusals are per-URL warnings so one bad flag doesn't kill a batch.
 
     A URL we hold nothing for is annotated anyway, by registering it as a
-    document the library knows about but hasn't acquired — the state the trove
-    seed leaves its documents in. These flags are a judgment about what the work
-    *is*, and that stays true whether the fetch bounced off an unsupported
-    content type, a 404, or a dead host.
+    document the library knows about but hasn't acquired. These flags are a
+    judgment about what the work *is*, and that stays true whether the fetch
+    bounced off an unsupported content type, a 404, or a dead host.
     """
     if not (args.doc_class or args.subject_pk is not None):
         return

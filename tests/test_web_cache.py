@@ -248,8 +248,8 @@ def test_capture_for_citation_ref_resolves_direct_and_aliased_urls(cache):
 
 def test_capture_for_citation_ref_scans_every_document_carrying_the_ref(cache):
     # citation_ref is not unique: enrichment stamps it by URL join, and IPDB
-    # seeds one work as several documents (a flyer's front and back) until a
-    # merge folds them. The captured copy must win regardless of which
+    # imports can represent one work as several documents (a flyer's front and
+    # back) until a merge folds them. The captured copy must win regardless of which
     # document row carries it, in deterministic order — an arbitrary
     # fetchone() here read a cached document as missing.
     uncaptured = wc.ensure_document_for_url(

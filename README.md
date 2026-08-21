@@ -2,7 +2,7 @@
 
 This project is a tool for exploring and validating pinball catalog data.
 
-It builds a read-only DuckDB database from [Pindata](https://github.com/deanmoses/pindata) catalog records and external source dumps like OPDB and IPDB, then runs integrity checks, cross-source comparisons, and gap analysis.
+It builds a read-only DuckDB database from external source dumps like IPDB, OPDB and the Fandom wiki, parsing and normalizing each one and checking it for internal consistency. Comparing those sources against the live catalog happens in [flippatch](https://github.com/deanmoses/flippatch), next to the records being reconciled.
 
 It's meant as both an engine for helping clean this data as well as an ad-hoc analysis tool.
 
@@ -31,7 +31,7 @@ make all
 ```python
 import duckdb
 con = duckdb.connect("explore.duckdb", read_only=True)
-con.execute("FROM machines LIMIT 5").show()
+con.execute("FROM ipdb.models LIMIT 5").show()
 ```
 
 ... or (even easier) use a locally installed DuckDB CLI.
