@@ -79,7 +79,7 @@ import urllib.parse
 from bisect import bisect_right
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 if TYPE_CHECKING:
     # Type-only: the CLI imports argparse inside main(), so a library consumer
@@ -155,6 +155,122 @@ class SearchHit(TypedDict):
     subjects: list[str]
 
 
+# The document tables as Python shapes. Each mirrors its CREATE TABLE: a
+# NULLable column is `| None`, a NOT NULL one is not. SQLite hands rows back
+# untyped, so these are read as claims the schema enforces, not as claims
+# mypy verified — which is why they name the constraint they rest on.
+SubjectScope = Literal["model", "corporate_entity"]  # CHECK-constrained
+
+
+class DocumentUrlRow(TypedDict):
+    """A ``document_urls`` row, plus the capture state joined at read time."""
+
+    url: str
+    document_id: int
+    role: str | None
+    created_at: str
+    captured: bool  # from the pages join, not a column
+
+
+class DocumentClassRow(TypedDict):
+    """A ``document_classes`` row. ``source`` is free text (a CLI argument),
+    so it stays ``str`` — the vocabulary lives in document_class_vocab."""
+
+    document_id: int
+    document_class: str
+    source: str
+    created_at: str
+
+
+class DocumentSubjectRow(TypedDict):
+    """A ``document_subjects`` row — a subject's PK and IPDB identities."""
+
+    document_id: int
+    scope: SubjectScope
+    flipcommons_pk: int | None
+    label: str | None
+    ipdb_machine_id: int | None
+    ipdb_manufacturer_id: int | None
+    ipdb_machine_name: str | None
+    ipdb_manufacturer: str | None
+    created_at: str
+
+
+class DocumentIpdbListingRow(TypedDict):
+    """A ``document_ipdb_listings`` row — IPDB's listing facts verbatim."""
+
+    document_id: int
+    ipdb_id: int
+    file_url: str
+    ipdb_category: str
+    ipdb_name: str | None
+    container: str | None
+    machine_name: str | None
+    machine_manufacturer: str | None
+    ipdb_manufacturer_id: int | None
+    machine_mpu: str | None
+
+
+class DocumentHuntRow(TypedDict):
+    """A ``document_hunts`` row — a dated "looked there, not there"."""
+
+    document_id: int
+    tried: str
+    note: str | None
+    created_at: str
+
+
+class DocumentRecord(TypedDict):
+    """One document with all its children — ``document_record()``'s unit.
+
+    The scalar half is the ``documents`` row; a column added there must be
+    named here too, which is the point: an unnamed column fails the build
+    rather than reaching a reader as an untyped extra.
+    """
+
+    id: int
+    title: str | None
+    publisher: str | None
+    ipdb_machines_referencing: int | None
+    catalog_titles_referencing: int | None
+    catalog_systems_referencing: int | None
+    patent_jurisdiction: str | None
+    patent_number: str | None
+    article_publication: str | None
+    article_issue_date: str | None
+    article_pages: str | None
+    citation_ref: str | None
+    created_at: str
+    updated_at: str
+    urls: list[DocumentUrlRow]
+    classes: list[DocumentClassRow]
+    subjects: list[DocumentSubjectRow]
+    ipdb_listings: list[DocumentIpdbListingRow]
+    hunts: list[DocumentHuntRow]
+
+
+class MergeResult(TypedDict):
+    """What ``merge_documents`` refused to overwrite, by column name."""
+
+    dropped: dict[str, str | int]
+
+
+class DocumentDecoration(TypedDict):
+    """Which work a captured URL belongs to — a ``SearchHit``'s doc fields."""
+
+    document_id: int
+    classes: list[str]
+    subjects: list[str]
+
+
+class DocumentUrl(TypedDict):
+    """One address a document lives at, as ``DocumentHit`` reports it."""
+
+    url: str
+    role: str | None  # nullable in document_urls; printed as "?"
+    blocked: str | None  # "@date (HTTP n)" when the latest fetch failed
+
+
 class DocumentHit(TypedDict):
     """One document in the metadata tier — ``search_documents()``'s unit.
 
@@ -168,7 +284,7 @@ class DocumentHit(TypedDict):
     captured: bool  # any of its URLs has a pages row
     classes: list[str]
     subjects: list[str]
-    urls: list[dict]  # {url, role, blocked} — blocked: "@date (HTTP n)" or None
+    urls: list[DocumentUrl]
     hunts: list[str]  # dated "not at …" records
     snippet: str | None
 
@@ -1048,7 +1164,7 @@ _MERGE_SCALAR_COLS = (
 
 def merge_documents(
     con: sqlite3.Connection, survivor_id: int, loser_id: int
-) -> dict[str, object]:
+) -> MergeResult:
     """Fold ``loser_id`` into ``survivor_id`` and delete the loser.
 
     URLs, listings and hunts move wholesale; classes union (a tie keeps the
@@ -1069,7 +1185,7 @@ def merge_documents(
         missing = {survivor_id, loser_id} - set(docs)
         raise ValueError(f"no such document: {sorted(missing)}")
 
-    dropped: dict[str, object] = {}
+    dropped: dict[str, str | int] = {}
     for col in _MERGE_SCALAR_COLS:
         s_val, l_val = docs[survivor_id][col], docs[loser_id][col]
         if l_val is not None and s_val is not None and s_val != l_val:
@@ -1130,38 +1246,24 @@ def merge_documents(
     # The loser's document row is gone, so this deletes its FTS row.
     _refresh_document_fts(con, loser_id)
     _touch_document(con, survivor_id)
-    return {"dropped": dropped}
+    return MergeResult(dropped=dropped)
 
 
-def document_record(con: sqlite3.Connection, document_id: int) -> dict | None:
+def document_record(con: sqlite3.Connection, document_id: int) -> DocumentRecord | None:
     """One document with all its children, for display — None if absent."""
     doc = con.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
     if doc is None:
         return None
-    rec = dict(doc)
-    for key, sql in (
-        ("urls", "SELECT * FROM document_urls WHERE document_id = ? ORDER BY url"),
-        (
-            "classes",
-            "SELECT * FROM document_classes WHERE document_id = ? "
-            "ORDER BY document_class",
-        ),
-        (
-            "subjects",
-            "SELECT * FROM document_subjects WHERE document_id = ? "
-            "ORDER BY scope, label, ipdb_machine_name",
-        ),
-        (
-            "ipdb_listings",
-            "SELECT * FROM document_ipdb_listings WHERE document_id = ? "
-            "ORDER BY ipdb_id, ipdb_category",
-        ),
-        (
-            "hunts",
-            "SELECT * FROM document_hunts WHERE document_id = ? ORDER BY created_at",
-        ),
-    ):
-        rec[key] = [dict(r) for r in con.execute(sql, (document_id,)).fetchall()]
+
+    def children(sql: str) -> list[Any]:
+        """The child rows for one `SELECT *`, as dicts.
+
+        ``list[Any]`` is the SQLite boundary and the only one in this
+        function: a row is untyped at runtime, so each call site's
+        annotation is what names the shape the schema guarantees.
+        """
+        return [dict(r) for r in con.execute(sql, (document_id,)).fetchall()]
+
     captured = {
         r[0]
         for r in con.execute(
@@ -1170,9 +1272,43 @@ def document_record(con: sqlite3.Connection, document_id: int) -> dict | None:
             (document_id,),
         ).fetchall()
     }
-    for u in rec["urls"]:
+    urls: list[DocumentUrlRow] = children(
+        "SELECT * FROM document_urls WHERE document_id = ? ORDER BY url"
+    )
+    for u in urls:
         u["captured"] = u["url"] in captured
-    return rec
+    return DocumentRecord(
+        id=doc["id"],
+        title=doc["title"],
+        publisher=doc["publisher"],
+        ipdb_machines_referencing=doc["ipdb_machines_referencing"],
+        catalog_titles_referencing=doc["catalog_titles_referencing"],
+        catalog_systems_referencing=doc["catalog_systems_referencing"],
+        patent_jurisdiction=doc["patent_jurisdiction"],
+        patent_number=doc["patent_number"],
+        article_publication=doc["article_publication"],
+        article_issue_date=doc["article_issue_date"],
+        article_pages=doc["article_pages"],
+        citation_ref=doc["citation_ref"],
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"],
+        urls=urls,
+        classes=children(
+            "SELECT * FROM document_classes WHERE document_id = ? "
+            "ORDER BY document_class"
+        ),
+        subjects=children(
+            "SELECT * FROM document_subjects WHERE document_id = ? "
+            "ORDER BY scope, label, ipdb_machine_name"
+        ),
+        ipdb_listings=children(
+            "SELECT * FROM document_ipdb_listings WHERE document_id = ? "
+            "ORDER BY ipdb_id, ipdb_category"
+        ),
+        hunts=children(
+            "SELECT * FROM document_hunts WHERE document_id = ? ORDER BY created_at"
+        ),
+    )
 
 
 def upsert_page(
@@ -2809,6 +2945,7 @@ def search(
     hits: list[SearchHit] = []
     for url in ranked:
         rec = recs[url]
+        deco = decorations.get(url)
         text_data = tiers[url].get(_TEXT_TIER)
         ocr_data = tiers[url].get(_OCR_TIER)
         matches, sections = _tier_counts(rec, text_data, _TEXT_TIER)
@@ -2839,9 +2976,9 @@ def search(
                 ocr_sections=ocr_sections,
                 has_text=bool((rec["text"] or "").strip()),
                 has_ocr=bool((rec.get("ocr_text") or "").strip()),
-                document_id=decorations.get(url, {}).get("document_id"),
-                classes=decorations.get(url, {}).get("classes", []),
-                subjects=decorations.get(url, {}).get("subjects", []),
+                document_id=deco["document_id"] if deco else None,
+                classes=deco["classes"] if deco else [],
+                subjects=deco["subjects"] if deco else [],
             )
         )
     return hits
@@ -2859,7 +2996,7 @@ def _missing_document_schema(exc: sqlite3.OperationalError) -> bool:
 
 def _document_decorations(
     con: sqlite3.Connection, urls: list[NormalizedUrl]
-) -> dict[NormalizedUrl, dict]:
+) -> dict[NormalizedUrl, DocumentDecoration]:
     """Per-URL document decoration for search hits: id, classes, subjects."""
     if not urls:
         return {}
@@ -2897,11 +3034,11 @@ def _document_decorations(
             if row["name"] not in names:
                 names.append(row["name"])
     return {
-        r["url"]: {
-            "document_id": int(r["document_id"]),
-            "classes": classes.get(int(r["document_id"]), []),
-            "subjects": subjects.get(int(r["document_id"]), []),
-        }
+        r["url"]: DocumentDecoration(
+            document_id=int(r["document_id"]),
+            classes=classes.get(int(r["document_id"]), []),
+            subjects=subjects.get(int(r["document_id"]), []),
+        )
         for r in owners
     }
 
@@ -2978,7 +3115,7 @@ def search_documents(
                     blocked = f"@ {last['fetched_at'][:10]}" + (
                         f" (HTTP {status})" if status is not None else ""
                     )
-                urls.append({"url": u["url"], "role": u["role"], "blocked": blocked})
+                urls.append(DocumentUrl(url=u["url"], role=u["role"], blocked=blocked))
             hits.append(
                 DocumentHit(
                     document_id=document_id,

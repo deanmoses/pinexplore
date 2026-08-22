@@ -135,7 +135,7 @@ def _get_body(url: str) -> bytes:
     """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60, context=_SSL_CONTEXT) as resp:
-        body = resp.read(_CDX_MAX_BYTES + 1)
+        body: bytes = resp.read(_CDX_MAX_BYTES + 1)
     if len(body) > _CDX_MAX_BYTES:
         raise CdxRefusedError(f"CDX response over {_CDX_MAX_BYTES} bytes")
     return body

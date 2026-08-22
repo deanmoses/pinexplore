@@ -20,14 +20,54 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 import web_cache
+
+
+class SubjectTarget(TypedDict):
+    """A Flipcommons row an IPDB id resolves to: its PK and current name."""
+
+    pk: int
+    name: str
+
+
+class CitationRef(TypedDict):
+    """A slug-addressed citation source: the URL it lives at, and its ref."""
+
+    url: str
+    ref: str
+
+
+class FlipcommonsMaps(TypedDict):
+    """Everything ``collect()`` reads out of Flipcommons, keyed by IPDB id."""
+
+    models: dict[int, SubjectTarget]
+    entities: dict[int, SubjectTarget]
+    refs: list[CitationRef]
+
+
+class RefMismatch(TypedDict):
+    """A stored citation ref that disagrees with the resolved one."""
+
+    document_id: int
+    stored: str
+    resolved: str
+
+
+class EnrichCounts(TypedDict):
+    """What one enrichment pass did — the run's whole report."""
+
+    subjects_resolved: int
+    subjects_unresolved: int
+    refs_filled: int
+    ref_mismatches: list[RefMismatch]
+
 
 DEFAULT_FLIPCOMMONS_DB = Path("~/dev/flipcommons/backend/db.sqlite3").expanduser()
 
 
-def collect(flipcommons_db: Path) -> dict[str, Any]:
+def collect(flipcommons_db: Path) -> FlipcommonsMaps:
     """Pull the resolution maps out of the Flipcommons dev DB as plain data.
 
     The only function that touches Flipcommons, so ``enrich()`` stays
@@ -37,14 +77,14 @@ def collect(flipcommons_db: Path) -> dict[str, Any]:
     con.row_factory = sqlite3.Row
     try:
         models = {
-            r["ipdb_id"]: {"pk": r["id"], "name": r["name"]}
+            r["ipdb_id"]: SubjectTarget(pk=r["id"], name=r["name"])
             for r in con.execute(
                 "SELECT id, name, ipdb_id FROM catalog_machinemodel "
                 "WHERE ipdb_id IS NOT NULL"
             )
         }
         entities = {
-            r["ipdb_manufacturer_id"]: {"pk": r["id"], "name": r["name"]}
+            r["ipdb_manufacturer_id"]: SubjectTarget(pk=r["id"], name=r["name"])
             for r in con.execute(
                 "SELECT id, name, ipdb_manufacturer_id FROM catalog_corporateentity "
                 "WHERE ipdb_manufacturer_id IS NOT NULL"
@@ -53,7 +93,7 @@ def collect(flipcommons_db: Path) -> dict[str, Any]:
         # Slug-addressed children only: their cite ref is parent:child. A web
         # source's ref is its URL — nothing to resolve.
         refs = [
-            {"url": r["url"], "ref": f"{r['parent_slug']}:{r['child_slug']}"}
+            CitationRef(url=r["url"], ref=f"{r['parent_slug']}:{r['child_slug']}")
             for r in con.execute(
                 "SELECT l.url AS url, p.slug AS parent_slug, s.slug AS child_slug "
                 "FROM citation_citationsourcelink AS l "
@@ -63,22 +103,22 @@ def collect(flipcommons_db: Path) -> dict[str, Any]:
                 "  AND s.slug IS NOT NULL AND p.slug IS NOT NULL"
             )
         ]
-        return {"models": models, "entities": entities, "refs": refs}
+        return FlipcommonsMaps(models=models, entities=entities, refs=refs)
     finally:
         con.close()
 
 
-def enrich(con: sqlite3.Connection, data: dict[str, Any]) -> dict[str, Any]:
+def enrich(con: sqlite3.Connection, data: FlipcommonsMaps) -> EnrichCounts:
     """Apply the resolution maps to the cache; returns what happened.
 
     Commits nothing — the caller commits (or rolls back, for a dry run).
     """
-    counts = {
-        "subjects_resolved": 0,
-        "subjects_unresolved": 0,
-        "refs_filled": 0,
-        "ref_mismatches": [],
-    }
+    counts = EnrichCounts(
+        subjects_resolved=0,
+        subjects_unresolved=0,
+        refs_filled=0,
+        ref_mismatches=[],
+    )
 
     subject_queries = (
         (
@@ -131,11 +171,11 @@ def enrich(con: sqlite3.Connection, data: dict[str, Any]) -> dict[str, Any]:
             counts["refs_filled"] += 1
         elif row["citation_ref"] != entry["ref"]:
             counts["ref_mismatches"].append(
-                {
-                    "document_id": row["id"],
-                    "stored": row["citation_ref"],
-                    "resolved": entry["ref"],
-                }
+                RefMismatch(
+                    document_id=row["id"],
+                    stored=row["citation_ref"],
+                    resolved=entry["ref"],
+                )
             )
     return counts
 

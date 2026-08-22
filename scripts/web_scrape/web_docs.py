@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import web_cache
 
@@ -30,22 +30,30 @@ def _resolve_or_die(con: sqlite3.Connection, ref: str) -> int:
     return doc_id
 
 
-def _print_document(rec: dict) -> None:
-    for field in (
-        "id",
-        "title",
-        "publisher",
-        "citation_ref",
-        "patent_jurisdiction",
-        "patent_number",
-        "article_publication",
-        "article_issue_date",
-        "article_pages",
-        "created_at",
-        "updated_at",
-    ):
-        if rec[field] is not None:
-            print(f"{field}: {rec[field]}")
+# The scalar fields `show` prints, in display order — the merge-hint counts
+# are omitted. `Final` is load-bearing: it makes mypy read these as literal
+# keys rather than plain `str`, so a name that is not a DocumentRecord field
+# is an error where they index it, and each name is written exactly once.
+_SHOWN_FIELDS: Final = (
+    "id",
+    "title",
+    "publisher",
+    "citation_ref",
+    "patent_jurisdiction",
+    "patent_number",
+    "article_publication",
+    "article_issue_date",
+    "article_pages",
+    "created_at",
+    "updated_at",
+)
+
+
+def _print_document(rec: web_cache.DocumentRecord) -> None:
+    for field in _SHOWN_FIELDS:
+        value = rec[field]
+        if value is not None:
+            print(f"{field}: {value}")
     for u in rec["urls"]:
         state = "captured" if u["captured"] else "not acquired"
         role = u["role"] or "?"
@@ -164,7 +172,7 @@ def _cmd_merge(con: sqlite3.Connection, args: argparse.Namespace) -> int:
     loser = _resolve_or_die(con, args.loser)
     result = web_cache.merge_documents(con, survivor, loser)
     print(f"document {loser} merged into {survivor}")
-    for col, val in result["dropped"].items():  # type: ignore[union-attr]
+    for col, val in result["dropped"].items():
         print(f"dropped (survivor's {col} kept): {val!r}", file=sys.stderr)
     return 0
 

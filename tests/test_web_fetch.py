@@ -943,7 +943,7 @@ def _stub_archive_hit(
     body: bytes | None = None,
     timestamp: str = "20141006120618",
     original: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     """Install a try_capture returning a crafted capture; returns a call log.
 
     The returned dict records the URL and newer_than bound try_capture was

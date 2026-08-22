@@ -162,9 +162,9 @@ def test_non_utf8_text_file_is_refused_not_guessed_at(cache, tmp_path):
 
 
 def test_non_utf8_html_without_a_declared_charset_is_refused(cache, tmp_path):
-    # The same rule, and the reason it asks the handler instead of the file
-    # type: a saved page that left its encoding to the HTTP header has none left
-    # by the time it reaches an import.
+    # The same rule, and the reason it asks the handler instead of the file type:
+    # a saved page that left its encoding to the HTTP header has none left by the
+    # time it reaches an import.
     path = tmp_path / "page.html"
     path.write_bytes(
         "<html><body><p>Réglage « Sonic »</p></body></html>".encode("cp1252")

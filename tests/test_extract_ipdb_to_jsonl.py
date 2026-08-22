@@ -15,6 +15,7 @@ machine existed, and one holding the wrong machine's page.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import extract_ipdb_to_jsonl as extract_ipdb
 import web_cache as wc
@@ -88,7 +89,7 @@ def seed(
     return url
 
 
-def only(cache) -> dict:
+def only(cache) -> dict[str, Any]:
     """Extract, asserting exactly one model came back."""
     report = extract_ipdb.extract(con=cache)
     assert len(report.rows) == 1
