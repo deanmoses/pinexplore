@@ -43,20 +43,17 @@ CREATE OR REPLACE VIEW ingest.watermarks AS
 SELECT 'ipdb' AS source, artifact_kind, artifact, observed_at, n_records
 FROM ipdb.ingest_watermarks
 UNION ALL
--- OPDB states no date about itself anywhere in the file -- unlike xantari's
--- `LastRefreshDateUtc` -- and the path is deliberately undated, so there is no
--- honest value for `observed_at` and it stays NULL.
---
--- What stands in for it is per-row: `updated_at` on `opdb.machines` is OPDB's
--- own dating of each record, and its maximum is a FLOOR on when the export was
--- taken. Not published as the watermark, because a floor read as a date is worse
--- than an absence -- but it is the column to reach for.
+-- The export states no date about itself and its path is undated, so there is no
+-- honest `observed_at`. What stands in is per-row: `updated_at` on
+-- `opdb_stg.machines` is OPDB's own dating of each record, and its maximum is a
+-- FLOOR on when the export was taken -- not published here, because a floor read
+-- as a date is worse than an absence.
 SELECT 'opdb', 'export', 'opdb/opdb_full.json', NULL,
   (SELECT count(*) FROM opdb_raw.machine_groups)
     + (SELECT count(*) FROM opdb_raw.machines)
     + (SELECT count(*) FROM opdb_raw.aliases)
 UNION ALL
--- Downloaded separately from the export and normally NEWER. `created_at` here IS
+-- Downloaded separately from the export. Might be NEWER. `created_at` here IS
 -- OPDB's own claim -- the newest retirement it knows of -- which makes this the
 -- one OPDB artifact carrying a real watermark.
 SELECT 'opdb', 'id changelog', 'opdb/opdb_changelog.json',

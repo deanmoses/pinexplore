@@ -1,12 +1,12 @@
--- Raw tables generated from all JSON source data files.
+-- Raw tables generated from source data files, generally JSON.
 -- Tables (not views) so JSON is parsed once at build time.
 --
 -- Requires `SET VARIABLE ingest_base = '<path-or-url>'`, which
--- scripts/rebuild_explore.py sets -- to 'ingest_sources' locally, or to the R2
--- URL in --remote mode.
+-- scripts/rebuild_explore.py sets -- to 'ingest_sources' locally, 
+-- or to the R2 URL in --remote mode.
 
 ------------------------------------------------------------
--- External source dumps
+-- External data source dumps
 ------------------------------------------------------------
 
 -- Fandom wiki exports
@@ -26,21 +26,14 @@ FROM (SELECT unnest(persons) AS d FROM read_json_auto(getvariable('ingest_base')
 
 -- OPDB (Open Pinball Database) export.
 --
--- ONE snapshot, not a merged series -- the opposite of the xantari treatment
--- below, and deliberately so. This is OPDB's own export rather than a scrape of
--- it, so it drops nothing; every row carries its own `updatedAt`, so "what
--- changed upstream" is answerable without a prior snapshot to diff against; and
--- the changelog states outright where a vanished id went. Nothing a previous
--- dump could contribute is missing from those three facts. The paths are
--- therefore undated and stable: updating is overwriting the two files, with no
--- edit here and no snapshot list to maintain -- the opposite of the xantari read
--- below, where a new file means a new line.
+-- This is a direct db dump + changelog from OPDB, not a scrape.
+-- Every row is dated with `updatedAt`;  the changelog says where a vanished id went. 
+-- When updating, replace existing dump + changelog files; no need to look at older files, unlike how IPDB works.
+
 --
--- The file is one JSON object of three arrays, so each read unnests its own.
--- `d.*` rather than a column list: this is upstream's file and it gains fields
--- unannounced, so a star is what carries a new one through to the mart, where
--- `opdb_column_not_snake_case` fails the build until it is named. Keys arrive in
--- camelCase and stay that way until `09_mart.sql` renames them.
+-- `d.*` because this is upstream's file and it gains fields unannounced: the
+-- star carries a new one through to the mart, where `opdb_column_not_snake_case`
+-- fails the build until `09_mart.sql` names it.
 CREATE OR REPLACE TABLE opdb_raw.machine_groups AS
 SELECT d.*
 FROM (SELECT unnest(machineGroups) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
@@ -49,24 +42,16 @@ CREATE OR REPLACE TABLE opdb_raw.machines AS
 SELECT d.*
 FROM (SELECT unnest(machines) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
 
--- Aliases are their own array now, where the older export folded them into the
--- machine list behind an `is_alias` flag. They carry a strict subset of a
--- machine's fields -- no `type`, `display`, `playerCount`, `physicalMachine` or
--- `description` -- which loses nothing: those were NULL on every alias row of
--- the old export too. `opdb_stg.machines` puts the two back together.
+-- Aliases carry a subset of a machine's fields; `opdb_stg.machines` unions them
+-- back with the machines.
 CREATE OR REPLACE TABLE opdb_raw.aliases AS
 SELECT d.*
 FROM (SELECT unnest(aliases) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
 
--- OPDB's id changelog: every id OPDB has retired since 2018 and what replaced
--- it. CUMULATIVE, not a delta -- each download restates the whole history.
---
--- This is the reason a second dump is unnecessary. An id missing from the export
--- is otherwise indistinguishable from an id we simply never saw; here OPDB says
--- which, and for a `move` says where it went. It also runs AHEAD of the export
--- -- it is downloaded separately and later -- so a row here may retire an id the
--- dump still lists, and may name ids from before our first dump. Neither is a
--- fault; see the checks in `08_source_warning_checks.sql`.
+-- Every id OPDB has retired and what replaced it. CUMULATIVE -- each download
+-- restates the whole history -- and downloaded separately from the export, so it
+-- normally runs AHEAD and may retire an id the export still lists.
+-- `08_source_warning_checks.sql` watches that gap.
 CREATE OR REPLACE TABLE opdb_raw.changelog AS
 SELECT d.*
 FROM (SELECT unnest(data) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_changelog.json'));

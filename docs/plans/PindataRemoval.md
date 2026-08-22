@@ -276,8 +276,6 @@ This requires teaching the Flipcommons runner, `analyze`, about the `ext*` names
 
 ## Read these before designing architecture or writing SQL
 
-I reverted hours of work by an AI session that was incorrect because it did not heed the following.
-
 The existing Pinexplore SQL already solves most of this against pindata. Read it before designing anything. The shapes are correct. It has been extensively tested, hardened and used over many months and will be more correct than anything you write yourself. Only the comparison target changes.
 
 - `sql/07_compare.sql` — how each source joins the catalog, and at which grain: `compare_models_ipdb`, `compare_models_opdb` (models, by opdb_id),
@@ -296,6 +294,9 @@ Also you CANNOT do this deep data work, which is all about the nuanced semantics
 - ✅ DONE: **Namespacing Pinexplore**
 - ✅ DONE: **IPDB JSONL + Xantari combining**
 - ✅ DONE: **IPDB Specialties**
+- **Move the OPDB manufacturer exceptions to Flippatch**. `opdb_ref.manufacturer_exceptions` was deleted from Pinexplore: nothing read it, and a comparison exception belongs beside the comparison. The 13 researched rows are recoverable with `git log -S opdb_ref.manufacturer_exceptions -p`. Whatever inherits them needs the check its own comment asked for — that each `manufacturer_slug` still resolves in the catalog.
+- **Widen `opdb_mart_view_undocumented` past `opdb`**. Every `opdb` mart view now carries a one-line SQL `COMMENT` and a check in `80_structure_error_checks.sql` keeps that coverage complete. The check is scoped to `schema_name = 'opdb'` deliberately: the `ipdb`, `ingest`, `glossary` and `web_cache` marts are uncommented, and writing their descriptions without reading those views would put confidently wrong text in the database. Comment them, then drop the schema filter. Natural companion to the IPDB dialect work.
+- **Bring IPDB into line with OPDB**. OPDB went first deliberately. `opdb_ref.feature` / `opdb_ref.keyword` now emit `target_value` alone — slug-shaped, never a claim about what the catalog holds — and the `opdb.model_*` views publish the value with no `*_exists` flag beside it. `ipdb_ref.specialty` still carries `target_public_id` and `target_is_public_id`, and `ipdb.specialties` / `ipdb.model_specialties` still publish the flag. Once the OPDB shape has been lived with, apply the same three changes to IPDB: drop the flag, rename to `target_value`, and split translated-vs-bucketed by the rule in `OpdbMappings.md` — IPDB Specialties are a small closed vocabulary, so they translate.
 - **Namespacing Flippatch**.
 
-NEVER `make pull` or `make push` through any of this. Neither command is allowed for AIs. There's no data on R2 that you need. All of this is happening on Moses computer and the data is already there.
+NEVER `make pull` or `make push` through any of this. Neither command is allowed for AIs. There's no data on R2 that you need. All of this is happening on Moses' computer and the data is already there.

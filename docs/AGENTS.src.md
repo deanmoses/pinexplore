@@ -62,8 +62,6 @@ make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
 make clean        # Remove DuckDB build artifacts
 ```
 
-`make pull`, `make push` and `make all` reach Cloudflare R2 and are human-only — see [Explore.md](docs/Explore.md).
-
 ## Tests
 
 `make test` runs `pytest` over `tests/`, currently covering the web evidence cache (`scripts/web_scrape/`) and running fully offline — a tmp SQLite and a stubbed `_http_get`, no network. The SQL layers are exercised by the build's own integrity checks (`make explore`), not pytest.
@@ -82,21 +80,15 @@ explore.duckdb    Build artifact (gitignored)
 
 ### Schemas
 
-Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. [Explore.md](docs/Explore.md) has the table and which ones to read.
+Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. `main` is deliberately empty. [Explore.md](docs/Explore.md) has the table and which ones to read.
 
-The rules no single file shows you:
-
-- **Only the unsuffixed mart is a contract.** Flippatch reads it and nothing beneath, so changing a mart column is a cross-repo change and changing a staging one is not.
-- **The direction is one-way.** A mart may read staging; staging must never read a mart.
-- **`main` is deliberately empty.** A build that leaves anything there fails.
-- **Marts select their staging views with `*`**, so a field a dump gains upstream surfaces and fails the build rather than disappearing silently. Don't replace a star with a column list. The reasoning, and what it does _not_ catch, is on the views in `sql/09_mart.sql`.
-- **IPDB's word for a machine is `model`** everywhere past its raw layer. OPDB keeps `machines`, because an OPDB row can be a title or a model.
+Only the unsuffixed mart is a contract. Changing a mart column is probably a cross-repo change (check Flippatch's comparison layer).
 
 ### SQL Layers
 
-Files in `sql/` load in numeric order during `make explore`, and each states its own purpose in its first line — that is where to look, rather than a list here that goes stale the first time a layer is added or renamed. A new layer goes in the body; 80/90 are the closing gate and stay at the end.
+Files in `sql/` load in numeric order during `make explore`, and each states its own purpose in its first line — that is where to look, rather than a list here that goes stale the first time a layer is added or renamed. A new layer goes in the body; 80 is the closing gate and stays at the end.
 
-The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
+The build fails if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
 
 ## Web Evidence Cache
 
@@ -112,7 +104,7 @@ It is derived: re-run it after a fetch campaign and the diff is what the campaig
 
 ## Cloudflare R2
 
-The web cache database + raw cache files and the DuckDB ingest source files are moved between developer machines via Cloudflare R2. `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. Both are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).
+The web cache SQLite db + raw cache files and the DuckDB ingest source files are moved between developer machines via Cloudflare R2. `make push` uploads them, `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. All are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).
 
 START_CLAUDE
 
@@ -156,7 +148,6 @@ Pre-commit hooks auto-regenerate `CLAUDE.md` and `AGENTS.md` when `docs/AGENTS.s
 
 ## Rules
 
-- Never run `make pull`, `make push`, `make all` or `rebuild_explore.py --remote` — these reach Cloudflare R2 and are human-only. Ask the user instead.
-- Don't silence linter warnings — fix the underlying issue
-- Never hardcode secrets — use environment variables via `.env`
-- When writing or editing Markdown, never hard-wrap prose. Write each paragraph and list item as a single long line and let the viewer soft-wrap it. Hard line breaks inserted to fit ~80 columns produce choppy short lines in a narrow viewport. Exempt from this rule: tables, code blocks and the existing line structure of generated files.
+- Never silence linter warnings; fix the underlying issue
+- Never hardcode secrets; use environment variables via `.env`
+- Never hard-wrap prose when writing or editing Markdown. Write each paragraph and list item as a single long line and let the viewer soft-wrap it. Hard line breaks inserted to fit ~80 columns produce choppy short lines in a narrow viewport. Exempt from this rule: tables, code blocks and the existing line structure of generated files.

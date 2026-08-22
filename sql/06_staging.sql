@@ -6,42 +6,323 @@
 -- OPDB staged
 ------------------------------------------------------------
 
--- Machines and aliases back in one relation, the shape the rest of the pipeline
--- wants and the shape OPDB's older export shipped.
+-- OPDB's machines and aliases in one relation, in our spelling.
 --
--- An alias IS a machine as far as every consumer is concerned -- a specific
--- edition of one, keyed by a third id segment -- and splitting them across two
--- arrays is a fact about OPDB's export format, not about the machines. Rejoining
--- them here means the mart publishes one grain and a caller that wants only the
--- base machines says `WHERE is_machine`.
+-- An alias is a specific edition of a machine, keyed by a third id segment;
+-- splitting them across two arrays is a fact about the export format, not about
+-- the machines. `UNION ALL BY NAME` rather than a column list, because the two
+-- arrays disagree on their column sets and a list would drop whichever field
+-- OPDB adds next.
 --
--- `UNION ALL BY NAME` because the two arrays disagree on their column sets: it
--- matches on name and fills the alias-side absences with NULL, which is exactly
--- what the old export carried on those rows. A column list would have to
--- enumerate both sides and would silently drop whichever field OPDB adds next.
+-- OPDB encodes the hierarchy INTO the id: `G50L9-MDxXD` is machine `MDxXD` of
+-- group `G50L9`, and a third segment makes it an alias. Split here so every join
+-- through it takes the parts the same way.
 --
--- `is_machine` and `is_alias` are forced to real booleans. Upstream states only
--- the true one on each row, so a straight union leaves the other NULL and
--- `WHERE NOT is_alias` -- the obvious way to write the obvious filter -- returns
--- nothing at all.
+-- The RENAME spells OPDB's camelCase our way and the star carries a field it
+-- gains upstream through to the mart, where `opdb_column_not_snake_case` fails
+-- the build until it is named here.
 --
--- The id is split because OPDB encodes the hierarchy INTO it: `G50L9-MDxXD` is
--- machine `MDxXD` of group `G50L9`, and a third segment makes it an alias. Every
--- join to a group or a parent machine needs the parts, and deriving them at each
--- call site is where they get derived inconsistently.
+-- The columns below the star are the ones a rename cannot express:
+--
+--   * both flags forced to real booleans. Upstream states only the true one on
+--     each row, so a straight union leaves the other NULL and `WHERE NOT
+--     is_alias` -- the obvious way to write the obvious filter -- matches nothing.
+--   * OPDB says "nothing" as both NULL and `''` on the same text column, in
+--     numbers that dwarf the real values, so a consumer writing the obvious `IS
+--     NULL` gets the wrong answer.
+--   * `physical_machine` is OPDB's 0/1 flag, read as the boolean it is.
+--   * `manufacturer` flattened: no RENAME reaches inside a struct, and its keys
+--     are camelCase too.
+--
+-- DO NOT compare `manufacture_date` below year precision. OPDB stores a full
+-- DATE but knows a full date for few machines, so it pads what it does not know
+-- to `01` -- most rows land on day 1, many on January 1st. Comparing month or
+-- day against a catalog date reports the padding as disagreement.
 CREATE OR REPLACE TABLE opdb_stg.machines AS
 SELECT
-  *,
-  split_part(opdbId, '-', 1) AS group_id,
-  split_part(opdbId, '-', 2) AS machine_id,
-  nullif(split_part(opdbId, '-', 3), '') AS alias_id
+  u.* EXCLUDE (manufacturer, commonName, shortname, description, physicalMachine, isMachine, isAlias)
+      RENAME (
+        opdbId          AS opdb_id,
+        ipdbId          AS ipdb_id,
+        manufactureDate AS manufacture_date,
+        playerCount     AS player_count,
+        createdAt       AS created_at,
+        updatedAt       AS updated_at
+      ),
+  coalesce(u.isMachine, false)        AS is_machine,
+  coalesce(u.isAlias, false)          AS is_alias,
+  nullif(u.commonName, '')            AS common_name,
+  nullif(u.shortname, '')             AS shortname,
+  nullif(u.description, '')           AS description,
+  CAST(u.physicalMachine AS BOOLEAN)  AS physical_machine,
+  u.manufacturer.manufacturerId       AS opdb_manufacturer_id,
+  u.manufacturer.name                 AS manufacturer_name,
+  u.manufacturer.fullName             AS manufacturer_full_name,
+  tg.slug                             AS technology_generation_slug,
+  dt.slug                             AS display_type_slug,
+  -- Flipcommons stores a year plus an OPTIONAL month, which is exactly the
+  -- precision OPDB really has. It pads what it does not know to `01`, so a
+  -- January on the 1st is padding or a real January and nothing distinguishes
+  -- them -- dropped. A January on any other day is stated, and kept: padding
+  -- can only ever produce the 1st.
+  CAST(year(u.manufactureDate) AS SMALLINT) AS production_year,
+  CASE WHEN month(u.manufactureDate) = 1 AND day(u.manufactureDate) = 1 THEN NULL
+       ELSE CAST(month(u.manufactureDate) AS TINYINT) END AS production_month,
+  -- OPDB says a model is a remake and never says what OF, so this is a flag and
+  -- not a pointer. Filling `remake_of` would mean guessing at the title's oldest
+  -- non-remake, which is wrong wherever OPDB files a remake in its own group --
+  -- Metallica Remastered is a separate group from Metallica.
+  --
+  -- Read through `opdb_ref.feature` on OUR slug rather than matching OPDB's
+  -- `Remake` inline. That table is the single statement of where each OPDB
+  -- feature goes, and a lineage flag that restates upstream's string can drift
+  -- from it silently; keyed this way the two cannot disagree, and the only
+  -- literal left is a slug we control. `EXISTS` also spares this the
+  -- `list_contains` NULL trap the flags below document.
+  EXISTS (SELECT 1 FROM opdb_ref.feature AS f
+          WHERE f.target_value = 'is_remake'
+            AND list_contains(u.features, f.opdb_feature)) AS is_remake,
+  -- Whether this row becomes a Flipcommons Model. OPDB's non-physical rows are
+  -- containers holding a set of gameplay-identical machines and correspond to
+  -- nothing in the catalog. Defined ONCE here because every `opdb.model_*` view
+  -- needs it: spelled out at each consumer, the one that forgets publishes rows
+  -- keyed to an id `opdb.models` does not contain, and the join just returns
+  -- nothing.
+  is_alias OR physical_machine                                     AS is_model,
+  split_part(u.opdbId, '-', 1)        AS group_id,
+  split_part(u.opdbId, '-', 2)        AS machine_id,
+  nullif(split_part(u.opdbId, '-', 3), '') AS alias_id
 FROM (
-  SELECT m.* REPLACE (true AS isMachine), false AS isAlias
-  FROM opdb_raw.machines AS m
+  SELECT m.* REPLACE (true AS isMachine), false AS isAlias FROM opdb_raw.machines AS m
   UNION ALL BY NAME
-  SELECT a.* REPLACE (true AS isAlias), false AS isMachine
-  FROM opdb_raw.aliases AS a
-);
+  SELECT a.* REPLACE (true AS isAlias), false AS isMachine FROM opdb_raw.aliases AS a
+) AS u
+LEFT JOIN opdb_ref.technology_generation AS tg ON u."type" = tg.opdb_type
+LEFT JOIN opdb_ref.display_type AS dt ON u.display = dt.opdb_display;
+
+-- OPDB's machine groups, in our spelling.
+--
+-- `description` is cast because it arrives typed JSON: it is empty on every row
+-- of the export, which is what `read_json_auto` infers from when it has no value
+-- to go on, and a predicate against a JSON column raises rather than returning
+-- false. The cast is a no-op the day OPDB writes a string into it.
+--
+-- `year` is a string upstream. `TRY_CAST` rather than CAST so a year OPDB
+-- malforms is reported by `opdb_group_year_not_a_number` instead of crashing the
+-- layer; the check is what stops it being silently NULL.
+CREATE OR REPLACE VIEW opdb_stg.machine_groups AS
+SELECT
+  g.* EXCLUDE (shortname, description, year)
+      RENAME (
+        opdbId           AS opdb_id,
+        isMachineGroup   AS is_machine_group,
+        pinballPrimerUrl AS pinball_primer_url,
+        pinballCardsUrl  AS pinball_cards_url,
+        bobsGuideUrl     AS bobs_guide_url,
+        pinballRulesUrl  AS pinball_rules_url,
+        createdAt        AS created_at,
+        updatedAt        AS updated_at
+      ),
+  nullif(g.shortname, '')                    AS shortname,
+  nullif(CAST(g.description AS VARCHAR), '') AS description,
+  TRY_CAST(g.year AS SMALLINT)               AS year
+FROM opdb_raw.machine_groups AS g;
+
+-- One row per model per coded value, OPDB's wording beside its decode. The mart
+-- splits these by `target_entity_type` into a view or column per Flipcommons
+-- entity; nothing downstream of the mart sees the discriminator.
+--
+-- INNER joins, so the two `_unmapped` checks are what stop a value OPDB invents
+-- from being dropped here in silence.
+CREATE OR REPLACE VIEW opdb_stg.model_features AS
+SELECT m.opdb_id, m."name", t.feature, f.target_entity_type, f.target_value
+FROM opdb_stg.machines AS m, unnest(m.features) AS t(feature)
+JOIN opdb_ref.feature AS f ON f.opdb_feature = t.feature
+WHERE m.is_model;
+
+-- `target_entity_type IS NOT NULL` drops the deliberate `no-target` verdicts.
+-- They are decoded, just to nothing, and carrying them further would put rows in
+-- the mart that name no catalog fact.
+CREATE OR REPLACE VIEW opdb_stg.model_keywords AS
+SELECT m.opdb_id, m."name", t.keyword, k.target_entity_type, k.target_value
+FROM opdb_stg.machines AS m, unnest(m.keywords) AS t(keyword)
+JOIN opdb_ref.keyword AS k ON k.opdb_keyword = t.keyword
+WHERE m.is_model AND k.target_entity_type IS NOT NULL;
+
+-- What each OPDB alias IS to the machine it hangs off, in Flipcommons terms.
+--
+-- OPDB states THAT two machines are related and WHICH one is the parent. It
+-- never states WHAT the relation is. Its alias tree means "these play
+-- identically", and Flipcommons splits that single idea across `variant_of`, a
+-- `copy` edge, `conversion` / `conversion_kit`, `retheme`, `remake_of` and
+-- `export_edition_of`. Publishing the parent as `variant_of` asserts a choice
+-- among those that OPDB did not make.
+--
+-- MANUFACTURER IS THE DISCRIMINATOR. A same-manufacturer alias is an edition of
+-- one company's own machine. A cross-manufacturer alias is the licensed-copy
+-- shape -- Cavaleiro Negro by Taito do Brasil against Williams' Black Knight --
+-- which Flipcommons carries as a `copy` edge and never as a variant.
+--
+-- `variant_parent_relation`:
+--
+--   conversion          OPDB tags it a conversion. A `ModelRelationship` edge and
+--                       not a variant: it files Challenger V as an alias of Star
+--                       Trek where Flipcommons holds it as a conversion OF it.
+--   cross_manufacturer  The two disagree on manufacturer. Deliberately NOT named
+--                       for a Flipcommons relationship type: measured against the
+--                       catalog these carry a `copy` edge on fewer than half the
+--                       rows, and `retheme`, `export_edition_of`, `remake_of` or
+--                       nothing at all on the rest. Two of them hold a `copy` edge
+--                       against a DIFFERENT model than the one OPDB names here, so
+--                       a borrowed type would not merely be unconfirmed -- it
+--                       would mispoint. This states what the test found and stops.
+--   variant             Same manufacturer. The only verdict that fills `variant_of`.
+--   NULL                A manufacturer is missing, so the test could not be run.
+--                       No row in the export exercises it; asserting nothing beats
+--                       falling through to `variant`.
+--
+-- EXPORT IS NOT A VERDICT, it is an additional fact. `export_edition_of` is its
+-- own scalar FK and is filled independently, so an export edition still gets
+-- whatever verdict its manufacturers earn it. That is what the catalog does:
+-- OPDB's export aliases are almost all cross-manufacturer and hold
+-- `export_edition_of` alone, while the same-manufacturer one holds `variant_of`
+-- alone. Making export outrank the manufacturer test would get the second wrong
+-- to no benefit, since the FK does not come from the verdict.
+--
+-- TWO KINDS OF CLAIM, TWO COLUMNS. This is the shape that matters here, and the
+-- reason a single `variant_of` with a discriminator beside it was worth undoing.
+--
+-- `variant_of` is a DECODE and nothing else: OPDB named a real machine as the
+-- parent and the manufacturers matched. Nothing derived, nothing elected.
+--
+-- `sibling_set_primary_id` is a PROPOSAL. OPDB hangs many aliases off a
+-- NON-PHYSICAL container -- not a machine but a holder it invents for a set of
+-- gameplay-identical ones. Godzilla Premium, LE and 70th all hang off "Godzilla
+-- (Premium/LE)", a row no factory built. Flipcommons has no container: it
+-- elevates the broadest member and points the rest at it. So a primary is
+-- ELECTED, by `opdb_ref.edition_rank` with earliest manufacture date breaking a
+-- tie, and published as the proposal it is rather than as `variant_of`. Godzilla
+-- comes out right: LE and 70th both onto Premium.
+--
+--   = opdb_id   this model IS the elected primary -- a variant of nothing
+--   <> opdb_id  the proposed `variant_of`
+--   NULL        no election -- see below
+--
+-- READ IT WITH THE OTHER TWO LINEAGE COLUMNS. NULL here covers THREE different
+-- situations, and neither flag separates them alone:
+--
+--   variant_parent_is_model      an alias of a real machine. There was never a
+--                                set to elect within.
+--   NOT is_model, relation
+--     <> 'conversion'            a container member nobody could call. THE
+--                                WORKLIST.
+--   NOT is_model, relation
+--      = 'conversion'            a conversion filed inside a container. Dropped
+--                                before ranking, so it never competed -- which
+--                                is what keeps it OUT of that worklist. Cactus
+--                                Canyon (Lyman Upgrade) is the one such row.
+--
+-- A consumer filtering on NULL alone gets all three.
+--
+-- A container is undecidable when either
+--
+--   * two members tie at the top -- a CE and an LE, nothing broader than either, or
+--   * any member carries no edition tag. An untagged member cannot be placed on
+--     the ladder, and it is usually the BROAD one, so ranking it last produces
+--     the answer exactly backwards. Cactus Canyon Remake Special is untagged
+--     beside a Remake LE, and Flipcommons holds those two as siblings with no
+--     variant link at all.
+--
+-- `variant_parent_id` is OPDB's own answer and is always set: the id the alias
+-- hangs off, container or machine. It is the sibling-set key, and it is what
+-- remains to compare on where no verdict and no election survive.
+CREATE OR REPLACE VIEW opdb_stg.alias_lineage AS
+WITH alias AS (
+  SELECT
+    a.opdb_id,
+    a.group_id || '-' || a.machine_id AS variant_parent_id,
+    -- The parent is a real machine rather than one of OPDB's containers.
+    -- `coalesce` because a container's own `physical_machine` is false and an
+    -- alias's is NULL, and only the first of those is a parent to point at.
+    coalesce(p.physical_machine, false) AS parent_is_real,
+    -- Both flags read through `opdb_ref.feature` on OUR slug and entity type, so
+    -- editing the decode cannot leave a lineage read behind. `Converted game`
+    -- and `Conversion kit` are BOTH conversions and naming either inline is how
+    -- the other gets missed. `EXISTS` rather than `list_contains` directly: it
+    -- yields false on a NULL `features` list where `list_contains` yields NULL,
+    -- and a NULL here would silently drop `variant_of` from the row.
+    EXISTS (SELECT 1 FROM opdb_ref.feature AS f
+            WHERE f.target_value = 'export_edition_of'
+              AND list_contains(a.features, f.opdb_feature)) AS is_export,
+    EXISTS (SELECT 1 FROM opdb_ref.feature AS f
+            WHERE f.target_entity_type = 'model-relationship'
+              AND list_contains(a.features, f.opdb_feature)) AS is_conversion,
+    -- NULL when either side is unknown, so the verdict below can decline to
+    -- answer. `IS DISTINCT FROM` would call a missing manufacturer a difference.
+    CASE WHEN a.opdb_manufacturer_id IS NULL OR p.opdb_manufacturer_id IS NULL THEN NULL
+         ELSE a.opdb_manufacturer_id <> p.opdb_manufacturer_id END AS crosses_manufacturer,
+    -- The broadest edition this row is tagged with, or NULL when it carries no
+    -- edition tag. Deliberately NOT defaulted to a sentinel rank: NULL is the
+    -- signal that its container cannot be decided at all.
+    (SELECT min(er.breadth_rank) FROM opdb_ref.edition_rank AS er
+     WHERE list_contains(a.features, er.opdb_feature)) AS breadth_rank,
+    a.manufacture_date
+  FROM opdb_stg.machines AS a
+  JOIN opdb_stg.machines AS p ON p.opdb_id = a.group_id || '-' || a.machine_id
+  WHERE a.is_alias
+),
+verdict AS (
+  SELECT
+    *,
+    CASE WHEN is_conversion            THEN 'conversion'
+         WHEN crosses_manufacturer     THEN 'cross_manufacturer'
+         WHEN NOT crosses_manufacturer THEN 'variant'
+         END AS variant_parent_relation
+  FROM alias
+),
+-- Container members that compete to be primary. Conversions are dropped rather
+-- than ranked, so a container holding one is still decidable on the rest.
+contained AS (
+  SELECT * FROM verdict WHERE NOT parent_is_real AND NOT is_conversion
+),
+ranked AS (
+  SELECT
+    *,
+    -- `rank()` and not `row_number()`: a tie has to stay visibly a tie, where
+    -- row_number would silently appoint whichever row arrived first.
+    rank() OVER (PARTITION BY variant_parent_id
+                 ORDER BY breadth_rank NULLS LAST, manufacture_date NULLS LAST) AS breadth_place,
+    first_value(opdb_id) OVER (PARTITION BY variant_parent_id
+                 ORDER BY breadth_rank NULLS LAST, manufacture_date NULLS LAST) AS elected_id,
+    count(*) FILTER (breadth_rank IS NULL) OVER (PARTITION BY variant_parent_id) AS n_untagged
+  FROM contained
+),
+decided AS (
+  SELECT
+    *,
+    n_untagged = 0
+      AND count(*) FILTER (breadth_place = 1) OVER (PARTITION BY variant_parent_id) = 1 AS is_decided
+  FROM ranked
+)
+
+-- One row per alias. The election is a LEFT JOIN rather than a branch: it adds a
+-- column to the rows it decided and leaves every other row alone, where the
+-- previous three-branch union existed only to give container members a different
+-- `variant_of` from stated ones -- which is exactly what they no longer get.
+SELECT
+  v.opdb_id,
+  v.variant_parent_id,
+  v.parent_is_real AS variant_parent_is_model,
+  v.variant_parent_relation,
+  CASE WHEN v.variant_parent_relation = 'variant' AND v.parent_is_real
+       THEN v.variant_parent_id END                                  AS variant_of,
+  CASE WHEN d.is_decided THEN d.elected_id END                       AS sibling_set_primary_id,
+  CASE WHEN v.is_export     AND v.parent_is_real
+       THEN v.variant_parent_id END                                  AS export_edition_of,
+  CASE WHEN v.is_conversion AND v.parent_is_real
+       THEN v.variant_parent_id END                                  AS conversion_donor_id
+FROM verdict AS v
+LEFT JOIN decided AS d ON d.opdb_id = v.opdb_id;
 
 ------------------------------------------------------------
 -- IPDB staged

@@ -50,6 +50,18 @@ Other schemas:
 - `glossary`: the three pinball glossaries and their comparison
 - `checks`: the build's own internal verdicts
 
+### Finding your way around a mart
+
+Ask the database, rather than a list in this file that drifts from it. Each mart view carries a one-line description as a SQL `COMMENT`, so this is the index:
+
+```sql
+SELECT view_name, comment FROM duckdb_views() WHERE schema_name = 'opdb' ORDER BY view_name;
+```
+
+Today only `opdb` is fully described this way; the other marts return the relation names without descriptions until they are commented too.
+
+The `checks` schema is worth knowing about for a different reason: every warning the build prints is a count of a `checks.<check_name>` view, and that view holds the actual rows. When a build reports a non-zero warning, the worklist behind it is one query away.
+
 ## Related scripts
 
 - `scripts/rebuild_explore.py` — build `explore.duckdb` from the SQL layers

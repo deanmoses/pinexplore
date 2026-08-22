@@ -98,6 +98,27 @@ def _make_timeout_handler(
     return handler
 
 
+def _print_warnings(con: duckdb.DuckDBPyConnection) -> None:
+    """Print the non-empty worklists ``08_source_warning_checks.sql`` recorded.
+
+    Called once after every layer has run, rather than from a layer of its own.
+    ``checks.warnings`` is written in SQL and each row counts a ``checks.<name>``
+    view holding the rows; this only reads it.
+
+    Guarded like ``_print_violations``: a build that died before layer 08 has no
+    table to read.
+    """
+    try:
+        rows = con.execute(
+            "SELECT check_name, cnt FROM checks.warnings"
+            " WHERE cnt > 0 ORDER BY check_name"
+        ).fetchall()
+    except duckdb.Error:
+        return
+    for name, cnt in rows:
+        print(f"    WARNING: {name} ({cnt} rows)")
+
+
 def _print_violations(con: duckdb.DuckDBPyConnection) -> None:
     """Print what the check layers recorded before the build gave up.
 
@@ -221,14 +242,6 @@ def main() -> None:
 
         try:
             con.execute(sql)
-            # After executing, print any rows from checks.warnings for
-            # the warnings layer, and check for errors.
-            if layer.endswith("_print_warnings.sql"):
-                for row in con.execute(
-                    "SELECT 'WARNING: ' || check_name || ' (' || cnt || ' rows)'"
-                    " FROM checks.warnings WHERE cnt > 0"
-                ).fetchall():
-                    print(f"    {row[0]}")
         except TimeoutError:
             elapsed = int(time.time() - layer_start)
             print(f"  FAILED {layer} after {elapsed}s (timeout)", file=sys.stderr)
@@ -249,6 +262,8 @@ def main() -> None:
 
         elapsed = int(time.time() - layer_start)
         print(f"  {layer} {elapsed}s")
+
+    _print_warnings(con)
 
     con.close()
     total = int(time.time() - total_start)

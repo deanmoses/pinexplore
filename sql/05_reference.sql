@@ -22,6 +22,146 @@ SELECT * FROM (VALUES
   ('lcd',          'lcd')
 ) AS t(opdb_display, slug);
 
+-- Where each OPDB `features` value goes in Flipcommons terms, the counterpart of
+-- `ipdb_ref.specialty`.
+--
+-- OPDB carries in one flat array what Flipcommons splits across a reward type, a
+-- cabinet, a tag, a gameplay feature and a relationship edge. `target_entity_type`
+-- names which, and the mart splits the rows out to a view or column per entity so
+-- no consumer has to know this discriminator exists.
+--
+-- `model-relationship` is the one value that names a Flipcommons STRUCTURE
+-- rather than an entity: a `ModelRelationship` edge whose type is stated and
+-- whose donor usually is not.
+--
+-- `model-lineage` is the second such value, and it means the fact lands as a
+-- COLUMN on `opdb.models` rather than a row in a `model_*` view: Flipcommons
+-- carries `export_edition_of` as a scalar FK, and OPDB never says what a remake
+-- is a remake OF, so `is_remake` is a flag. Both are read off the alias tree
+-- rather than out of this table -- but they are listed, because this table is
+-- the index of where EVERY OPDB feature goes, and a value missing from it reads
+-- as one nobody has considered.
+--
+-- `target_value` IS ALWAYS SLUG-SHAPED AND NEVER A CLAIM ABOUT THE CATALOG.
+-- Pinexplore reads no catalog, so it cannot say whether a value resolves there
+-- and must not pretend to: `pro-edition` is written the same way as
+-- `limited-edition` whether or not the catalog has either. Resolving a value, or
+-- deciding it should not resolve, is flippatch's -- beside the live records,
+-- where the answer can actually be checked. `opdb_target_value_not_slug_shaped`
+-- is the only thing asserted here, and it is a fact about this file.
+--
+-- WHETHER A VALUE IS TRANSLATED TURNS ON THE TARGET, not on which of the two
+-- decode tables the row lives in. A target in a small closed catalog vocabulary
+-- -- tag, reward type, cabinet, series -- is written in the catalog's wording:
+-- `Home model` -> `home-use`, `Cocktail table` -> `cocktail`. A target in a large
+-- one with an alias system of its own -- theme, gameplay feature -- keeps OPDB's
+-- wording, slugified and nothing more, which is why the single gameplay-feature
+-- row here reads `head-to-head-play` rather than the catalog's `head-to-head`.
+-- Knowing that those two are the same thing is the alias system's job.
+-- `docs/plans/OpdbMappings.md` has the rule.
+CREATE OR REPLACE VIEW opdb_ref.feature AS
+SELECT * FROM (VALUES
+  ('Add-a-ball',        'reward-type',        'add-a-ball'),
+  ('Replay',            'reward-type',        'replay'),
+  ('Cocktail table',    'cabinet',            'cocktail'),
+  ('Export edition',    'model-lineage',      'export_edition_of'),
+  ('Remake',            'model-lineage',      'is_remake'),
+  ('Conversion kit',    'model-relationship', 'conversion_kit'),
+  ('Converted game',    'model-relationship', 'conversion'),
+  ('Head-to-head play', 'gameplay-feature',   'head-to-head-play'),
+  ('Widebody',          'tag',                'widebody'),
+  ('Home model',        'tag',                'home-use'),
+  ('Limited edition',   'tag',                'limited-edition'),
+  ('Premium edition',   'tag',                'premium-edition'),
+  ('Pro edition',       'tag',                'pro-edition'),
+  ('Vault edition',     'tag',                'vault-edition')
+) AS t(opdb_feature, target_entity_type, target_value);
+
+-- Where each OPDB `keywords` value goes. Mostly themes, and the reason this is a
+-- second table rather than a second column on the one above is that the two
+-- vocabularies overlap: OPDB says `Widebody` in BOTH, and both must land on the
+-- one catalog tag.
+--
+-- ALMOST NOTHING IS TRANSLATED HERE, because almost every keyword targets a
+-- theme -- a large catalog vocabulary with an alias system of its own, and
+-- knowing that OPDB's `automotive` is the catalog's `cars` is that system's job,
+-- not this file's. Pinexplore puts a theme-like keyword in the theme bucket and
+-- stops; flippatch resolves it through the aliases, rules it permanently out, or
+-- ignores the bucket entirely. The same rule as `opdb_ref.feature` above, which
+-- states it in full -- it just happens to land the other way here.
+--
+-- OPDB's keyword list is loose in a way its feature list is not -- free-text
+-- tagging rather than a controlled vocabulary -- so a few of them name nothing
+-- the catalog could ever model. `no-target` is a DELIBERATE verdict that a
+-- keyword dies here rather than reaching flippatch, and it exists so the
+-- build-blocking check below can tell "decided to drop this" from "nobody has
+-- looked yet". Removing a row is never how a keyword gets dropped.
+CREATE OR REPLACE VIEW opdb_ref.keyword AS
+SELECT
+  opdb_keyword,
+  nullif(target_entity_type, 'no-target') AS target_entity_type,
+  nullif(target_value, '') AS target_value
+FROM (VALUES
+  ('Bathurst',         'theme',            'bathurst'),
+  ('Fantasy',          'theme',            'fantasy'),
+  -- Peter Brock, whose name OPDB puts on the Holden machines. A theme, not a
+  -- credited person.
+  ('brock',            'theme',            'brock'),
+  ('Holden',           'theme',            'holden'),
+  ('Torana',           'theme',            'torana'),
+  ('board-game',       'theme',            'board-game'),
+  ('cards',            'theme',            'cards'),
+  ('commodore',        'theme',            'commodore'),
+  ('monster',          'theme',            'monster'),
+  ('movie',            'theme',            'movie'),
+  ('music',            'theme',            'music'),
+  ('poker',            'theme',            'poker'),
+  ('racing',           'theme',            'racing'),
+  ('time-travel',      'theme',            'time-travel'),
+  ('video-games',      'theme',            'video-games'),
+  ('automotive',       'theme',            'automotive'),
+  ('tv',               'theme',            'tv'),
+  ('safari-adventure', 'theme',            'safari-adventure'),
+  ('geriatric',        'theme',            'geriatric'),
+  -- The overlap with `opdb_ref.feature`: one catalog tag, two OPDB fields.
+  ('Widebody',         'tag',              'widebody'),
+  -- Licensed IP. Tag-like, so it goes to the tag bucket, which is the right
+  -- place for flippatch to pick it up from -- it will not create a tag, it will
+  -- read it as part of the licensing on a relationship.
+  ('licensed',         'tag',              'licensed'),
+  ('action-button',    'gameplay-feature', 'action-button'),
+  ('staged-flippers',  'gameplay-feature', 'staged-flippers'),
+  -- Fragments of a machine's own title rather than anything about it: `eight`
+  -- and `ball` come off Eight Ball. These die here.
+  ('ball',             'no-target',        ''),
+  ('eight',            'no-target',        ''),
+  -- Gottlieb/Premier's Street Level product line, which OPDB puts on exactly its
+  -- six members. Flipcommons models a family of related games as a Series, so
+  -- that is the bucket. Note the grain: OPDB tags the machines and Flipcommons
+  -- hangs a Series off the Title, so `opdb.model_series` states what OPDB stated
+  -- and the roll-up to titles is flippatch's, beside the live records.
+  ('street-level',     'series',           'street-level')
+) AS t(opdb_keyword, target_entity_type, target_value);
+
+-- OPDB's edition tags, ordered BROADEST FIRST.
+--
+-- The order is the whole content here. Flipcommons hangs cosmetic variants off
+-- the broadest model of a set -- an LE is a variant of the Premium, never the
+-- reverse -- and this ladder is the only machine-readable statement of which
+-- model that is. `opdb_stg.alias_lineage` elects a primary with it.
+--
+-- Absence from this list is not a gap: `Export edition`, `Remake`, `Conversion
+-- kit` and `Home model` are OPDB feature tags too, but they say what KIND of
+-- relative a model is rather than how broad it is, and Flipcommons carries them
+-- on their own FKs. Adding one here would make it compete to be a primary.
+CREATE OR REPLACE VIEW opdb_ref.edition_rank AS
+SELECT * FROM (VALUES
+  ('Pro edition',     1),
+  ('Premium edition', 2),
+  ('Vault edition',   3),
+  ('Limited edition', 4)
+) AS t(opdb_feature, breadth_rank);
+
 CREATE OR REPLACE VIEW ipdb_ref.technology_generation AS
 SELECT * FROM (VALUES
   ('EM', NULL,                    'electromechanical'),
@@ -49,8 +189,7 @@ SELECT * FROM (VALUES
 ) AS t(ipdb_role, role_slug, xantari_field, archive_label);
 
 -- IPDB Specialty is basic machine classification absent from the xantari dump
--- and carried only by archive pages. The whole dropdown is transcribed because
--- the cached corpus is partial:
+-- but carried by archive pages. The values were transcribed from the dropdown at:
 -- <https://www.ipdb.org/search.pl?specialty=12&sortby=date&searchtype=advanced>.
 --
 -- `target_entity_type` names a Flipcommons entity type. `model-relationship` is
@@ -70,7 +209,7 @@ SELECT
   target_entity_type,
   target_public_id,
   CASE WHEN target_entity_type <> 'model-relationship'
-       THEN regexp_matches(target_public_id, '^[a-z0-9][a-z0-9_-]*$')
+       THEN regexp_full_match(target_public_id, '[a-z0-9][a-z0-9_-]*')
   END AS target_is_public_id
 FROM (VALUES
   ('Add-A-Ball',                          'reward-type',        'add-a-ball'),
@@ -106,36 +245,6 @@ FROM (VALUES
   ('WWII Contract',                       'tag',                'WWII Contract'),
   ('Zipper Flippers',                     'gameplay-feature',   'zipper-flippers')
 ) AS t(ipdb_specialty, target_entity_type, target_public_id);
-
--- Approved OPDB/catalog manufacturer disagreements: cases where OPDB attributes a
--- model to one manufacturer and the catalog correctly uses another, each verified
--- by research.
---
--- Nothing here reads it: a comparison exception belongs beside the comparison in
--- flippatch, where the OPDB half of that layer does not exist yet.
---
--- These slugs rot silently. `mecatronics-aka-taito-brazil-a-division-of-taito`
--- already names a manufacturer Flipcommons renamed to `mecatronics`, so that row
--- has stopped matching and its disagreements read as unexplained. Whatever
--- inherits this list needs a check that a slug still resolves.
-CREATE OR REPLACE VIEW opdb_ref.manufacturer_exceptions AS
-SELECT * FROM (VALUES
-  (15, 'sonic', 'OPDB uses parent name Segasa for Sonic-branded games'),
-  -- Geiger-Automatenbau GmbH = A.H. Geiger Co. = the Komplett Flipper brand.
-  (50, 'komplett-flipper', 'OPDB uses Geiger for Komplett Flipper brand'),
-  (50, 'professional-pinball', 'OPDB misattributes to Geiger; IPDB says Professional Pinball'),
-  (95, 'the-pinball-company', 'Collaboration: designed by TPC, manufactured by Spooky'),
-  (40, 'briarwood', 'OPDB uses parent Brunswick for Briarwood division games'),
-  (14, 'bally', 'OPDB uses Midway for Bally-branded game'),
-  (2, 'alben', 'OPDB uses Gottlieb for Alben-manufactured game'),
-  (20, 'bell-coin-matics', 'OPDB uses Bell Games for Bell Coin Matics game'),
-  (3, 'chicago-gaming', 'OPDB uses Chicago Coin for Chicago Gaming game'),
-  (4, 'sentinel', 'OPDB uses Cic Play for Sentinel game'),
-  -- LAI = Leisure & Allied Industries, Australian.
-  (49, 'lai', 'OPDB uses Allied Leisure for LAI game'),
-  (90, 'jocmatic-sa', 'OPDB uses Joctronic for Jocmatic game'),
-  (73, 'mecatronics-aka-taito-brazil-a-division-of-taito', 'OPDB uses Taito for Brazilian division')
-) AS t(opdb_manufacturer_id, manufacturer_slug, reason);
 
 ------------------------------------------------------------
 -- Retracted IPDB listings

@@ -8,28 +8,19 @@ This file provides guidance to AI programming agents when working with code in t
 
 ## Project Overview
 
-Pinexplore is an exploration and validation tool for pinball catalog data.
+Pinexplore is an exploration and validation tool used in support of sister project Flipcommons pinball catalog.
 
-It builds a read-only DuckDB database from external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks and gap analysis. See [Explore.md](docs/Explore.md).
+It has two jobs:
 
-It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web assets (manufacturer sites, PDFs, video transcripts, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](docs/WebCache.md).
+- **Web cache**. It builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web assets related to pinball (manufacturer sites, PDFs, video transcripts, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](docs/WebCache.md).
+- **Analytics**. It builds and maintains a read-only **DuckDB database** from dumps of external sources of pinball information (IPDB, OPDB, Fandom) as well as web cache. See [Explore.md](docs/Explore.md).
 
-## Related Repos
+These support a multi-repo pinball catalog system:
 
-Pinexplore is the analytics/audit layer of a four-repo pinball catalog system:
+- **[Flipcommons](https://github.com/deanmoses/flipcommons)**: the live website and production database. The local dev database is a near-copy of prod, and is considered the source of truth as far as this system is concerned.
+- **[Flippatch](https://github.com/deanmoses/flippatch)**: it's job is to research and build [data patches](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md) to update the Flipcommons database. This is how new AI-researched and AI-authored information gets into Flipcommons.
 
-- **[pindata](https://github.com/deanmoses/pindata)** — the seed catalog records (Markdown + JSON schemas) that bootstrapped flipcommons. Frozen, and no part of pinexplore reads it: `make pull` fetches the external dumps only.
-- **[flippatch](https://github.com/deanmoses/flippatch)** — the numbered **data patches** layered on top of the seed (split out of pindata). Authored and validated there, published to Cloudflare R2, applied onto flipcommons.
-- **[flipcommons](https://github.com/deanmoses/flipcommons)** — the live website and production database (Django + SvelteKit). Seeded once from pindata's export, then kept current by replaying data patches. Source of truth for the _live_ catalog (seed + patches).
-
-Pinexplore reads the external dumps and nothing else — it holds no catalog data and never modifies the catalog. Its job is to get each source into a shape worth comparing; the comparison itself runs in flippatch, beside the live records.
-
-### How a finding becomes a fix
-
-Corrections discovered in pinexplore are applied as **data patches**: numbered, attributed, cited YAML files in flippatch's `patches/`, replayed onto flipcommons with `make ingest-patches`. Web-sourced evidence — a cite whose `ref` is the page URL and whose `quote` is the verbatim excerpt — comes from pinexplore's [web evidence cache](docs/WebCache.md). The canonical patch guides live in the flipcommons repo:
-
-- [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md) — the patch file format and how patches are applied.
-- [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md) — the authoring workflow: the `patchkit` helper, worksheets, and `expect:` guards.
+Pinexplore reads the external systems and nothing else — it holds no catalog data, never modifies the catalog, doesn't join to the catalog, doesn't reference Flippatch or Flipcommons. Its job is to get each source into a shape worth comparing; the comparison itself runs in Flippatch, beside the live records. Flippatch is the system that joins between Flipcommons and Pinexplore data. Pinexplore's only consumer is Flippatch.
 
 ## Requirements
 
@@ -38,17 +29,17 @@ Corrections discovered in pinexplore are applied as **data patches**: numbered, 
 - Node.js (for `npx prettier` and `npx markdownlint-cli2` in pre-commit hooks)
 - [poppler](https://poppler.freedesktop.org/) (`brew install poppler`) — `pdftotext` reads the web cache's PDF evidence. Without it PDFs still cache, but extract no text until poppler is installed and `web_backfill.py` is re-run.
 
-## Querying the Database
+## Querying DuckDB
 
-Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. If they're missing, ask the user to run `make all` — pulling from R2 is human-only, see [Rules](#rules).
-
-Use the Python `duckdb` package, not the DuckDB CLI binary — the package is the only required dependency. Do **not** use MotherDuck or any MotherDuck MCP tool; this database is a local file.
+Use the Python `duckdb` package, not the DuckDB CLI binary — the package is the only required dependency. Don't use MotherDuck; this database is a local file, not on MotherDuck.
 
 ```python
 import duckdb
 con = duckdb.connect("explore.duckdb", read_only=True)
 con.execute("FROM ipdb.models LIMIT 5").show()
 ```
+
+Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. If they're missing, ask the user to run `make all` — pulling from R2 is human-only, see [Rules](#rules).
 
 ## Development Commands
 
@@ -60,8 +51,6 @@ make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
 make clean        # Remove DuckDB build artifacts
 ```
 
-`make pull`, `make push` and `make all` reach Cloudflare R2 and are human-only — see [Explore.md](docs/Explore.md).
-
 ## Tests
 
 `make test` runs `pytest` over `tests/`, currently covering the web evidence cache (`scripts/web_scrape/`) and running fully offline — a tmp SQLite and a stubbed `_http_get`, no network. The SQL layers are exercised by the build's own integrity checks (`make explore`), not pytest.
@@ -69,30 +58,26 @@ make clean        # Remove DuckDB build artifacts
 ## Project Structure
 
 ```text
-sql/              DuckDB SQL layers (numbered, run in order)
+sql/              DuckDB SQL layers
 scripts/          Shell and Python utilities
 docs/             Documentation source files
-ingest_sources/   External data dumps (gitignored, pulled from R2)
+ingest_sources/   External data dumps ingested into DuckDB (gitignored, pulled from R2)
 explore.duckdb    Build artifact (gitignored)
 ```
 
-## Schemas
+## DuckDB
 
-Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. [Explore.md](docs/Explore.md) has the table and which ones to read.
+### Schemas
 
-The rules no single file shows you:
+Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. `main` is deliberately empty. [Explore.md](docs/Explore.md) has the table and which ones to read.
 
-- **Only the unsuffixed mart is a contract.** Flippatch reads it and nothing beneath, so changing a mart column is a cross-repo change and changing a staging one is not.
-- **The direction is one-way.** A mart may read staging; staging must never read a mart.
-- **`main` is deliberately empty.** A build that leaves anything there fails.
-- **Marts select their staging views with `*`**, so a field a dump gains upstream surfaces and fails the build rather than disappearing silently. Don't replace a star with a column list. The reasoning, and what it does _not_ catch, is on the views in `sql/09_mart.sql`.
-- **IPDB's word for a machine is `model`** everywhere past its raw layer. OPDB keeps `machines`, because an OPDB row can be a title or a model.
+Only the unsuffixed mart is a contract. Changing a mart column is probably a cross-repo change (check Flippatch's comparison layer).
 
-## SQL Layers
+### SQL Layers
 
-Files in `sql/` load in numeric order during `make explore`, and each states its own purpose in its first line — that is where to look, rather than a list here that goes stale the first time a layer is added or renamed. A new layer goes in the body; 80/90 are the closing gate and stay at the end.
+Files in `sql/` load in numeric order during `make explore`, and each states its own purpose in its first line — that is where to look, rather than a list here that goes stale the first time a layer is added or renamed. A new layer goes in the body; 80 is the closing gate and stays at the end.
 
-The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
+The build fails if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
 
 ## Web Evidence Cache
 
@@ -106,9 +91,9 @@ Query it with `scripts/web_scrape/web_cache.py`. Its `search`, `quote`, `outline
 
 It is derived: re-run it after a fetch campaign and the diff is what the campaign found. The emitted shape answers to `read_json_auto` and the constraints are not optional — they are in the module docstring, which is required reading before changing the output.
 
-## Remote Data (Cloudflare R2)
+## Cloudflare R2
 
-Ingest source files live in Cloudflare R2. `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. Both are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).
+The web cache SQLite db + raw cache files and the DuckDB ingest source files are moved between developer machines via Cloudflare R2. `make push` uploads them, `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. All are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).
 
 ## Tool Usage
 
@@ -128,8 +113,6 @@ Pre-commit hooks auto-regenerate `CLAUDE.md` and `AGENTS.md` when `docs/AGENTS.s
 
 ## Rules
 
-- Never run `make pull`, `make push`, `make all` or `rebuild_explore.py --remote` — these reach Cloudflare R2 and are human-only. Ask the user instead.
-- Don't silence linter warnings — fix the underlying issue
-- Never hardcode secrets — use environment variables via `.env`
-- Describe your approach before implementing non-trivial changes
-- When writing or editing Markdown, never hard-wrap prose. Write each paragraph and list item as a single long line and let the viewer soft-wrap it. Hard line breaks inserted to fit ~80 columns produce choppy short lines in a narrow viewport. (Tables, code blocks and the existing line structure of generated files are exempt.)
+- Never silence linter warnings; fix the underlying issue
+- Never hardcode secrets; use environment variables via `.env`
+- Never hard-wrap prose when writing or editing Markdown. Write each paragraph and list item as a single long line and let the viewer soft-wrap it. Hard line breaks inserted to fit ~80 columns produce choppy short lines in a narrow viewport. Exempt from this rule: tables, code blocks and the existing line structure of generated files.
