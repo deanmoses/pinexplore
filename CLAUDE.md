@@ -18,9 +18,7 @@ It also builds and maintains a **web evidence cache** — a durable, searchable 
 
 Pinexplore is the analytics/audit layer of a four-repo pinball catalog system:
 
-- **[pindata](https://github.com/deanmoses/pindata)** — the canonical seed catalog
-  records (Markdown + JSON schemas). Publishes the catalog as JSON to Cloudflare R2;
-  pinexplore pulls it via `make pull`. Source of truth for catalog _content_.
+- **[pindata](https://github.com/deanmoses/pindata)** — the seed catalog records (Markdown + JSON schemas) that bootstrapped flipcommons. Frozen, and no part of pinexplore reads it: `make pull` fetches the external dumps only.
 - **[flippatch](https://github.com/deanmoses/flippatch)** — the numbered **data
   patches** layered on top of the seed (split out of pindata). Authored and validated
   there, published to Cloudflare R2, applied onto flipcommons.
@@ -99,7 +97,7 @@ explore.duckdb    Build artifact (gitignored)
 
 Every relation lives in a schema naming the layer it belongs to, and `main` is deliberately empty — a build that leaves anything there fails. Per external source: `<source>_raw` (reads of source **files**; if the `FROM` names a relation it isn't raw), `<source>_stg` (parsing, merging, correcting the dump), `<source>_ref` (hand-curated lookups and exception lists), and bare `<source>` — the published mart, that source in our vocabulary. Plus `glossary`, `web_cache`, `ingest` (one row per ingested artifact) and `checks` (the build's own verdicts).
 
-**Only the unsuffixed mart is a contract.** Flippatch's comparison layer reads it and nothing beneath, which is what lets everything below be reshaped without breaking another repo. The direction is one-way: a mart may read staging, staging must never read a mart. An empty layer is not created — there is no `opdb_stg` and no `fandom` mart. IPDB's word for a machine is **model** everywhere past its raw layer; OPDB keeps `machines`, because an OPDB row can be a title or a model.
+**Only the unsuffixed mart is a contract.** Flippatch's comparison layer reads it and nothing beneath, which is what lets everything below be reshaped without breaking another repo. The direction is one-way: a mart may read staging, staging must never read a mart. An empty layer is not created — there is no `fandom` mart. IPDB's word for a machine is **model** everywhere past its raw layer; OPDB keeps `machines`, because an OPDB row can be a title or a model.
 
 `ipdb.models` stars its staging view and renames the fields it knows, so a field the dump gains upstream propagates automatically rather than being silently dropped — and then fails the build until it is named. See `sql/09_mart.sql`.
 

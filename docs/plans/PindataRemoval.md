@@ -291,9 +291,7 @@ Also you CANNOT do this deep data work, which is all about the nuanced semantics
 
 ## Sequencing
 
-Work has already started.
-
-- STARTED: **Comparison layer in Flippatch**. A first draft exists but it doesn't much look like the Flipcommons audit system.
+- ✅ DONE: **Comparison layer in Flippatch**. A first draft exists but it doesn't much look like the Flipcommons audit system.
 - ✅ DONE: **Delete pindata**. Delete the pindata-centric SQL from Pinexplore only after all the useful comparison stuff has been extracted. This is where the Pinexplore DuckDB build goes green again.
 - ✅ DONE: **Namespacing Pinexplore**
 - ✅ DONE: **IPDB JSONL + Xantari combining**
