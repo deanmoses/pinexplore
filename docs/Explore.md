@@ -6,6 +6,8 @@ It holds no Flipcommons catalog data and reads none. Comparing this external dat
 
 ## Using it
 
+### Query it
+
 Query it via python or the DuckDB CLI:
 
 ```python
@@ -14,17 +16,19 @@ con = duckdb.connect("explore.duckdb", read_only=True)
 con.execute("FROM ipdb.models LIMIT 5").show()
 ```
 
-Building it:
+Don't use MotherDuck. This is a local DB, it's not on MotherDuck.
+
+### Building it
 
 ```bash
 make explore   # rebuild from SQL layers
 ```
 
-The database is a build artifact (gitignored). Rebuild whenever the source dumps change. The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and the rows survive the abort, so a failed build can also be queried afterwards.
+The database is a build artifact (gitignored). Rebuild whenever the source dumps change or the SQL changes. The build **fails** if integrity checks don't pass. `checks.violations` is a real table and the rows survive the abort, so a failed build can be queried afterwards.
 
 ## SQL layers
 
-Files in `sql/`. Load in numeric order.
+Files in `sql/`. They load in numeric order.
 
 ## Schemas
 
@@ -37,20 +41,14 @@ Files in `sql/`. Load in numeric order.
 | `<source>_ref` | hand-curated lookups and exception lists                                | internal |
 | `<source>`     | the published mart — that source, in our vocabulary                     | **yes**  |
 
+Only the unsuffixed mart is a contract. Not every source has every schema. Fandom, for example, doesn't have a mart because we're not using for anything right now.
+
 Other schemas:
 
 - `web_cache`: the scrape cache, materialized
 - `ingest`: one row per ingested artifact, any source
 - `glossary`: the three pinball glossaries and their comparison
 - `checks`: the build's own internal verdicts
-
-## OPDB
-
-Two files in `ingest_sources/opdb/`: `opdb_full.json`, the export itself, and `opdb_changelog.json`, OPDB's id changelog. **One snapshot, not a merged series** — unlike the IPDB Xantari dumps beside them. OPDB exports its own database rather than being scraped, so nothing drops out; every row carries its own `updatedAt`, so "what changed upstream" needs no earlier dump to diff against; and the changelog names outright where a retired id went. The paths are undated and stable, so updating is overwriting the two files — no SQL edit, no snapshot list. The cost of that is that neither file records when it was downloaded; the changelog's newest `created_at` is the only dating either one has, and the newest `updated_at` in the export is a floor on when it was taken.
-
-The export is one JSON object of three arrays — `machineGroups`, `machines`, `aliases` — where the older one shipped machines and aliases in a single list behind a flag. `opdb_stg.machines` puts those two back together, because an alias is a machine as far as any consumer is concerned and the split is a fact about the file format. OPDB exports camelCase; the mart renames it, and `opdb_column_not_snake_case` fails the build on a field nobody named.
-
-`opdb.changelog` is worth reading before concluding a machine is gone. An id missing from the export is otherwise indistinguishable from a deletion, and a `move` row is the difference between "OPDB dropped this machine" and "OPDB renumbered it". The changelog is downloaded separately from the export and is normally **newer**, so it may retire an id the export still lists; two warnings in `sql/08_source_warning_checks.sql` watch that gap.
 
 ## Related scripts
 
@@ -59,9 +57,9 @@ The export is one JSON object of three arrays — `machineGroups`, `machines`, `
 - `scripts/web_scrape/web_fetch.py` + `web_cache.py` — fetch and query the web evidence cache (see [WebCache.md](WebCache.md))
 - `scripts/glossary/parse_*_glossary.py` — parse saved glossary HTML dumps into JSON
 
-## Remote data (Cloudflare R2)
+## Cloudflare R2
 
-Ingest source files are stored in Cloudflare R2 for access by cloud-based tools.
+Ingest source files are stored in Cloudflare R2 for sync'ing across developer machines.
 
 ```bash
 make pull   # download R2 → local ingest_sources/

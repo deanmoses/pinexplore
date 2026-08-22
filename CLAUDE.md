@@ -10,37 +10,26 @@ This file provides guidance to AI programming agents when working with code in t
 
 Pinexplore is an exploration and validation tool for pinball catalog data.
 
-It builds a read-only DuckDB database from the catalog plus external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks, cross-source comparisons, and gap analysis.
+It builds a read-only DuckDB database from external source dumps (IPDB, OPDB, Fandom wiki), then runs integrity checks and gap analysis. See [Explore.md](docs/Explore.md).
 
-It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web assets (manufacturer sites, PDFs, video transcripts, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](WebCache.md).
+It also builds and maintains a **web evidence cache** — a durable, searchable corpus of fetched web assets (manufacturer sites, PDFs, video transcripts, foreign-language press), captured once and reused as attributed evidence for catalog corrections. See [WebCache.md](docs/WebCache.md).
 
 ## Related Repos
 
 Pinexplore is the analytics/audit layer of a four-repo pinball catalog system:
 
 - **[pindata](https://github.com/deanmoses/pindata)** — the seed catalog records (Markdown + JSON schemas) that bootstrapped flipcommons. Frozen, and no part of pinexplore reads it: `make pull` fetches the external dumps only.
-- **[flippatch](https://github.com/deanmoses/flippatch)** — the numbered **data
-  patches** layered on top of the seed (split out of pindata). Authored and validated
-  there, published to Cloudflare R2, applied onto flipcommons.
-- **[flipcommons](https://github.com/deanmoses/flipcommons)** — the live website
-  and production database (Django + SvelteKit). Seeded once from pindata's export,
-  then kept current by replaying data patches. Source of truth for the _live_
-  catalog (seed + patches).
+- **[flippatch](https://github.com/deanmoses/flippatch)** — the numbered **data patches** layered on top of the seed (split out of pindata). Authored and validated there, published to Cloudflare R2, applied onto flipcommons.
+- **[flipcommons](https://github.com/deanmoses/flipcommons)** — the live website and production database (Django + SvelteKit). Seeded once from pindata's export, then kept current by replaying data patches. Source of truth for the _live_ catalog (seed + patches).
 
-Pinexplore reads the external dumps and nothing else — it holds no catalog data and
-never modifies the catalog. Its job is to get each source into a shape worth comparing;
-the comparison itself runs in flippatch, beside the live records.
+Pinexplore reads the external dumps and nothing else — it holds no catalog data and never modifies the catalog. Its job is to get each source into a shape worth comparing; the comparison itself runs in flippatch, beside the live records.
 
 ### How a finding becomes a fix
 
-Corrections discovered in pinexplore are applied as **data patches**: numbered,
-attributed, cited YAML files in flippatch's `patches/`, replayed onto flipcommons with
-`make ingest-patches`. Web-sourced evidence — a cite whose `ref` is the page URL and whose `quote` is the verbatim excerpt — comes from pinexplore's [web evidence cache](WebCache.md). The canonical patch guides live in the flipcommons repo:
+Corrections discovered in pinexplore are applied as **data patches**: numbered, attributed, cited YAML files in flippatch's `patches/`, replayed onto flipcommons with `make ingest-patches`. Web-sourced evidence — a cite whose `ref` is the page URL and whose `quote` is the verbatim excerpt — comes from pinexplore's [web evidence cache](docs/WebCache.md). The canonical patch guides live in the flipcommons repo:
 
-- [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md)
-  — the patch file format and how patches are applied.
-- [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md)
-  — the authoring workflow: the `patchkit` helper, worksheets, and `expect:` guards.
+- [DataPatches.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatches.md) — the patch file format and how patches are applied.
+- [DataPatchAuthoring.md](https://github.com/deanmoses/flipcommons/blob/main/docs/DataPatchAuthoring.md) — the authoring workflow: the `patchkit` helper, worksheets, and `expect:` guards.
 
 ## Requirements
 
@@ -51,9 +40,9 @@ attributed, cited YAML files in flippatch's `patches/`, replayed onto flipcommon
 
 ## Querying the Database
 
-Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. Run `make all` first to pull the ingest sources from R2 and build the database. Do **not** run `make explore` alone — it will fail without the ingest sources.
+Both `explore.duckdb` and `ingest_sources/` are gitignored build artifacts that won't exist in a fresh checkout. If they're missing, ask the user to run `make all` — pulling from R2 is human-only, see [Rules](#rules).
 
-Use the Python `duckdb` package to query `explore.duckdb`. Do **not** use the DuckDB CLI binary — the Python package is the only required dependency.
+Use the Python `duckdb` package, not the DuckDB CLI binary — the package is the only required dependency. Do **not** use MotherDuck or any MotherDuck MCP tool; this database is a local file.
 
 ```python
 import duckdb
@@ -61,27 +50,21 @@ con = duckdb.connect("explore.duckdb", read_only=True)
 con.execute("FROM ipdb.models LIMIT 5").show()
 ```
 
-**Do NOT use MotherDuck or any MotherDuck MCP tools to query this database.** The explore database is a local file built from source data. MotherDuck is not used in this project.
-
 ## Development Commands
 
 ```bash
-make all          # Pull ingest sources + rebuild explore DB
-make pull         # Download ingest sources from Cloudflare R2
-make push         # Upload ingest sources to Cloudflare R2
 make explore      # Rebuild explore.duckdb from SQL layers
-make clean        # Remove DuckDB build artifacts
-make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
+make check        # lint + typecheck + sql-check + test
 make test         # Run the test suite (pytest)
+make agent-docs   # Regenerate CLAUDE.md and AGENTS.md
+make clean        # Remove DuckDB build artifacts
 ```
+
+`make pull`, `make push` and `make all` reach Cloudflare R2 and are human-only — see [Explore.md](docs/Explore.md).
 
 ## Tests
 
-`make test` runs `pytest` over `tests/`. Coverage is currently the web evidence
-cache (`scripts/web_scrape/`) — URL normalization, the versioned store, fetch
-behavior, and date extraction — and runs fully offline (a tmp SQLite and a
-stubbed `_http_get`; no network). The SQL layers are exercised by
-the build's own integrity checks (`make explore`), not pytest.
+`make test` runs `pytest` over `tests/`, currently covering the web evidence cache (`scripts/web_scrape/`) and running fully offline — a tmp SQLite and a stubbed `_http_get`, no network. The SQL layers are exercised by the build's own integrity checks (`make explore`), not pytest.
 
 ## Project Structure
 
@@ -95,35 +78,37 @@ explore.duckdb    Build artifact (gitignored)
 
 ## Schemas
 
-Every relation lives in a schema naming the layer it belongs to, and `main` is deliberately empty — a build that leaves anything there fails. Per external source: `<source>_raw` (reads of source **files**; if the `FROM` names a relation it isn't raw), `<source>_stg` (parsing, merging, correcting the dump), `<source>_ref` (hand-curated lookups and exception lists), and bare `<source>` — the published mart, that source in our vocabulary. Plus `glossary`, `web_cache`, `ingest` (one row per ingested artifact) and `checks` (the build's own verdicts).
+Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. [Explore.md](docs/Explore.md) has the table and which ones to read.
 
-**Only the unsuffixed mart is a contract.** Flippatch's comparison layer reads it and nothing beneath, which is what lets everything below be reshaped without breaking another repo. The direction is one-way: a mart may read staging, staging must never read a mart. An empty layer is not created — there is no `fandom` mart. IPDB's word for a machine is **model** everywhere past its raw layer; OPDB keeps `machines`, because an OPDB row can be a title or a model.
+The rules no single file shows you:
 
-`ipdb.models` stars its staging view and renames the fields it knows, so a field the dump gains upstream propagates automatically rather than being silently dropped — and then fails the build until it is named. See `sql/09_mart.sql`.
+- **Only the unsuffixed mart is a contract.** Flippatch reads it and nothing beneath, so changing a mart column is a cross-repo change and changing a staging one is not.
+- **The direction is one-way.** A mart may read staging; staging must never read a mart.
+- **`main` is deliberately empty.** A build that leaves anything there fails.
+- **Marts select their staging views with `*`**, so a field a dump gains upstream surfaces and fails the build rather than disappearing silently. Don't replace a star with a column list. The reasoning, and what it does _not_ catch, is on the views in `sql/09_mart.sql`.
+- **IPDB's word for a machine is `model`** everywhere past its raw layer. OPDB keeps `machines`, because an OPDB row can be a title or a model.
 
 ## SQL Layers
 
-Files in `sql/` load in numeric order during `make explore`, and the numbering is the pipeline: schemas, the raw source reads, the ingest watermarks that sit straight on them, reference and macros, per-source staging, the source-dump checks, the published marts, and finally the structural checks over the finished database. Raw comes before reference so that a missing or malformed dump — the likeliest breakage — stops the build before four hundred lines of vocabulary are executed. The tail is numbered 80/90 rather than sequentially, so a layer inserted later lands in the body without renumbering the gate. Each file states its own purpose in its first line, which is where to look rather than here — a list repeated in a doc goes stale the first time a layer is added, renamed or dropped.
+Files in `sql/` load in numeric order during `make explore`, and each states its own purpose in its first line — that is where to look, rather than a list here that goes stale the first time a layer is added or renamed. A new layer goes in the body; 80/90 are the closing gate and stay at the end.
 
 The build **fails** if integrity checks don't pass, printing every violation as it aborts. `checks.violations` is a real table and its rows survive the abort, so a failed build can be reopened and queried.
 
 ## Web Evidence Cache
 
-`scripts/web_scrape/web_fetch.py` builds a durable, searchable cache of fetched web pages (manufacturer sites, forums, Wikipedia, foreign-language press) used as attributed evidence for catalog corrections. When a live fetch fails (a blocking host like `ipdb.org`, a dead site), it falls back to archive.org's newest capture automatically — the row keys on the URL you asked for, with the capture address in `raw_url` and the capture date surfaced by every read path; `scripts/web_scrape/web_archive.py list` enumerates what the archive holds for a dead URL or site prefix. The system-of-record is a SQLite database with raw HTML blobs under `ingest_sources/web/` (R2-backed, gitignored); `make explore` materializes it into the `web_cache.pages` / `web_cache.fetches` tables via the local-only `03_raw_web.sql` layer. Query it with `scripts/web_scrape/web_cache.py` — a CLI and Python helpers (`search`, `quote`, `outline`, `section`, `get` — an escalation ladder; prefer the earlier, needle-driven rungs over whole-page reads). `search` itself narrows in three scopes: a term ranks documents with a match count each, `--url` lists that document's matching sections with theirs, and `--section` (or `--pages`, a sheet range) shows the matches with surrounding words. It searches three tiers: `text` (the document's own words), `ocr` (machine-read PDF sheets and images via `web_pdfocr.py`; hits labelled `(ocr)` are read by rendering the sheet with `Read(<blob>, pages=N)`), and `metadata` — the **document library**, a structured index of the documents themselves (titles, classes, model/manufacturer subjects, every URL a work lives at), which covers thousands of known-but-unfetched documents from the IPDB trove: search shows held documents first, then a capped "not acquired" block with the URL(s) to go get each. Document metadata is edited with `scripts/web_scrape/web_docs.py` (register/classify/subject/hunt/merge/classes). See [WebCache.md](WebCache.md) for the full guide.
+`scripts/web_scrape/web_fetch.py` fetches web pages into a durable, searchable cache used as attributed evidence for catalog corrections, falling back to archive.org's newest capture when a live fetch fails (a blocking host like `ipdb.org`, a dead site). The system-of-record is a SQLite database with raw blobs under `ingest_sources/web/`; `make explore` materializes it into `web_cache.pages` / `web_cache.fetches` via the local-only `03_raw_web.sql` layer, so those tables are absent in `--remote` mode.
+
+Query it with `scripts/web_scrape/web_cache.py`. Its `search`, `quote`, `outline`, `section` and `get` are an **escalation ladder** — prefer the earlier, needle-driven rungs over whole-page reads. Read [WebCache.md](docs/WebCache.md) before a research session rather than guessing at the CLI: search scopes and syntax, OCR'd PDF sheets, citation locators, and the document library (thousands of known-but-unfetched documents) are all covered there.
 
 ### IPDB machine pages as structured data
 
-Two scripts turn cached IPDB machine pages into fields. `scripts/web_scrape/parse_ipdb.py` is the reader — one pure function, `parse_model_page(html) -> IpdbModel`, over a page's raw HTML blob (not its extracted text), carrying the fields the xantari dump never had: `Project Date`, a `Production` status like `Never Produced`, `Concept by`, `Specialty`, `Easter Eggs`, `Serial Number Database`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page and writes `ingest_sources/ipdb_archive/models.jsonl`, one object per model. Two consumers read it through `read_json_auto`, which is why its shape answers to that function — fixed key set on every row, no dynamic-key objects, and `sample_size = -1` on every read: this repo's own build, where `ipdb_raw.archive_models` folds it in beside the xantari dump, and patch-authoring sessions in **flippatch**, which read it alongside the Flipcommons analytics layer. It is derived: re-run it after a fetch campaign and the diff is what the campaign found. Two of its fields are worth the trip on their own. `additional_details_date_kind` is a LABEL rather than a value — IPDB marks its Project Date and Date Of Manufacture rows separately and the xantari header line does not, so the dump carries the date without saying which kind it is. `Specialty` is the opposite, a field the dump has no column for at all: basic machine classification we have otherwise had to synthesise from weaker signals. `ipdb_ref.specialty` decodes IPDB's whole Specialty dropdown into catalog vocabulary and `ipdb.specialties` / `ipdb.model_specialties` publish the rules and the per-model assignments. Where a decode names vocabulary the catalog lacks, the target is spelled as IPDB's own words instead of as a slug, which is both the signal and the worklist.
+`scripts/web_scrape/parse_ipdb.py` parses a cached IPDB machine page into the fields the xantari dump never had — `Project Date`, a `Production` status, `Concept by`, `Specialty`, `Easter Eggs`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page into `ingest_sources/ipdb_archive/models.jsonl`, which this build folds in as `ipdb_raw.archive_models` and patch-authoring sessions in **flippatch** read directly.
+
+It is derived: re-run it after a fetch campaign and the diff is what the campaign found. The emitted shape answers to `read_json_auto` and the constraints are not optional — they are in the module docstring, which is required reading before changing the output.
 
 ## Remote Data (Cloudflare R2)
 
-Ingest source files are stored in Cloudflare R2. `make pull` downloads them locally. The rebuild script also supports reading directly from R2:
-
-```bash
-uv run python scripts/rebuild_explore.py --remote   # reads JSON from R2 instead of local files
-```
-
-Remote mode requires `R2_PUBLIC_URL` in `.env` or environment.
+Ingest source files live in Cloudflare R2. `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. Both are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).
 
 ## Tool Usage
 
@@ -143,6 +128,7 @@ Pre-commit hooks auto-regenerate `CLAUDE.md` and `AGENTS.md` when `docs/AGENTS.s
 
 ## Rules
 
+- Never run `make pull`, `make push`, `make all` or `rebuild_explore.py --remote` — these reach Cloudflare R2 and are human-only. Ask the user instead.
 - Don't silence linter warnings — fix the underlying issue
 - Never hardcode secrets — use environment variables via `.env`
 - Describe your approach before implementing non-trivial changes
