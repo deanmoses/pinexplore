@@ -11,6 +11,7 @@ CREATE SCHEMA ipdb;
 
 CREATE SCHEMA opdb_raw;
 CREATE SCHEMA opdb_ref;
+CREATE SCHEMA opdb_stg;
 CREATE SCHEMA opdb;
 
 CREATE SCHEMA fandom_raw;

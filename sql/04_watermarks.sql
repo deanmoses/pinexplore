@@ -43,9 +43,25 @@ CREATE OR REPLACE VIEW ingest.watermarks AS
 SELECT 'ipdb' AS source, artifact_kind, artifact, observed_at, n_records
 FROM ipdb.ingest_watermarks
 UNION ALL
-SELECT 'opdb', 'export', 'opdb_export_machines.json', NULL, count(*) FROM opdb_raw.machines
+-- OPDB states no date about itself anywhere in the file -- unlike xantari's
+-- `LastRefreshDateUtc` -- and the path is deliberately undated, so there is no
+-- honest value for `observed_at` and it stays NULL.
+--
+-- What stands in for it is per-row: `updated_at` on `opdb.machines` is OPDB's
+-- own dating of each record, and its maximum is a FLOOR on when the export was
+-- taken. Not published as the watermark, because a floor read as a date is worse
+-- than an absence -- but it is the column to reach for.
+SELECT 'opdb', 'export', 'opdb/opdb_full.json', NULL,
+  (SELECT count(*) FROM opdb_raw.machine_groups)
+    + (SELECT count(*) FROM opdb_raw.machines)
+    + (SELECT count(*) FROM opdb_raw.aliases)
 UNION ALL
-SELECT 'opdb', 'export', 'opdb_export_groups.json', NULL, count(*) FROM opdb_raw.groups
+-- Downloaded separately from the export and normally NEWER. `created_at` here IS
+-- OPDB's own claim -- the newest retirement it knows of -- which makes this the
+-- one OPDB artifact carrying a real watermark.
+SELECT 'opdb', 'id changelog', 'opdb/opdb_changelog.json',
+  (SELECT CAST(max(createdAt) AS TIMESTAMP) FROM opdb_raw.changelog),
+  (SELECT count(*) FROM opdb_raw.changelog)
 UNION ALL
 SELECT 'fandom', 'export', 'fandom_games.json', NULL, count(*) FROM fandom_raw.games
 UNION ALL

@@ -44,6 +44,14 @@ Other schemas:
 - `glossary`: the three pinball glossaries and their comparison
 - `checks`: the build's own internal verdicts
 
+## OPDB
+
+Two files in `ingest_sources/opdb/`: `opdb_full.json`, the export itself, and `opdb_changelog.json`, OPDB's id changelog. **One snapshot, not a merged series** — unlike the IPDB Xantari dumps beside them. OPDB exports its own database rather than being scraped, so nothing drops out; every row carries its own `updatedAt`, so "what changed upstream" needs no earlier dump to diff against; and the changelog names outright where a retired id went. The paths are undated and stable, so updating is overwriting the two files — no SQL edit, no snapshot list. The cost of that is that neither file records when it was downloaded; the changelog's newest `created_at` is the only dating either one has, and the newest `updated_at` in the export is a floor on when it was taken.
+
+The export is one JSON object of three arrays — `machineGroups`, `machines`, `aliases` — where the older one shipped machines and aliases in a single list behind a flag. `opdb_stg.machines` puts those two back together, because an alias is a machine as far as any consumer is concerned and the split is a fact about the file format. OPDB exports camelCase; the mart renames it, and `opdb_column_not_snake_case` fails the build on a field nobody named.
+
+`opdb.changelog` is worth reading before concluding a machine is gone. An id missing from the export is otherwise indistinguishable from a deletion, and a `move` row is the difference between "OPDB dropped this machine" and "OPDB renumbered it". The changelog is downloaded separately from the export and is normally **newer**, so it may retire an id the export still lists; two warnings in `sql/08_source_warning_checks.sql` watch that gap.
+
 ## Related scripts
 
 - `scripts/rebuild_explore.py` — build `explore.duckdb` from the SQL layers

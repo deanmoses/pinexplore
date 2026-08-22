@@ -17,8 +17,37 @@ CREATE OR REPLACE TABLE checks.violations (category VARCHAR, check_name VARCHAR,
 ------------------------------------------------------------
 
 INSERT INTO checks.violations
-SELECT 'source_dumps', 'opdb_record_missing_id', name
-FROM opdb_raw.machines WHERE opdb_id IS NULL;
+SELECT 'source_dumps', 'opdb_record_missing_id', "name"
+FROM opdb_stg.machines WHERE opdbId IS NULL;
+
+-- One row per id across BOTH source arrays. Machines and aliases are separate
+-- lists upstream with nothing enforcing they stay disjoint, and `opdb_stg`
+-- unions them -- so an id in both would silently double a machine and every
+-- count taken over it.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'opdb_duplicate_id', opdbId || ' x' || count(*)
+FROM opdb_stg.machines GROUP BY opdbId HAVING count(*) > 1;
+
+-- OPDB encodes the hierarchy into the id, which makes the id and the arrays two
+-- independent statements of the same structure. These check they agree: a
+-- machine whose group prefix names no group, and an alias whose first two
+-- segments name no machine. Either means the export is internally inconsistent
+-- and any join through the hierarchy silently loses rows.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'opdb_machine_group_missing', m.opdbId
+FROM opdb_stg.machines AS m
+WHERE NOT EXISTS (
+  SELECT 1 FROM opdb_raw.machine_groups AS g WHERE g.opdbId = m.group_id
+);
+
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'opdb_alias_parent_machine_missing', a.opdbId
+FROM opdb_stg.machines AS a
+WHERE a.isAlias
+  AND NOT EXISTS (
+    SELECT 1 FROM opdb_stg.machines AS m
+    WHERE m.isMachine AND m.opdbId = a.group_id || '-' || a.machine_id
+  );
 
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_record_missing_id', Title

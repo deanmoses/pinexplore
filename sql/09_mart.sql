@@ -13,40 +13,117 @@
 -- OPDB
 ------------------------------------------------------------
 
--- OPDB's export with its two coded fields resolved to catalog slugs.
+-- One row per OPDB machine, aliases included, in our spelling.
 --
--- Published straight from raw: this is the source's only transform. Column names
--- are OPDB's own and already snake_case.
+-- The star keeps a field OPDB gains upstream instead of dropping it; the RENAME
+-- spells the known ones our way. OPDB exports camelCase, so an unrecognised
+-- field arrives as `someNewThing` and trips `opdb_column_not_snake_case`, and
+-- naming it is a one-line addition below.
+--
+-- `manufacturer` is flattened rather than renamed: it is a struct whose OWN keys
+-- are camelCase, and no rename reaches inside one. Flattening also spares every
+-- consumer the `->>` and matches how the rest of the mart puts a fact on the row.
+--
+-- The grain is machines AND aliases. `is_alias` separates them and both flags
+-- are real booleans, never NULL -- see `opdb_stg.machines`.
 CREATE OR REPLACE VIEW opdb.machines AS
 SELECT
-  om.*,
-  (om.manufacturer ->> 'name') AS manufacturer_name,
+  om.* EXCLUDE (manufacturer)
+       RENAME (
+         opdbId          AS opdb_id,
+         isMachine       AS is_machine,
+         isAlias         AS is_alias,
+         commonName      AS common_name,
+         physicalMachine AS physical_machine,
+         ipdbId          AS ipdb_id,
+         manufactureDate AS manufacture_date,
+         playerCount     AS player_count,
+         createdAt       AS created_at,
+         updatedAt       AS updated_at
+       ),
+  om.manufacturer.manufacturerId AS opdb_manufacturer_id,
+  om.manufacturer.name           AS manufacturer_name,
+  om.manufacturer.fullName       AS manufacturer_full_name,
   tg.slug AS technology_generation_slug,
   dt.slug AS display_type_slug
-FROM opdb_raw.machines AS om
+FROM opdb_stg.machines AS om
 LEFT JOIN opdb_ref.technology_generation AS tg ON om."type" = tg.opdb_type
 LEFT JOIN opdb_ref.display_type AS dt ON om.display = dt.opdb_display;
 
+-- OPDB's machine groups: the title a machine's editions hang off, keyed by the
+-- first segment of every machine id under it.
+--
+-- Not published from the older export at all, which had nothing here worth
+-- reading. This one carries `year` on every row and four external reference
+-- URLs -- Pinball Primer, Pinball Cards, Bob's Guide, Pinball Rules -- which are
+-- OPDB's own links to sources we would otherwise have to find ourselves.
+CREATE OR REPLACE VIEW opdb.machine_groups AS
+SELECT
+  g.* RENAME (
+    opdbId           AS opdb_id,
+    isMachineGroup   AS is_machine_group,
+    pinballPrimerUrl AS pinball_primer_url,
+    pinballCardsUrl  AS pinball_cards_url,
+    bobsGuideUrl     AS bobs_guide_url,
+    pinballRulesUrl  AS pinball_rules_url,
+    createdAt        AS created_at,
+    updatedAt        AS updated_at
+  )
+FROM opdb_raw.machine_groups AS g;
+
+-- Every id OPDB has retired, and what replaced it.
+--
+-- Published because following a `move` is the only way to tell a machine OPDB
+-- DELETED from one it renumbered. A comparison that reads the export alone sees
+-- both as absence and reports a machine gone that is sitting right there under
+-- a new id.
+--
+-- `action` is `move` (with a replacement) or `delete` (without). Read the two
+-- warnings in `08_source_warning_checks.sql` before treating a row as current:
+-- this artifact is downloaded separately from the export and may be newer.
+CREATE OR REPLACE VIEW opdb.changelog AS
+SELECT
+  c.* EXCLUDE (createdAt)
+      RENAME (
+        changelogId       AS changelog_id,
+        opdbIdDeleted     AS opdb_id_deleted,
+        opdbIdReplacement AS opdb_id_replacement
+      ),
+  -- Excluded rather than renamed because it needs a cast too, and a column may
+  -- not appear in both RENAME and REPLACE. Arrives as an ISO string; UTC on
+  -- every row, which the type cannot carry and the column name will not repeat.
+  CAST(c.createdAt AS TIMESTAMP) AS created_at
+FROM opdb_raw.changelog AS c;
+
 CREATE OR REPLACE VIEW opdb.manufacturers AS
 SELECT DISTINCT
-  om.manufacturer.manufacturer_id AS opdb_manufacturer_id,
-  (om.manufacturer ->> 'name') AS "name",
-  (om.manufacturer ->> 'full_name') AS full_name
-FROM opdb_raw.machines AS om
-WHERE om.manufacturer IS NOT NULL
+  om.opdb_manufacturer_id,
+  om.manufacturer_name AS "name",
+  om.manufacturer_full_name AS full_name
+FROM opdb.machines AS om
+WHERE om.opdb_manufacturer_id IS NOT NULL
 ORDER BY "name";
 
 CREATE OR REPLACE VIEW opdb.keywords AS
 SELECT opdb_id, "name", unnest(keywords) AS keyword
-FROM opdb_raw.machines
+FROM opdb.machines
 WHERE len(keywords) > 0;
 
 -- OPDB's image array flattened, one row per image: the struct is awkward to
 -- reach into from a join.
+--
+-- `is_primary` is primary WITHIN ITS `image_type`, not for the machine, so a
+-- machine with a backglass and a playfield has TWO primaries and `WHERE
+-- is_primary` returns both. Picking one image means naming the type as well.
+-- The old export marked primaries the same way; nothing about it is new.
+--
+-- `image_asset_id` is OPDB's field `group`, renamed because it groups nothing --
+-- it is unique per image, and it is the uuid the three size URLs are built from.
 CREATE OR REPLACE VIEW opdb.machine_images AS
 SELECT
   om.opdb_id,
   om.name AS machine_name,
+  img."group" AS image_asset_id,
   img.title AS image_title,
   img."primary" AS is_primary,
   img."type" AS image_type,

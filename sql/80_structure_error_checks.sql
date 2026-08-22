@@ -46,6 +46,25 @@ WHERE database_name = current_database()
   AND schema_name = 'ipdb' AND table_name = 'models'
   AND NOT regexp_matches(column_name, '^[a-z][a-z0-9_]*$');
 
+-- The same rule over the whole OPDB mart rather than one relation, because OPDB
+-- exports camelCase and EVERY published view here is a rename of it -- so the
+-- field that slips through could slip through any of them. The fix is one line
+-- in the relevant RENAME list in `09_mart.sql`.
+INSERT INTO checks.violations
+SELECT 'mart', 'opdb_column_not_snake_case', table_name || '.' || column_name
+FROM duckdb_columns()
+WHERE database_name = current_database()
+  AND schema_name = 'opdb'
+  AND NOT regexp_matches(column_name, '^[a-z][a-z0-9_]*$');
+
+-- The mart's two code lookups are lookups and neither may multiply: a second
+-- `opdb_ref.display_type` row for one code fans every machine using it into two.
+INSERT INTO checks.violations
+SELECT 'mart', 'opdb_machines_grain_not_one_row_per_staged_machine',
+  (SELECT count(*) FROM opdb_stg.machines)::VARCHAR || ' staged -> '
+    || (SELECT count(*) FROM opdb.machines)::VARCHAR || ' published'
+WHERE (SELECT count(*) FROM opdb.machines) <> (SELECT count(*) FROM opdb_stg.machines);
+
 -- A sentinel manufacturer id reaching a consumer untranslated. Checked because
 -- the failure is silent from the outside: the id reads as a real corporate
 -- entity, attributing models to a company IPDB explicitly declines to name.

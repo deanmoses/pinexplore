@@ -24,38 +24,52 @@ CREATE OR REPLACE TABLE fandom_raw.people AS
 SELECT d.*
 FROM (SELECT unnest(persons) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom_persons.json'));
 
--- OPDB (Open Pinball Database) exports
-CREATE OR REPLACE TABLE opdb_raw.groups AS
-SELECT * FROM read_json_auto(getvariable('ingest_base') || '/opdb_export_groups.json');
+-- OPDB (Open Pinball Database) export.
+--
+-- ONE snapshot, not a merged series -- the opposite of the xantari treatment
+-- below, and deliberately so. This is OPDB's own export rather than a scrape of
+-- it, so it drops nothing; every row carries its own `updatedAt`, so "what
+-- changed upstream" is answerable without a prior snapshot to diff against; and
+-- the changelog states outright where a vanished id went. Nothing a previous
+-- dump could contribute is missing from those three facts. The paths are
+-- therefore undated and stable: updating is overwriting the two files, with no
+-- edit here and no snapshot list to maintain -- the opposite of the xantari read
+-- below, where a new file means a new line.
+--
+-- The file is one JSON object of three arrays, so each read unnests its own.
+-- `d.*` rather than a column list: this is upstream's file and it gains fields
+-- unannounced, so a star is what carries a new one through to the mart, where
+-- `opdb_column_not_snake_case` fails the build until it is named. Keys arrive in
+-- camelCase and stay that way until `09_mart.sql` renames them.
+CREATE OR REPLACE TABLE opdb_raw.machine_groups AS
+SELECT d.*
+FROM (SELECT unnest(machineGroups) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
 
 CREATE OR REPLACE TABLE opdb_raw.machines AS
-SELECT
-  opdb_id,
-  split_part(opdb_id, '-', 1) AS group_id,
-  split_part(opdb_id, '-', 2) AS machine_id,
-  CASE
-    WHEN split_part(opdb_id, '-', 3) = '' THEN NULL
-    ELSE split_part(opdb_id, '-', 3)
-  END AS alias_id,
-  is_machine,
-  is_alias,
-  "name",
-  common_name,
-  shortname,
-  physical_machine,
-  ipdb_id,
-  manufacture_date,
-  manufacturer,
-  "type",
-  display,
-  player_count,
-  features,
-  keywords,
-  description,
-  created_at,
-  updated_at,
-  images
-FROM read_json_auto(getvariable('ingest_base') || '/opdb_export_machines.json');
+SELECT d.*
+FROM (SELECT unnest(machines) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
+
+-- Aliases are their own array now, where the older export folded them into the
+-- machine list behind an `is_alias` flag. They carry a strict subset of a
+-- machine's fields -- no `type`, `display`, `playerCount`, `physicalMachine` or
+-- `description` -- which loses nothing: those were NULL on every alias row of
+-- the old export too. `opdb_stg.machines` puts the two back together.
+CREATE OR REPLACE TABLE opdb_raw.aliases AS
+SELECT d.*
+FROM (SELECT unnest(aliases) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_full.json'));
+
+-- OPDB's id changelog: every id OPDB has retired since 2018 and what replaced
+-- it. CUMULATIVE, not a delta -- each download restates the whole history.
+--
+-- This is the reason a second dump is unnecessary. An id missing from the export
+-- is otherwise indistinguishable from an id we simply never saw; here OPDB says
+-- which, and for a `move` says where it went. It also runs AHEAD of the export
+-- -- it is downloaded separately and later -- so a row here may retire an id the
+-- dump still lists, and may name ids from before our first dump. Neither is a
+-- fault; see the checks in `08_source_warning_checks.sql`.
+CREATE OR REPLACE TABLE opdb_raw.changelog AS
+SELECT d.*
+FROM (SELECT unnest(data) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_changelog.json'));
 
 -- IPDB (Internet Pinball Database) export — xantari/Ipdb.Database scrape.
 --

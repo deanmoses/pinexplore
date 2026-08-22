@@ -3,6 +3,47 @@
 -- No cross-source joins.
 
 ------------------------------------------------------------
+-- OPDB staged
+------------------------------------------------------------
+
+-- Machines and aliases back in one relation, the shape the rest of the pipeline
+-- wants and the shape OPDB's older export shipped.
+--
+-- An alias IS a machine as far as every consumer is concerned -- a specific
+-- edition of one, keyed by a third id segment -- and splitting them across two
+-- arrays is a fact about OPDB's export format, not about the machines. Rejoining
+-- them here means the mart publishes one grain and a caller that wants only the
+-- base machines says `WHERE is_machine`.
+--
+-- `UNION ALL BY NAME` because the two arrays disagree on their column sets: it
+-- matches on name and fills the alias-side absences with NULL, which is exactly
+-- what the old export carried on those rows. A column list would have to
+-- enumerate both sides and would silently drop whichever field OPDB adds next.
+--
+-- `is_machine` and `is_alias` are forced to real booleans. Upstream states only
+-- the true one on each row, so a straight union leaves the other NULL and
+-- `WHERE NOT is_alias` -- the obvious way to write the obvious filter -- returns
+-- nothing at all.
+--
+-- The id is split because OPDB encodes the hierarchy INTO it: `G50L9-MDxXD` is
+-- machine `MDxXD` of group `G50L9`, and a third segment makes it an alias. Every
+-- join to a group or a parent machine needs the parts, and deriving them at each
+-- call site is where they get derived inconsistently.
+CREATE OR REPLACE TABLE opdb_stg.machines AS
+SELECT
+  *,
+  split_part(opdbId, '-', 1) AS group_id,
+  split_part(opdbId, '-', 2) AS machine_id,
+  nullif(split_part(opdbId, '-', 3), '') AS alias_id
+FROM (
+  SELECT m.* REPLACE (true AS isMachine), false AS isAlias
+  FROM opdb_raw.machines AS m
+  UNION ALL BY NAME
+  SELECT a.* REPLACE (true AS isAlias), false AS isMachine
+  FROM opdb_raw.aliases AS a
+);
+
+------------------------------------------------------------
 -- IPDB staged
 ------------------------------------------------------------
 

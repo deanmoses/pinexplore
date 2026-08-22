@@ -163,3 +163,56 @@ SELECT 'ipdb_additional_details_date_unrecognised', count(*)
 FROM ipdb_stg.model_additional_details
 WHERE additional_details_date_string IS NOT NULL
   AND additional_details_date_year IS NULL;
+
+------------------------------------------------------------
+-- OPDB changelog vs the export
+------------------------------------------------------------
+
+-- A `move` whose replacement id is in neither the export nor a later changelog
+-- row -- so following the move lands nowhere and the machine is unreachable
+-- under either id.
+--
+-- Expected to be ZERO but not made an error, because the two artifacts are
+-- downloaded separately: a replacement created after the export was taken has
+-- nowhere to be yet. A row here means "re-download the export", not "the data is
+-- wrong". Chased one hop, since OPDB moves an id more than once.
+-- Details: SELECT * FROM opdb.changelog c WHERE c.action = 'move' AND NOT EXISTS
+--   (SELECT 1 FROM opdb.machines m WHERE m.opdb_id = c.opdb_id_replacement)
+--   AND NOT EXISTS (SELECT 1 FROM opdb.changelog c2 WHERE c2.opdb_id_deleted = c.opdb_id_replacement)
+INSERT INTO checks.warnings
+SELECT 'opdb_changelog_replacement_unresolved', count(*)
+FROM opdb_raw.changelog AS c
+WHERE c.action = 'move'
+  AND NOT EXISTS (SELECT 1 FROM opdb_stg.machines AS m WHERE m.opdbId = c.opdbIdReplacement)
+  AND NOT EXISTS (SELECT 1 FROM opdb_raw.changelog AS c2 WHERE c2.opdbIdDeleted = c.opdbIdReplacement);
+
+-- Ids the changelog has retired that the export still lists.
+--
+-- Normal, and it is the changelog being AHEAD rather than the export being
+-- stale: the changelog is downloaded after the export and its newest rows retire
+-- ids the export was taken too early to have dropped. The number is the size of
+-- that gap. Only a row whose `created_at` PREDATES the export is a real fault,
+-- and telling those apart needs an export date the file does not carry -- see
+-- `ingest.watermarks`.
+INSERT INTO checks.warnings
+SELECT 'opdb_changelog_retired_id_still_in_export', count(*)
+FROM opdb_raw.changelog AS c
+WHERE EXISTS (SELECT 1 FROM opdb_stg.machines AS m WHERE m.opdbId = c.opdbIdDeleted);
+
+-- More than one image marked primary for the same machine AND type, which makes
+-- "the backglass" ambiguous and leaves any single-image pick arbitrary.
+--
+-- Upstream's to fix, not ours, hence a warning. Currently zero -- which is the
+-- reason to watch it: a query written against today's data picks
+-- `is_primary AND image_type = 'backglass'` and quietly starts returning two.
+-- Details: SELECT opdb_id, image_type, count(*) FROM opdb.machine_images
+--   WHERE is_primary GROUP BY 1, 2 HAVING count(*) > 1
+INSERT INTO checks.warnings
+SELECT 'opdb_multiple_primary_images_for_type', count(*)
+FROM (
+  SELECT m.opdbId, img."type"
+  FROM opdb_stg.machines AS m, unnest(m.images) AS t(img)
+  WHERE img."primary"
+  GROUP BY 1, 2 HAVING count(*) > 1
+);
+
