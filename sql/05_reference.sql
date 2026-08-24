@@ -242,7 +242,9 @@ SELECT * FROM (VALUES
   ('Widebody',                            'tag',                'widebody'),
   ('Non-Commercial Machine [Home Model]', 'tag',                'home-use'),
   ('WWII Contract',                       'tag',                'wwii-contract'),
-  ('Flipperless',                         'tag',                'flipperless'),
+  -- Display wording: the plan calls Flipperless a signal to CONSIDER a tag, and
+  -- no catalog tag exists yet. Slugify when one is minted.
+  ('Flipperless',                         'tag',                'Flipperless'),
   ('Mechanical Backbox Animation',        'gameplay-feature',   'Mechanical Backbox Animation'),
   ('Head-to-Head Play',                   'gameplay-feature',   'Head-to-Head Play'),
   ('Zipper Flippers',                     'gameplay-feature',   'Zipper Flippers')
