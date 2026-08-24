@@ -239,7 +239,7 @@ SELECT DISTINCT
 FROM opdb.models AS om
 WHERE om.opdb_manufacturer_id IS NOT NULL;
 COMMENT ON VIEW opdb.manufacturers IS
-  'OPDB manufacturers, one row per id, taken distinct over the machines that carry them.';
+  'Distinct manufacturer id and name combinations observed on OPDB models; an id may repeat when upstream names conflict.';
 
 ------------------------------------------------------------
 -- OPDB models, one view per many-to-many Flipcommons entity
@@ -294,14 +294,14 @@ FROM (
   SELECT * FROM opdb_stg.model_keywords WHERE target_entity_type = 'tag'
 );
 COMMENT ON VIEW opdb.model_tags IS
-  'One row per model per Flipcommons Tag, fed by OPDB features and keywords both.';
+  'One row per model and OPDB value bucketed for later matching to Flipcommons Tags, fed by features and keywords.';
 
 CREATE OR REPLACE VIEW opdb.model_themes AS
 SELECT DISTINCT opdb_id, "name" AS model_name,
   target_value AS theme
 FROM opdb_stg.model_keywords WHERE target_entity_type = 'theme';
 COMMENT ON VIEW opdb.model_themes IS
-  'One row per model per Flipcommons Theme, fed by OPDB keywords.';
+  'One row per model and OPDB keyword bucketed for later matching to Flipcommons Themes.';
 
 CREATE OR REPLACE VIEW opdb.model_gameplay_features AS
 SELECT DISTINCT opdb_id, "name" AS model_name,
@@ -312,7 +312,7 @@ FROM (
   SELECT * FROM opdb_stg.model_keywords WHERE target_entity_type = 'gameplay-feature'
 );
 COMMENT ON VIEW opdb.model_gameplay_features IS
-  'One row per model per Flipcommons GameplayFeature, fed by OPDB features and keywords both.';
+  'One row per model and OPDB value bucketed for later matching to Flipcommons GameplayFeatures, fed by features and keywords.';
 
 -- One row per Flipcommons `Series` OPDB implies, at OPDB's grain.
 --
@@ -332,7 +332,7 @@ SELECT DISTINCT opdb_id, "name" AS model_name,
   target_value AS reward_type
 FROM opdb_stg.model_features WHERE target_entity_type = 'reward-type';
 COMMENT ON VIEW opdb.model_reward_types IS
-  'One row per model per Flipcommons RewardType, fed by OPDB features.';
+  'One row per model and OPDB feature bucketed for later matching to Flipcommons RewardTypes.';
 
 -- One row per Flipcommons `ModelRelationship` edge OPDB implies.
 --
@@ -399,7 +399,7 @@ SELECT
 FROM opdb_stg.machines AS om, unnest(om.images) AS t(img)
 WHERE om.is_model;
 COMMENT ON VIEW opdb.model_images IS
-  'The OPDB image array flattened, one row per image per model.';
+  'One row per OPDB image per model; is_primary is scoped to image_type, not the model.';
 
 ------------------------------------------------------------
 -- IPDB
@@ -494,6 +494,8 @@ LEFT JOIN ipdb_ref.corporate_entity_not_a_company AS nac
   ON nac.ipdb_manufacturer_id = s.ManufacturerId
 LEFT JOIN ipdb_ref.duplicate_listings AS dup
   ON dup.ipdb_id = s.IpdbId;
+COMMENT ON VIEW ipdb.models IS
+  'Newest available xantari observation per IPDB model, supplemented with selected archived-page fields; carried_forward marks older observations.';
 
 -- IPDB's credits, one row per credited person per model.
 --
@@ -507,6 +509,8 @@ SELECT
   role_slug,
   person_name
 FROM ipdb_stg.credits;
+COMMENT ON VIEW ipdb.credits IS
+  'One row per IPDB model, credited person and role, with the role in both IPDB and catalog vocabulary.';
 
 -- Published whole so unused rules remain visible even when no cached page
 -- exercises them.
@@ -516,6 +520,8 @@ SELECT
   target_entity_type,
   target_value
 FROM ipdb_ref.specialty;
+COMMENT ON VIEW ipdb.specialties IS
+  'IPDB''s full Specialty vocabulary with the Flipcommons target type and value each rule proposes, including values unused by cached pages.';
 
 -- Keeps IPDB's wording beside its decode, plus the capture provenance because
 -- classification may have changed since the archived page.
@@ -532,6 +538,8 @@ SELECT
 FROM ipdb_stg.archive_model_specialties AS ams
 INNER JOIN ipdb_ref.specialty AS sp
   ON sp.ipdb_specialty = ams.specialty;
+COMMENT ON VIEW ipdb.model_specialties IS
+  'One row per model per IPDB specialty, keeping IPDB''s wording beside its decode and the archived page it was read from.';
 
 -- IPDB's corporate entities, in our vocabulary.
 --
@@ -555,6 +563,8 @@ SELECT
   year_of_first_model,
   year_of_last_model
 FROM ipdb_stg.corporate_entities;
+COMMENT ON VIEW ipdb.corporate_entities IS
+  'IPDB manufacturer records parsed as corporate incarnations rather than brands, with company, trade name, dates and location separated.';
 
 -- Listings IPDB deleted, which `ipdb_stg.models_merged` drops.
 --
@@ -565,3 +575,5 @@ FROM ipdb_stg.corporate_entities;
 CREATE OR REPLACE VIEW ipdb.retracted_listings AS
 SELECT ipdb_id, first_absent_on, reason, evidence_url
 FROM ipdb_ref.retracted;
+COMMENT ON VIEW ipdb.retracted_listings IS
+  'Listings IPDB has deleted -- the only place an id absent from ipdb.models is distinguishable from one never crawled.';

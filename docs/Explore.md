@@ -52,13 +52,13 @@ Other schemas:
 
 ### Finding your way around a mart
 
-Ask the database, rather than a list in this file that drifts from it. Each mart view carries a one-line description as a SQL `COMMENT`, so this is the index:
+Ask the database, rather than a list in this file that drifts from it. Each mart relation carries a one-line description as a SQL `COMMENT`, so this is the index:
 
 ```sql
 SELECT view_name, comment FROM duckdb_views() WHERE schema_name = 'opdb' ORDER BY view_name;
 ```
 
-Today only `opdb` is fully described this way; the other marts return the relation names without descriptions until they are commented too.
+`opdb`, `ipdb` and `ingest` are described this way, and a build check keeps that coverage complete as relations are added. `glossary` and `web_cache` are not, so they return their relation names without descriptions; both hold tables as well as views, so reach for `duckdb_tables()` there too.
 
 The `checks` schema is worth knowing about for a different reason: every warning the build prints is a count of a `checks.<check_name>` view, and that view holds the actual rows. When a build reports a non-zero warning, the worklist behind it is one query away.
 

@@ -272,7 +272,7 @@ Here's a Flippatch comparison layer namespace proposal. I don't like it yet beca
 
 All layers public. Prefix private stuff with underscore like `_name`, like everything else in Flipcommons.
 
-This requires teaching the Flipcommons runner, `analyze`, about the `ext*` namespaces so that it discovers checks and describes the views/tables/macros.
+This requires teaching the Flipcommons runner, `analyze`, about the `ext*` namespaces so that it discovers checks and describes the views/tables/macros. Which I also don't like. For one, it inverts the dependency and makes Flipcommons know about Flippatch.
 
 ## Read these before designing architecture or writing SQL
 
@@ -289,14 +289,14 @@ Also you CANNOT do this deep data work, which is all about the nuanced semantics
 
 ## Sequencing
 
-- ✅ DONE: **Comparison layer in Flippatch**. A first draft exists but it doesn't much look like the Flipcommons audit system.
+- PARTIALLY DONE: **Comparison layer in Flippatch**. A first draft exists but it doesn't much look like the Flipcommons audit system.
 - ✅ DONE: **Delete pindata**. Delete the pindata-centric SQL from Pinexplore only after all the useful comparison stuff has been extracted. This is where the Pinexplore DuckDB build goes green again.
 - ✅ DONE: **Namespacing Pinexplore**
 - ✅ DONE: **IPDB JSONL + Xantari combining**
 - ✅ DONE: **IPDB Specialties**
+- ✅ DONE: **Bring IPDB into line with OPDB**. OPDB went first deliberately. `opdb_ref.feature` / `opdb_ref.keyword` now emit `target_value` alone — slug-shaped, never a claim about what the catalog holds — and the `opdb.model_*` views publish the value with no `*_exists` flag beside it. `ipdb_ref.specialty` still carries `target_public_id` and `target_is_public_id`, and `ipdb.specialties` / `ipdb.model_specialties` still publish the flag. Once the OPDB shape has been lived with, apply the same three changes to IPDB: drop the flag, rename to `target_value`, and split translated-vs-bucketed by the rule in `OpdbMappings.md` — IPDB Specialties are a small closed vocabulary, so they translate.
 - **Move the OPDB manufacturer exceptions to Flippatch**. `opdb_ref.manufacturer_exceptions` was deleted from Pinexplore: nothing read it, and a comparison exception belongs beside the comparison. The 13 researched rows are recoverable with `git log -S opdb_ref.manufacturer_exceptions -p`. Whatever inherits them needs the check its own comment asked for — that each `manufacturer_slug` still resolves in the catalog.
 - **Widen `opdb_mart_view_undocumented` past `opdb`**. Every `opdb` mart view now carries a one-line SQL `COMMENT` and a check in `80_structure_error_checks.sql` keeps that coverage complete. The check is scoped to `schema_name = 'opdb'` deliberately: the `ipdb`, `ingest`, `glossary` and `web_cache` marts are uncommented, and writing their descriptions without reading those views would put confidently wrong text in the database. Comment them, then drop the schema filter. Natural companion to the IPDB dialect work.
-- **Bring IPDB into line with OPDB**. OPDB went first deliberately. `opdb_ref.feature` / `opdb_ref.keyword` now emit `target_value` alone — slug-shaped, never a claim about what the catalog holds — and the `opdb.model_*` views publish the value with no `*_exists` flag beside it. `ipdb_ref.specialty` still carries `target_public_id` and `target_is_public_id`, and `ipdb.specialties` / `ipdb.model_specialties` still publish the flag. Once the OPDB shape has been lived with, apply the same three changes to IPDB: drop the flag, rename to `target_value`, and split translated-vs-bucketed by the rule in `OpdbMappings.md` — IPDB Specialties are a small closed vocabulary, so they translate.
-- **Namespacing Flippatch**.
+- DEFERRED: **Namespacing Flippatch**. Maybe sometime leter, but I don't feel like updating the runner now.
 
 NEVER `make pull` or `make push` through any of this. Neither command is allowed for AIs. There's no data on R2 that you need. All of this is happening on Moses' computer and the data is already there.

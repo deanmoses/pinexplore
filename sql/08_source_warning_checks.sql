@@ -1,6 +1,5 @@
 -- Soft warnings (data quality, not hard build-stopping violations).
 -- Creates and fills `checks.warnings`; no later layer adds to it.
--- All warnings are printed at the end of the build by `90_print_warnings.sql`.
 --
 -- Most of these watch a hand-maintained exception list for going stale, which it
 -- does silently by construction: a rule that stops matching suppresses nothing,

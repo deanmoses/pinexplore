@@ -33,6 +33,8 @@ SELECT
   max(last_fetched_at),
   count(*)
 FROM ipdb_raw.archive_models;
+COMMENT ON VIEW ipdb.ingest_watermarks IS
+  'One row per ingested IPDB artifact with its record count and best available watermark; archive extracts use latest fetch time.';
 
 
 -- Every ingested artifact, one row each, whatever source it came from.
@@ -71,3 +73,5 @@ UNION ALL
 SELECT 'glossary', 'parsed html', 'kineticist_glossary.json', NULL, count(*) FROM glossary.kineticist
 UNION ALL
 SELECT 'glossary', 'parsed html', 'pinball_primer_glossary.json', NULL, count(*) FROM glossary.pinball_primer;
+COMMENT ON VIEW ingest.watermarks IS
+  'One row per ingested artifact with its record count and best available watermark; observed_at is NULL when no date is available.';

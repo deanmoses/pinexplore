@@ -176,22 +176,27 @@ INSERT INTO checks.violations
 SELECT 'mart', 'opdb_moved_id_unresolved', opdb_id
 FROM opdb.model_ids WHERE status = 'moved' AND current_opdb_id IS NULL;
 
--- Every `opdb` mart view carries a one-line COMMENT.
+-- Every published mart relation carries a one-line COMMENT.
 --
--- Guards COVERAGE, not the descriptions themselves -- those are attached to the
--- view and cannot drift from it. What nothing else stops is someone adding a
--- mart view and no comment at all, which is the omission this catches. Same
--- shape as `opdb_column_not_snake_case` over `duckdb_columns()`.
+-- Guards coverage only: it cannot tell whether a description is right or stale.
+-- It catches a mart relation with no comment at all, the same shape as
+-- `opdb_column_not_snake_case` over `duckdb_columns()`.
 --
--- SCOPED TO `opdb` DELIBERATELY, not by oversight: the other mart schemas are
--- uncommented, and writing their one-liners without reading those views would
--- put confidently wrong descriptions in the database, which is the failure this
--- whole idiom exists to prevent. Widening it is tracked in the sequencing list
--- in `docs/plans/PindataRemoval.md`.
+-- The schema list is enumerated rather than derived. `glossary` and `web_cache`
+-- are readable and uncommented, and writing their one-liners without reading
+-- those relations would put confidently wrong descriptions in the database,
+-- which is the failure this whole idiom exists to prevent. Add a schema here
+-- once its relations are described.
 INSERT INTO checks.violations
-SELECT 'mart', 'opdb_mart_view_undocumented', view_name
-FROM duckdb_views()
-WHERE database_name = current_database() AND schema_name = 'opdb'
+SELECT 'mart', 'mart_relation_undocumented', schema_name || '.' || relation_name
+FROM (
+  SELECT schema_name, view_name AS relation_name, comment
+  FROM duckdb_views() WHERE database_name = current_database()
+  UNION ALL
+  SELECT schema_name, table_name, comment
+  FROM duckdb_tables() WHERE database_name = current_database()
+)
+WHERE schema_name IN ('opdb', 'ipdb', 'ingest')
   AND coalesce(comment, '') = '';
 
 -- Every warning is a count of its own `checks.<check_name>` view, and the two

@@ -1,4 +1,4 @@
--- The IPDB file trove, classified.
+-- IPDB's files, classified.
 --
 -- Read by nothing, which is the expected state: these views are how the web
 -- cache's `source = 'ipdb_pattern'` classifications are produced. Change a
@@ -95,7 +95,7 @@ SELECT
   f.model_mpu,
 
   -- What it is. A list, never a scalar: a manual containing schematics is both,
-  -- and a good share of the documentation trove matches more than one class.
+  -- and a good share of the docs matches more than one class.
   coalesce(c.class_matches, []::VARCHAR[]) AS class_matches,
   -- The same list widened to declared parents, so "every manual" needs no
   -- hardcoded child list at the call site.
@@ -130,6 +130,8 @@ SELECT
 FROM ipdb_stg.files AS f
 LEFT JOIN cls AS c USING (ipdb_id, file_url, ipdb_category)
 LEFT JOIN shared AS s USING (file_basename);
+COMMENT ON VIEW ipdb.documents IS
+  'IPDB file listings with filename-pattern classifications and inferred subject scope; grain is model, URL and IPDB category.';
 
 -- A patent is addressed by jurisdiction and number, so that pair is a stronger
 -- identity than the filename and the subject scope is recomputed on it.
@@ -143,7 +145,7 @@ WITH parsed AS (
     f.container,
     f.model_manufacturer,
     f.model_mpu,
-    -- US is the fallback, not a guess: every remaining form in the trove
+    -- US is the fallback, not a guess: every remaining form 
     -- ("Zipper Flippers Patent 3,404,888", "Patent Listing #1,925,018") carries
     -- a US number, and the two non-US issuers name themselves.
     CASE
@@ -197,6 +199,8 @@ SELECT
   ipdb_ref.document_subject_scope(s.models_referencing, s.manufacturers_referencing) AS subject_scope
 FROM parsed AS p
 LEFT JOIN scope AS s USING (jurisdiction, patent_number);
+COMMENT ON VIEW ipdb.patents IS
+  'IPDB patent file listings with jurisdiction and number parsed from filenames and subject scope aggregated by that pair.';
 
 -- Trade-press coverage, addressed by publication, issue and page. One article
 -- routinely covers several models, which inverts the pattern documents follow.
@@ -248,3 +252,5 @@ SELECT
   ipdb_ref.document_subject_scope(s.models_referencing, s.manufacturers_referencing) AS subject_scope
 FROM parsed AS a
 LEFT JOIN scope AS s USING (file_name);
+COMMENT ON VIEW ipdb.trade_articles IS
+  'IPDB trade-press file listings with publication, issue and pages parsed best-effort from filenames; subject scope is grouped by file name.';
