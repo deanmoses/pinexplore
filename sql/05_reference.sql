@@ -56,13 +56,17 @@ SELECT * FROM (VALUES
 --
 -- WHETHER A VALUE IS TRANSLATED TURNS ON THE TARGET, not on which of the two
 -- decode tables the row lives in. A target in a small closed catalog vocabulary
--- -- tag, reward type, cabinet, series, and the catalog has 4 to 11 of each --
--- is written in the catalog's wording: `Home model` -> `home-use`, `Cocktail
--- table` -> `cocktail`. A target in a large one carrying aliases of its own --
--- theme at 540 rows, gameplay feature at 323 -- keeps OPDB's wording, because
--- matching it to the catalog is what that alias system is for. Hence the single
+-- -- tag, reward type, cabinet, series, none of which the catalog gives an alias
+-- system -- is written in the catalog's wording: `Home model` -> `home-use`,
+-- `Cocktail table` -> `cocktail`. A target in one of the large vocabularies that
+-- DOES carry aliases -- theme, gameplay feature -- keeps OPDB's wording, because
+-- matching it to the catalog is what those aliases are for. Hence the single
 -- gameplay-feature row here reads `Head-to-head play` and not the catalog's
 -- `head-to-head`; that exact phrase is the alias the catalog carries.
+--
+-- The test is whether the vocabulary has aliases, not how big it is. Size is why
+-- it has them, and is the thing that will have changed by the time anyone reads
+-- this.
 -- `docs/plans/OpdbMappings.md` has the rule.
 CREATE OR REPLACE VIEW opdb_ref.feature AS
 SELECT * FROM (VALUES
