@@ -145,7 +145,7 @@ WITH parsed AS (
     f.container,
     f.model_manufacturer,
     f.model_mpu,
-    -- US is the fallback, not a guess: every remaining form 
+    -- US is the fallback, not a guess: every remaining form
     -- ("Zipper Flippers Patent 3,404,888", "Patent Listing #1,925,018") carries
     -- a US number, and the two non-US issuers name themselves.
     CASE

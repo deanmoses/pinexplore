@@ -90,7 +90,7 @@ def _manifest(*entries: dict[str, Any]) -> bytes:
         (0, "0 B"),
         (999, "999 B"),
         (1000, "1.0 KB"),
-        (22_644_762, "22.6 MB"),  # ipdb_xantari.json, the real bucket's largest
+        (22_644_762, "22.6 MB"),
         (190_457_021, "190.5 MB"),
         (1_500_000_000, "1.5 GB"),
         (2_500_000_000_000, "2.5 TB"),

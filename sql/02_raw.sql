@@ -2,7 +2,7 @@
 -- Tables (not views) so JSON is parsed once at build time.
 --
 -- Requires `SET VARIABLE ingest_base = '<path-or-url>'`, which
--- scripts/rebuild_explore.py sets -- to 'ingest_sources' locally, 
+-- scripts/rebuild_explore.py sets -- to 'ingest_sources' locally,
 -- or to the R2 URL in --remote mode.
 
 ------------------------------------------------------------
@@ -27,7 +27,7 @@ FROM (SELECT unnest(persons) AS d FROM read_json_auto(getvariable('ingest_base')
 -- OPDB (Open Pinball Database) export.
 --
 -- This is a direct db dump + changelog from OPDB, not a scrape.
--- Every row is dated with `updatedAt`;  the changelog says where a vanished id went. 
+-- Every row is dated with `updatedAt`;  the changelog says where a vanished id went.
 -- When updating, replace existing dump + changelog files; no need to look at older files, unlike how IPDB works.
 
 --
@@ -56,10 +56,17 @@ CREATE OR REPLACE TABLE opdb_raw.changelog AS
 SELECT d.*
 FROM (SELECT unnest(data) AS d FROM read_json_auto(getvariable('ingest_base') || '/opdb/opdb_changelog.json'));
 
--- IPDB (Internet Pinball Database) export — xantari/Ipdb.Database scrape.
+-- IPDB (Internet Pinball Database) export — a scrape published as JSON at
+-- https://github.com/xantari/Ipdb.Database.
 --
--- Periodic full snapshots kept side by side rather than overwritten; merging
--- them into one row per model is `ipdb_stg.models_merged`.
+-- These are periodic full snapshots kept side by side rather than overwritten, because
+-- we're seeing that newer scrapes can omit records (often sequential records, which would
+-- indicate a temporary issue like networking);
+-- merging them into one row per model is `ipdb_stg.models_merged`.
+--
+-- Best practice: name a snapshot file for its own `LastRefreshDateUtc`, NOT for the day
+-- we downloaded it. Xantari refreshes on an infrequent schedule, so the two can be a
+-- year apart.
 --
 -- Listed explicitly rather than globbed: a glob cannot be expanded over HTTP,
 -- which --remote needs, and an explicit list stops a stray file joining the
@@ -78,8 +85,8 @@ FROM (
   SELECT LastRefreshDateUtc, unnest("Data") AS d
   FROM read_json_auto(
     [
-      getvariable('ingest_base') || '/ipdb_xantari.json',
-      getvariable('ingest_base') || '/ipdb_xantari_2026_08_19.json'
+      getvariable('ingest_base') || '/ipdb_xantari_2025_02_01.json',
+      getvariable('ingest_base') || '/ipdb_xantari_2026_04_11.json'
     ],
     (maximum_object_size = 67108864),
     (union_by_name = true)
