@@ -42,22 +42,27 @@ SELECT * FROM (VALUES
 -- the index of where EVERY OPDB feature goes, and a value missing from it reads
 -- as one nobody has considered.
 --
--- `target_value` IS ALWAYS SLUG-SHAPED AND NEVER A CLAIM ABOUT THE CATALOG.
--- Pinexplore reads no catalog, so it cannot say whether a value resolves there
--- and must not pretend to: `pro-edition` is written the same way as
--- `limited-edition` whether or not the catalog has either. Resolving a value, or
--- deciding it should not resolve, is flippatch's -- beside the live records,
--- where the answer can actually be checked. `opdb_target_value_not_slug_shaped`
--- is the only thing asserted here, and it is a fact about this file.
+-- `target_value` IS NEVER A CLAIM ABOUT THE CATALOG. Pinexplore reads no catalog,
+-- so it cannot say whether a value resolves there and must not pretend to:
+-- `pro-edition` is written the same way as `limited-edition` whether or not the
+-- catalog has either. Resolving a value, or deciding it should not resolve, is
+-- flippatch's -- beside the live records, where the answer can be checked.
+--
+-- NOR IS IT ALWAYS SLUG-SHAPED, and forcing it to be broke a live lookup once.
+-- The catalog's aliases are DISPLAY WORDING -- gameplay feature `head-to-head`
+-- carries the alias `Head-to-head play` -- so a bucketed value has to keep the
+-- source's phrasing to match one. Hyphenating it into `head-to-head-play` made
+-- it match nothing, and no one would ever author that as an alias.
 --
 -- WHETHER A VALUE IS TRANSLATED TURNS ON THE TARGET, not on which of the two
 -- decode tables the row lives in. A target in a small closed catalog vocabulary
--- -- tag, reward type, cabinet, series -- is written in the catalog's wording:
--- `Home model` -> `home-use`, `Cocktail table` -> `cocktail`. A target in a large
--- one with an alias system of its own -- theme, gameplay feature -- keeps OPDB's
--- wording, slugified and nothing more, which is why the single gameplay-feature
--- row here reads `head-to-head-play` rather than the catalog's `head-to-head`.
--- Knowing that those two are the same thing is the alias system's job.
+-- -- tag, reward type, cabinet, series, and the catalog has 4 to 11 of each --
+-- is written in the catalog's wording: `Home model` -> `home-use`, `Cocktail
+-- table` -> `cocktail`. A target in a large one carrying aliases of its own --
+-- theme at 540 rows, gameplay feature at 323 -- keeps OPDB's wording, because
+-- matching it to the catalog is what that alias system is for. Hence the single
+-- gameplay-feature row here reads `Head-to-head play` and not the catalog's
+-- `head-to-head`; that exact phrase is the alias the catalog carries.
 -- `docs/plans/OpdbMappings.md` has the rule.
 CREATE OR REPLACE VIEW opdb_ref.feature AS
 SELECT * FROM (VALUES
@@ -68,7 +73,7 @@ SELECT * FROM (VALUES
   ('Remake',            'model-lineage',      'is_remake'),
   ('Conversion kit',    'model-relationship', 'conversion_kit'),
   ('Converted game',    'model-relationship', 'conversion'),
-  ('Head-to-head play', 'gameplay-feature',   'head-to-head-play'),
+  ('Head-to-head play', 'gameplay-feature',   'Head-to-head play'),
   ('Widebody',          'tag',                'widebody'),
   ('Home model',        'tag',                'home-use'),
   ('Limited edition',   'tag',                'limited-edition'),
@@ -83,8 +88,8 @@ SELECT * FROM (VALUES
 -- one catalog tag.
 --
 -- ALMOST NOTHING IS TRANSLATED HERE, because almost every keyword targets a
--- theme -- a large catalog vocabulary with an alias system of its own, and
--- knowing that OPDB's `automotive` is the catalog's `cars` is that system's job,
+-- theme -- a catalog vocabulary with an alias system;
+-- knowing that `automotive` canonicalizes to `cars` is that system's job,
 -- not this file's. Pinexplore puts a theme-like keyword in the theme bucket and
 -- stops; flippatch resolves it through the aliases, rules it permanently out, or
 -- ignores the bucket entirely. The same rule as `opdb_ref.feature` above, which
@@ -194,57 +199,50 @@ SELECT * FROM (VALUES
 --
 -- `target_entity_type` names a Flipcommons entity type. `model-relationship` is
 -- the exception: it says only that the model has an edge whose donor still needs
--- research. A lowercase slug-like target is intended as a catalog `public_id`;
--- IPDB's own display wording marks unresolved vocabulary. This build can check
--- only that spelling convention; flippatch must check whether the target exists.
+-- research.
 --
--- `target_is_public_id` is NULL on the relationship rows. A relationship type is
--- neither resolvable nor missing vocabulary, and its slug-like spelling would
--- otherwise read as a public_id that no entity can satisfy. NULL drops it from
--- both `WHERE target_is_public_id` and `WHERE NOT target_is_public_id`, so
--- neither the resolve nor the worklist has to special-case it.
+-- `target_value` IS NEVER A CLAIM ABOUT THE CATALOG, the same rule as
+-- `opdb_ref.feature` above, which states it in full. Pinexplore reads no catalog
+-- and cannot know whether a value resolves; flippatch answers that beside the
+-- live records. A slug-shaped value here is a translation into a small closed
+-- vocabulary, and IPDB's display wording is what a target the catalog has no
+-- word for looks like -- but neither spelling is a verdict, and nothing asserts
+-- which is which.
 CREATE OR REPLACE VIEW ipdb_ref.specialty AS
-SELECT
-  ipdb_specialty,
-  target_entity_type,
-  target_public_id,
-  CASE WHEN target_entity_type <> 'model-relationship'
-       THEN regexp_full_match(target_public_id, '[a-z0-9][a-z0-9_-]*')
-  END AS target_is_public_id
-FROM (VALUES
-  ('Add-A-Ball',                          'reward-type',        'add-a-ball'),
-  ('Bagatelle',                           'game-format',        'bagatelle'),
-  ('Bat Game',                            'game-format',        'pitch-and-bat'),
-  ('Bingo Machine',                       'game-format',        'bingo-pinball'),
+SELECT * FROM (VALUES
   ('Cocktail Table',                      'cabinet',            'cocktail'),
-  ('Conversion Kit',                      'model-relationship', 'conversion_kit'),
-  ('Converted Game',                      'model-relationship', 'conversion'),
-  ('Cue Game',                            'game-format',        'Cue Game'),
-  ('Flipperless',                         'tag',                'Flipperless'),
-  ('Gun Game',                            'game-format',        'gun-game'),
-  ('Head-to-Head Play',                   'gameplay-feature',   'head-to-head'),
-  ('Horserace Game',                      'game-format',        'Horserace Game'),
-  ('Mechanical Backbox Animation',        'gameplay-feature',   'mechanical-backbox-animations'),
-  ('Non-Commercial Machine [Home Model]', 'tag',                'home-use'),
-  ('Not A Pinball',                       'game-format',        'Not A Pinball'),
-  ('Novelty Play',                        'reward-type',        'novelty'),
-  ('One Ball Game',                       'game-format',        'one-ball'),
-  -- IPDB's single word covers what we split into `cash-payout` and
-  -- `merchant-paid`, and the page does not say which. Reading the models is the
-  -- only way to tell them apart, so this stays a worklist rather than guessing.
-  ('Payout Machine',                      'reward-type',        'Payout Machine'),
-  ('Re-themed Game',                      'model-relationship', 'retheme'),
-  ('Redemption Game',                     'reward-type',        'ticket-payout'),
-  ('Rolldown Game',                       'game-format',        'rolldown'),
-  ('Shaker Ball Machine',                 'game-format',        'Shaker Ball Machine'),
   -- One IPDB heading over two of our cabinets, `tabletop` and `countertop`.
   -- Same shape as Payout Machine: per-model research, not new vocabulary.
   ('Table Top/Counter Game',              'cabinet',            'Table Top/Counter Game'),
   ('Vertical Pinball Machine',            'cabinet',            'Vertical Pinball Machine'),
+  ('Conversion Kit',                      'model-relationship', 'conversion_kit'),
+  ('Converted Game',                      'model-relationship', 'conversion'),
+  ('Re-themed Game',                      'model-relationship', 'retheme'),
+  ('Add-A-Ball',                          'reward-type',        'add-a-ball'),
+  ('Novelty Play',                        'reward-type',        'novelty'),
+  ('Redemption Game',                     'reward-type',        'ticket-payout'),
+  -- IPDB's single word covers what we split into `cash-payout` and
+  -- `merchant-paid`, and the page does not say which. Reading the models is the
+  -- only way to tell them apart, so this stays a worklist rather than guessing.
+  ('Payout Machine',                      'reward-type',        'Payout Machine'),
+  ('Bagatelle',                           'game-format',        'bagatelle'),
+  ('Bat Game',                            'game-format',        'pitch-and-bat'),
+  ('Bingo Machine',                       'game-format',        'bingo-pinball'),
+  ('Rolldown Game',                       'game-format',        'rolldown'),
+  ('Shaker Ball Machine',                 'game-format',        'Shaker Ball Machine'),
+  ('Cue Game',                            'game-format',        'Cue Game'),
+  ('Gun Game',                            'game-format',        'gun-game'),
+  ('Horserace Game',                      'game-format',        'Horserace Game'),
+  ('Not A Pinball',                       'game-format',        'Not A Pinball'),
+  ('One Ball Game',                       'game-format',        'one-ball'),
   ('Widebody',                            'tag',                'widebody'),
-  ('WWII Contract',                       'tag',                'WWII Contract'),
-  ('Zipper Flippers',                     'gameplay-feature',   'zipper-flippers')
-) AS t(ipdb_specialty, target_entity_type, target_public_id);
+  ('Non-Commercial Machine [Home Model]', 'tag',                'home-use'),
+  ('WWII Contract',                       'tag',                'wwii-contract'),
+  ('Flipperless',                         'tag',                'flipperless'),
+  ('Mechanical Backbox Animation',        'gameplay-feature',   'Mechanical Backbox Animation'),
+  ('Head-to-Head Play',                   'gameplay-feature',   'Head-to-Head Play'),
+  ('Zipper Flippers',                     'gameplay-feature',   'Zipper Flippers')
+) AS t(ipdb_specialty, target_entity_type, target_value);
 
 ------------------------------------------------------------
 -- Retracted IPDB listings

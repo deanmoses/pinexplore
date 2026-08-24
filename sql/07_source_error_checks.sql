@@ -214,27 +214,6 @@ INSERT INTO checks.violations
 SELECT 'source_dumps', 'opdb_feature_target_value_missing', opdb_feature
 FROM opdb_ref.feature WHERE target_value IS NULL;
 
--- Every value these two tables emit is slug-shaped. THE ONLY THING PINEXPLORE
--- CAN ASSERT ABOUT A TARGET: whether the catalog holds it is unknowable from
--- here, so nothing claims to know, and what is left is that the value is
--- well-formed. `pro-edition` and `limited-edition` are indistinguishable to this
--- check, which is the point -- the mart speaks one vocabulary and flippatch
--- decides which halves of it resolve.
---
--- Underscores are allowed because `model-lineage` and `model-relationship`
--- targets name Flipcommons columns and relationship types rather than public
--- ids: `export_edition_of`, `conversion_kit`.
-INSERT INTO checks.violations
-SELECT 'source_dumps', 'opdb_target_value_not_slug_shaped', concat_ws(' -> ', src, value)
-FROM (
-  SELECT 'opdb_ref.feature' AS src, opdb_feature AS src_value, target_value AS value
-  FROM opdb_ref.feature
-  UNION ALL
-  SELECT 'opdb_ref.keyword', opdb_keyword, target_value FROM opdb_ref.keyword
-) AS v
-WHERE value IS NOT NULL
-  AND NOT regexp_full_match(value, '[a-z0-9][a-z0-9_-]*');
-
 ------------------------------------------------------------
 -- OPDB keyword vocabulary
 ------------------------------------------------------------

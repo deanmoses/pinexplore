@@ -250,15 +250,14 @@ COMMENT ON VIEW opdb.manufacturers IS
 --
 -- THESE VIEWS DO NOT SAY WHETHER THE CATALOG HAS THE VALUE. Pinexplore reads no
 -- catalog, so a column claiming to know would be a guess that rots the moment
--- the catalog changes and nothing here would notice. A value is slug-shaped
--- whether or not it resolves -- `pro-edition` looks exactly like
--- `limited-edition`. Resolving them, and deciding which ought not to resolve, is
--- flippatch's, beside the live records.
+-- the catalog changes and nothing here would notice. Resolving these values, and
+-- deciding which ought not to resolve, is flippatch's, beside the live records.
 --
--- Themes and gameplay features carry OPDB's own wording, slugified, because
--- those catalog vocabularies have an alias system that does the translating.
--- Tags, reward types, cabinets and series are translated here. See
--- `opdb_ref.keyword`.
+-- DO NOT ASSUME A VALUE IS A SLUG. Themes and gameplay features carry OPDB's own
+-- wording, which is a display phrase where OPDB writes one -- `Head-to-head
+-- play` -- because the catalog's aliases for those vocabularies are display
+-- phrases too. Tags, reward types, cabinets and series are translated to catalog
+-- slugs here. See `opdb_ref.keyword`.
 ------------------------------------------------------------
 
 -- OPDB's `shortname` as Flipcommons `ModelAbbreviation` / `TitleAbbreviation`.
@@ -509,14 +508,13 @@ SELECT
   person_name
 FROM ipdb_stg.credits;
 
--- Published whole so unused rules and unresolved catalog vocabulary remain
--- visible even when no cached page exercises them.
+-- Published whole so unused rules remain visible even when no cached page
+-- exercises them.
 CREATE OR REPLACE VIEW ipdb.specialties AS
 SELECT
   ipdb_specialty AS specialty,
   target_entity_type,
-  target_public_id,
-  target_is_public_id
+  target_value
 FROM ipdb_ref.specialty;
 
 -- Keeps IPDB's wording beside its decode, plus the capture provenance because
@@ -528,8 +526,7 @@ SELECT
   ams.ipdb_id,
   ams.specialty,
   sp.target_entity_type,
-  sp.target_public_id,
-  sp.target_is_public_id,
+  sp.target_value,
   ams.archive_source_url,
   ams.archive_capture_date
 FROM ipdb_stg.archive_model_specialties AS ams
