@@ -724,7 +724,7 @@ FROM ipdb_stg.models_merged, (
 -- group by platform without a vocabulary. Every join is on a unique key, so none
 -- multiplies the file count.
 --
--- Staging because `ipdb_stg.file_class_matches` below reads it. `ipdb.documents`
+-- Staging because `ipdb_stg.file_class_matches` below reads it. `ipdb.model_documents`
 -- is the published answer to the same question.
 CREATE OR REPLACE VIEW ipdb_stg.files AS
 SELECT

@@ -502,14 +502,14 @@ COMMENT ON VIEW ipdb.models IS
 -- `role` is IPDB's own wording for the field the credit came from; `role_slug`
 -- is that wording in catalog vocabulary. Both are kept: the slug is what joins,
 -- the original is what a human checks the mapping against.
-CREATE OR REPLACE VIEW ipdb.credits AS
+CREATE OR REPLACE VIEW ipdb.model_credits AS
 SELECT
   IpdbId AS ipdb_id,
   role,
   role_slug,
   person_name
 FROM ipdb_stg.credits;
-COMMENT ON VIEW ipdb.credits IS
+COMMENT ON VIEW ipdb.model_credits IS
   'One row per IPDB model, credited person and role, with the role in both IPDB and catalog vocabulary.';
 
 -- Published whole so unused rules remain visible even when no cached page

@@ -33,7 +33,7 @@ WITH RECURSIVE up(document_class, ancestor_class) AS (
 )
 SELECT * FROM up;
 
-CREATE OR REPLACE VIEW ipdb.documents AS
+CREATE OR REPLACE VIEW ipdb.model_documents AS
 WITH
 -- The matches plus their inherited ancestors, tagged so one aggregation can
 -- emit both the literal and the rolled-up list.
@@ -130,7 +130,7 @@ SELECT
 FROM ipdb_stg.files AS f
 LEFT JOIN cls AS c USING (ipdb_id, file_url, ipdb_category)
 LEFT JOIN shared AS s USING (file_basename);
-COMMENT ON VIEW ipdb.documents IS
+COMMENT ON VIEW ipdb.model_documents IS
   'IPDB file listings with filename-pattern classifications and inferred subject scope; grain is model, URL and IPDB category.';
 
 -- A patent is addressed by jurisdiction and number, so that pair is a stronger
