@@ -25,4 +25,8 @@ CREATE SCHEMA web_cache;
 
 CREATE SCHEMA ingest;
 
+-- Generic hand-curated material spanning sources. Internal: not a mart, and
+-- flippatch's boundary allowlist does not include it.
+CREATE SCHEMA ref;
+
 CREATE SCHEMA checks;

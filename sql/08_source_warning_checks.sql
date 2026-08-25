@@ -263,3 +263,20 @@ WHERE l.variant_parent_relation IS NULL;
 INSERT INTO checks.warnings
 SELECT 'opdb_variant_parent_relation_undetermined', count(*)
 FROM checks.opdb_variant_parent_relation_undetermined;
+
+-- The acquisition log no longer matches its artifact, either way: a new download
+-- landed and nobody updated `ref.artifact_acquisitions` (`acquired_on` is now
+-- confidently wrong -- worse than the NULL it replaced; the record count is the
+-- tripwire, since a fresh dump almost always changes it), or the log names an
+-- artifact the watermarks no longer carry (a rename orphaned the row, and the
+-- real artifact silently reverted to an unrecorded acquisition). Update date and
+-- count together; fix or remove orphaned rows.
+CREATE OR REPLACE VIEW checks.artifact_acquisition_log_stale AS
+SELECT a.artifact, a.acquired_on, a.n_records_at_acquisition, w.n_records
+FROM ref.artifact_acquisitions AS a
+LEFT JOIN ingest.watermarks AS w USING (artifact)
+WHERE w.n_records IS DISTINCT FROM a.n_records_at_acquisition;
+
+INSERT INTO checks.warnings
+SELECT 'artifact_acquisition_log_stale', count(*)
+FROM checks.artifact_acquisition_log_stale;

@@ -252,6 +252,18 @@ WHERE (SELECT count(*) FROM ipdb.model_specialties)
    <> (SELECT count(*) FROM ipdb_stg.archive_model_specialties);
 
 ------------------------------------------------------------
+-- Hand-maintained inputs hold the grain their joins assume
+------------------------------------------------------------
+
+-- The acquisition log is hand-maintained and joined into `ingest.watermarks`
+-- keyed on `artifact`, so a duplicated entry could silently double a watermark
+-- row -- the one view every downstream campaign reads to know what went in.
+INSERT INTO checks.violations
+SELECT 'ingest', 'artifact_acquisition_duplicated', artifact
+FROM ref.artifact_acquisitions
+GROUP BY artifact HAVING count(*) > 1;
+
+------------------------------------------------------------
 -- Results
 ------------------------------------------------------------
 

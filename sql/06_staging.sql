@@ -632,6 +632,11 @@ SELECT
   model_years.year_of_last_model
 FROM parsed p
 LEFT JOIN (
+  -- Date-kind-blind ON PURPOSE: this is the entity's ACTIVITY span, and a project year
+  -- is real activity, so it counts alongside manufacture years. Reading the padded
+  -- `DateOfManufacture` is safe only because this takes the YEAR alone -- padding
+  -- fabricates the month and day, never the year. Neither property survives being
+  -- copied to a per-model date, which reads the header parse and its kind instead.
   SELECT
     ManufacturerId,
     MIN(EXTRACT(YEAR FROM CAST(DateOfManufacture AS DATE)))::INTEGER AS year_of_first_model,

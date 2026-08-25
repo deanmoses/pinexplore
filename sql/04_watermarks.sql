@@ -37,11 +37,41 @@ COMMENT ON VIEW ipdb.ingest_watermarks IS
   'One row per ingested IPDB artifact with its record count and best available watermark; archive extracts use latest fetch time.';
 
 
+-- When each MANUALLY DOWNLOADED artifact was acquired -- a fact about our act,
+-- distinct from `observed_at`, which is the artifact's claim about itself. The
+-- OPDB files carry no self-date, so without this row their currency is
+-- unknowable from inside the database.
+--
+-- Hand-maintained: update the date AND the record count together when dropping
+-- in a new download. The count is the forget-tripwire --
+-- `checks.artifact_acquisition_log_stale` warns when it stops matching the
+-- artifact, which a new dump almost always makes it do -- and until it matches
+-- again, `ingest.watermarks` withholds the date rather than publish one that
+-- describes a previous download. Not derived from file mtime: the files sync
+-- through R2, and mtime on another machine dates the sync, not the download.
+--
+-- Defined here rather than in 05_reference because this file runs first and is
+-- the only consumer; the `ref` schema still marks it curated and internal.
+CREATE OR REPLACE VIEW ref.artifact_acquisitions AS
+SELECT * FROM (VALUES
+  ('opdb/opdb_full.json',      DATE '2026-08-22', 4136),
+  ('opdb/opdb_changelog.json', DATE '2026-08-22', 51)
+) AS t(artifact, acquired_on, n_records_at_acquisition);
+
 -- Every ingested artifact, one row each, whatever source it came from.
 --
 -- `observed_at` is NULL where the artifact carries no claim about its own
 -- currency -- an honest absence, not a value to fill from the file's mtime.
+-- `acquired_on` is NULL where nobody recorded the acquisition, and ALSO where
+-- the recorded count no longer matches the artifact -- a log row that stopped
+-- matching describes some previous download, and a confidently wrong date is
+-- worse than the NULL it would replace. The count gate lives in the join here;
+-- the warning that someone should update the log joins on artifact alone, in
+-- `checks.artifact_acquisition_log_stale`.
 CREATE OR REPLACE VIEW ingest.watermarks AS
+SELECT w.source, w.artifact_kind, w.artifact, w.observed_at,
+       a.acquired_on, w.n_records
+FROM (
 SELECT 'ipdb' AS source, artifact_kind, artifact, observed_at, n_records
 FROM ipdb.ingest_watermarks
 UNION ALL
@@ -72,6 +102,10 @@ SELECT 'glossary', 'parsed html', 'ipdb_glossary.json', NULL, count(*) FROM glos
 UNION ALL
 SELECT 'glossary', 'parsed html', 'kineticist_glossary.json', NULL, count(*) FROM glossary.kineticist
 UNION ALL
-SELECT 'glossary', 'parsed html', 'pinball_primer_glossary.json', NULL, count(*) FROM glossary.pinball_primer;
+SELECT 'glossary', 'parsed html', 'pinball_primer_glossary.json', NULL, count(*) FROM glossary.pinball_primer
+) AS w
+LEFT JOIN ref.artifact_acquisitions AS a
+  ON a.artifact = w.artifact
+ AND a.n_records_at_acquisition = w.n_records;
 COMMENT ON VIEW ingest.watermarks IS
-  'One row per ingested artifact with its record count and best available watermark; observed_at is NULL when no date is available.';
+  'One row per ingested artifact with its record count, the artifact''s own claimed date (observed_at, NULL when it makes none) and the recorded manual-download date (acquired_on, NULL when unrecorded or when the acquisition log no longer matches the artifact).';
