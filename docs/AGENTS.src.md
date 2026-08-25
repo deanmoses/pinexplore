@@ -80,7 +80,7 @@ explore.duckdb    Build artifact (gitignored)
 
 ### Schemas
 
-Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest` and `checks`. `main` is deliberately empty. [Explore.md](docs/Explore.md) has the table and which ones to read.
+Every relation lives in a schema naming the layer it belongs to: `<source>_raw`, `<source>_stg`, `<source>_ref`, and bare `<source>` for the published mart, plus `glossary`, `web_cache`, `ingest`, `checks`, and `ref` for hand-curated material spanning sources. `main` is deliberately empty. [Explore.md](docs/Explore.md) has the table and which ones to read.
 
 Only the unsuffixed mart is a contract. Changing a mart column is probably a cross-repo change (check Flippatch's comparison layer).
 

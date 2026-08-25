@@ -48,6 +48,7 @@ Other schemas:
 - `web_cache`: the scrape cache, materialized
 - `ingest`: one row per ingested artifact, any source
 - `glossary`: the three pinball glossaries and their comparison
+- `ref`: hand-curated material spanning sources (like `<source>_ref`, but generic) — internal
 - `checks`: the build's own internal verdicts
 
 ### Finding your way around a mart
