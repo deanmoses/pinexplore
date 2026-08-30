@@ -246,10 +246,10 @@ WHERE (SELECT count(*) FROM ipdb.models) <> (SELECT count(*) FROM ipdb_stg.model
 -- is the quieter fault -- fewer rows read as a smaller corpus.
 INSERT INTO checks.violations
 SELECT 'mart', 'ipdb_model_specialties_grain_not_one_row_per_assignment',
-  (SELECT count(*) FROM ipdb_stg.archive_model_specialties)::VARCHAR || ' staged -> '
+  (SELECT count(*) FROM ipdb_stg.model_specialties)::VARCHAR || ' staged -> '
     || (SELECT count(*) FROM ipdb.model_specialties)::VARCHAR || ' published'
 WHERE (SELECT count(*) FROM ipdb.model_specialties)
-   <> (SELECT count(*) FROM ipdb_stg.archive_model_specialties);
+   <> (SELECT count(*) FROM ipdb_stg.model_specialties);
 
 ------------------------------------------------------------
 -- Hand-maintained inputs hold the grain their joins assume

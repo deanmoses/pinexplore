@@ -439,7 +439,6 @@ SELECT
         Players             AS players,
         AdditionalDetails   AS additional_details,
         "Type"              AS type_text,
-        TypeShortName       AS type_code,
         DateOfManufacture   AS date_of_manufacture,
         Theme               AS theme_text,
         production_status   AS production_status_name,
@@ -512,34 +511,57 @@ FROM ipdb_stg.credits;
 COMMENT ON VIEW ipdb.model_credits IS
   'One row per IPDB model, credited person and role, with the role in both IPDB and catalog vocabulary.';
 
--- Published whole so unused rules remain visible even when no cached page
--- exercises them.
+-- Published whole so unused rules remain visible even when no model exercises
+-- them.
+--
+-- `specialty_id` and `source_url` come from IPDB's own dropdown, captured by the
+-- census download rather than transcribed, so the URL that re-runs a search is
+-- reconstructable from this view. LEFT JOIN because the rule table is the
+-- vocabulary this repo has decided about; `ipdb_specialty_vocabulary_drifted`
+-- is what asserts the two sides still agree.
 CREATE OR REPLACE VIEW ipdb.specialties AS
 SELECT
-  ipdb_specialty AS specialty,
-  target_entity_type,
-  target_value
-FROM ipdb_ref.specialty;
-COMMENT ON VIEW ipdb.specialties IS
-  'IPDB''s full Specialty vocabulary with the Flipcommons target type and value each rule proposes, including values unused by cached pages.';
-
--- Keeps IPDB's wording beside its decode, plus the capture provenance because
--- classification may have changed since the archived page.
--- `ipdb_specialty_unmapped` prevents the INNER join from silently dropping a
--- page value.
-CREATE OR REPLACE VIEW ipdb.model_specialties AS
-SELECT
-  ams.ipdb_id,
-  ams.specialty,
+  sp.ipdb_specialty AS specialty,
+  v.specialty_id,
   sp.target_entity_type,
   sp.target_value,
-  ams.archive_source_url,
-  ams.archive_capture_date
-FROM ipdb_stg.archive_model_specialties AS ams
+  v.source_url
+FROM ipdb_ref.specialty AS sp
+LEFT JOIN ipdb_raw.specialty_vocabulary AS v ON v.specialty = sp.ipdb_specialty;
+COMMENT ON VIEW ipdb.specialties IS
+  'IPDB''s full Specialty vocabulary with IPDB''s own id and search URL beside the Flipcommons target type and value each rule proposes, including values no model currently carries.';
+
+-- Keeps IPDB's wording beside its decode, plus the provenance of the read.
+--
+-- Sourced from the advanced-search census, NOT the archive pages it used to come
+-- from. The census states IPDB's whole classification at one moment, so this
+-- view is complete in a way it never was: a model absent from it carries no
+-- specialty, where before absence meant only that nobody had cached its page.
+-- The 22-fold jump in rows is that difference, not a change of opinion.
+--
+-- `source_url` is per SPECIALTY, not per model -- the search that returned the
+-- model, which is the page the fact was actually read from. It is behind a bot
+-- wall, so a reader following provenance wants the machine page instead; that
+-- URL is `machine.cgi?id=` and any consumer can build it from `ipdb_id`.
+--
+-- `observed_on` is one date across every row, and NULL if the acquisition log
+-- has gone stale rather than a date describing a previous download.
+--
+-- `ipdb_specialty_unmapped` prevents the INNER join from silently dropping a
+-- specialty IPDB states.
+CREATE OR REPLACE VIEW ipdb.model_specialties AS
+SELECT
+  ms.ipdb_id,
+  ms.specialty,
+  sp.target_entity_type,
+  sp.target_value,
+  ms.source_url,
+  ms.observed_on
+FROM ipdb_stg.model_specialties AS ms
 INNER JOIN ipdb_ref.specialty AS sp
-  ON sp.ipdb_specialty = ams.specialty;
+  ON sp.ipdb_specialty = ms.specialty;
 COMMENT ON VIEW ipdb.model_specialties IS
-  'One row per model per IPDB specialty, keeping IPDB''s wording beside its decode and the archived page it was read from.';
+  'One row per model per IPDB specialty as the advanced-search census found them, keeping IPDB''s wording beside its decode, the search it was read from and the date the census was taken.';
 
 -- IPDB's corporate entities, in our vocabulary.
 --

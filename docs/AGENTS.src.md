@@ -102,6 +102,16 @@ Query it with `scripts/web_scrape/web_cache.py`. Its `search`, `quote`, `outline
 
 It is derived: re-run it after a fetch campaign and the diff is what the campaign found. The emitted shape answers to `read_json_auto` and the constraints are not optional — they are in the module docstring, which is required reading before changing the output.
 
+### IPDB's Specialty census
+
+`ipdb.model_specialties` comes from IPDB's advanced search, run once per Specialty and saved by hand past a bot wall into `ingest_sources/ipdb/ipdb_specialty/`. `scripts/ipdb/extract_ipdb_specialty_to_jsonl.py` parses those pages into `census.jsonl` and `vocabulary.jsonl`.
+
+It is a **census**, and that is the whole reason it outranks the other two IPDB reads on this field: each search lists every machine IPDB currently classifies under one Specialty, and every result row states the machine's whole specialty set, so absence is a fact rather than a gap. Nothing merges it against the xantari dump (which has never carried the field) or the archive pages (which carried it a page at a time, from captures spanning years) — it replaced both.
+
+Two things follow, and both are enforced rather than remembered. The download is only as good as its completeness, so the extract refuses to write a census that is short by any of the ways it can detect. And the census is hand-saved, so it must expire loudly: `ipdb_specialty_xantari_column_appeared` fails the build the day a dump gains the field, and `ipdb_specialty_vocabulary_drifted` fails it the day IPDB's vocabulary moves. Re-running over a fresh download rewrites both files whole, so the diff is what changed at IPDB — and the acquisition date in `ref.artifact_acquisitions` must move with it.
+
+The row also carries date, manufacturer, type, production, players, model number and rating. These are **not** rival values — `ipdb.models` still states what xantari states — they are a live read cross-checked against a months-old dump by `ipdb_specialty_census_disagrees_with_dump`.
+
 ## Cloudflare R2
 
 The web cache SQLite db + raw cache files and the DuckDB ingest source files are moved between developer machines via Cloudflare R2. `make push` uploads them, `make pull` downloads them, and `scripts/rebuild_explore.py --remote` reads them in place. All are human-only — see [Rules](#rules) and [Explore.md](docs/Explore.md).

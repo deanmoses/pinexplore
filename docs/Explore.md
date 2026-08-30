@@ -69,6 +69,7 @@ The `checks` schema is worth knowing about for a different reason: every warning
 - `scripts/cloud_store/{pull,push}_ingest_sources.py` — sync ingest sources with R2
 - `scripts/web_scrape/web_fetch.py` + `web_cache.py` — fetch and query the web evidence cache (see [WebCache.md](WebCache.md))
 - `scripts/glossary/parse_*_glossary.py` — parse saved glossary HTML dumps into JSON
+- `scripts/ipdb/extract_ipdb_specialty_to_jsonl.py` — parse saved IPDB advanced-search pages into the Specialty census
 
 ## Cloudflare R2
 

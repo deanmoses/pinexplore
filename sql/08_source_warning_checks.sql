@@ -153,6 +153,109 @@ WHERE NOT EXISTS (
 INSERT INTO checks.warnings
 SELECT 'ipdb_archive_credit_role_unrecognised', count(*) FROM checks.ipdb_archive_credit_role_unrecognised;
 
+-- A machine the specialty census lists that the xantari dump has never listed,
+-- so `ipdb_stg.specialty_census` dropped it and its specialties are unpublished.
+--
+-- The counterpart of `ipdb_archive_model_not_in_dump` above, and it means the
+-- opposite. There, a machine missing from the dump is ambiguous -- the capture
+-- may predate a deletion. Here the census is the NEWER source, so a machine it
+-- lists and the dump does not is one IPDB has added since the dump was taken.
+-- The remedy is not research, it is a fresh xantari snapshot, and a count that
+-- climbs over successive censuses is how that need becomes visible.
+CREATE OR REPLACE VIEW checks.ipdb_specialty_census_model_not_in_dump AS
+SELECT c.ipdb_id, c."name", c.manufacturer, c.date_text
+FROM ipdb_raw.specialty_census AS c
+WHERE NOT EXISTS (
+    SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = c.ipdb_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM ipdb_ref.retracted AS r WHERE r.ipdb_id = c.ipdb_id
+  );
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_specialty_census_model_not_in_dump', count(*)
+FROM checks.ipdb_specialty_census_model_not_in_dump;
+
+-- A field where the census and the dump describe the same model differently.
+--
+-- The census is a live read of IPDB and the dump is months old, so a
+-- disagreement is one of three things and the row does not say which: IPDB
+-- edited the record, the dump mis-scraped it, or this build mis-parsed the
+-- results table. All three are worth a look, and none is worth failing a build
+-- over -- hence a warning, and hence the row carrying both values rather than
+-- picking one.
+--
+-- The census does not overrule the dump anywhere. Nothing downstream reads these
+-- columns as values; `ipdb.models` is unchanged and still states what xantari
+-- states. This is the whole use the census's non-specialty columns are put to.
+--
+-- Expected to be small and nearly static. A count that jumps is more likely a
+-- parse regression here than IPDB revising thousands of records.
+CREATE OR REPLACE VIEW checks.ipdb_specialty_census_disagrees_with_dump AS
+SELECT ipdb_id, field, census_value, dump_value
+FROM ipdb_stg.specialty_census_vs_dump;
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_specialty_census_disagrees_with_dump', count(*)
+FROM checks.ipdb_specialty_census_disagrees_with_dump;
+
+-- A specialty an archived page states that the census does not, or the reverse,
+-- for a model both describe.
+--
+-- The one question the census cannot answer alone: what IPDB used to say. The
+-- archive pages no longer feed `ipdb.model_specialties` -- the census replaced
+-- them outright -- and this is the reason to keep them staged anyway. Each row
+-- is IPDB having RECLASSIFIED a machine between the capture and the download,
+-- which is a fact about the source's own revisions and cannot be recovered once
+-- the capture is dropped.
+--
+-- Restricted to models the archive actually covers, because everywhere else the
+-- absence is the archive's silence rather than a removal.
+CREATE OR REPLACE VIEW checks.ipdb_specialty_reclassified AS
+WITH covered AS (SELECT DISTINCT ipdb_id FROM ipdb_stg.archive_models)
+SELECT
+  coalesce(a.ipdb_id, c.ipdb_id) AS ipdb_id,
+  coalesce(a.specialty, c.specialty) AS specialty,
+  CASE WHEN a.specialty IS NULL THEN 'added since capture' ELSE 'dropped since capture' END AS change,
+  a.archive_capture_date
+FROM ipdb_stg.archive_model_specialties AS a
+FULL OUTER JOIN (
+  SELECT ms.ipdb_id, ms.specialty
+  FROM ipdb_stg.model_specialties AS ms
+  WHERE ms.ipdb_id IN (SELECT ipdb_id FROM covered)
+) AS c
+  ON c.ipdb_id = a.ipdb_id AND c.specialty = a.specialty
+WHERE a.specialty IS NULL OR c.specialty IS NULL;
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_specialty_reclassified', count(*) FROM checks.ipdb_specialty_reclassified;
+
+-- A model whose header-line date this build TYPED one way and IPDB's own listing
+-- marks the other.
+--
+-- IPDB prints a `*` beside a date it is stating as a Project Date, and the
+-- census carries that mark. `additional_details_date_kind` reaches the same
+-- question by inference from the dump, on models no archive page confirms. Where
+-- both speak, IPDB's mark is evidence and the inference is not, so a
+-- disagreement is the inference being wrong.
+--
+-- Nothing is rewired on the strength of this: `ipdb_stg.models` still types the
+-- date the way it did. The rows are here to be read before that changes.
+CREATE OR REPLACE VIEW checks.ipdb_specialty_census_date_kind_disagrees AS
+SELECT
+  m.IpdbId, m.Title, m.AdditionalDetails,
+  m.additional_details_date_kind AS inferred_kind,
+  CASE WHEN c.date_is_project_date THEN 'project' ELSE 'manufacture' END AS census_mark
+FROM ipdb_stg.models AS m
+INNER JOIN ipdb_stg.specialty_census AS c ON c.ipdb_id = m.IpdbId
+WHERE c.date_year IS NOT NULL
+  AND m.additional_details_date_kind IS NOT NULL
+  AND c.date_is_project_date <> (m.additional_details_date_kind LIKE 'project%');
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_specialty_census_date_kind_disagrees', count(*)
+FROM checks.ipdb_specialty_census_date_kind_disagrees;
+
 -- Models whose header-line date is being read as a project date on inference
 -- rather than on evidence -- `additional_details_date_kind = 'project_inferred'`.
 -- Why that inference is not evidence is on the CASE in `ipdb_stg.models`.

@@ -171,12 +171,19 @@ SELECT * FROM (VALUES
   ('Limited edition', 4)
 ) AS t(opdb_feature, breadth_rank);
 
+-- IPDB's three type codes in catalog vocabulary.
+--
+-- Keyed on the code alone. It used to carry a second key, the full `Type` text,
+-- solely so Pure Mechanical could be reached that way -- the dump's
+-- `TypeShortName` was blank on every PM machine. `ipdb_stg.models` now slices the
+-- code out of `Type` itself, so PM has a code like the other two and the
+-- full-text key has nothing left to do.
 CREATE OR REPLACE VIEW ipdb_ref.technology_generation AS
 SELECT * FROM (VALUES
-  ('EM', NULL,                    'electromechanical'),
-  ('SS', NULL,                    'solid-state'),
-  (NULL, 'Pure Mechanical (PM)',  'pure-mechanical')
-) AS t(type_short_name, type_full, slug);
+  ('EM', 'electromechanical'),
+  ('SS', 'solid-state'),
+  ('PM', 'pure-mechanical')
+) AS t(type_code, slug);
 
 -- A credit role IPDB states, its catalog slug, and the source allowed to supply
 -- it. `xantari_field` names the dump column; NULL lets archive pages supply a role

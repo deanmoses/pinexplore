@@ -470,7 +470,14 @@ SELECT
   -- Counting it distinctly does not rescue it either: it
   -- varies per corporate entity, so one brand across two incarnations counts as two
   -- manufacturers. The brand is `ipdb_stg.corporate_entities.manufacturer_name`.
-  im.* EXCLUDE (ManufacturerShortName)
+  -- `TypeShortName` goes for the same reason as `ManufacturerShortName` above:
+  -- it is xantari's own derivation rather than a field on the IPDB page, and it
+  -- is an incomplete one. It holds EM and SS and is EMPTY on every Pure
+  -- Mechanical machine, though the dump's own `Type` says "Pure Mechanical (PM)"
+  -- on all of them, and IPDB's page and advanced search both state the code
+  -- plainly. `type_code` below replaces it, sliced from the field xantari
+  -- actually scraped.
+  im.* EXCLUDE (ManufacturerShortName, TypeShortName)
   -- REPLACE nulls both manufacturer fields for the models listed in
   -- `ipdb_ref.model_corporate_entity_misparsed`, so a consumer sees the absence
   -- IPDB's page shows rather than the company the dump invented.
@@ -498,7 +505,16 @@ SELECT
          COALESCE(im.ProductionNumber, arc.production_units) AS ProductionNumber
        ),
 
-  COALESCE(tg1.slug, tg2.slug) AS technology_generation_slug,
+  -- IPDB's type code, from the parenthesis in `Type` rather than from the dump's
+  -- blank-on-PM short name. `Type` has only ever held four values -- the three
+  -- codes and NULL -- and `ipdb_type_code_underivable` fails the build if a fifth
+  -- appears rather than letting it arrive as a silent NULL.
+  --
+  -- NULL, not '', where IPDB states no type at all: an empty string here would be
+  -- the same value that used to mean "Pure Mechanical, unrecorded".
+  nullif(regexp_extract(im."Type", '\(([A-Z]+)\)$', 1), '') AS type_code,
+
+  tg1.slug AS technology_generation_slug,
   ad.additional_details_date_string,
   ad.additional_details_date_year,
   ad.additional_details_date_month,
@@ -567,10 +583,11 @@ LEFT JOIN ipdb_stg.model_additional_details AS ad
   ON ad.IpdbId = im.IpdbId
 LEFT JOIN ipdb_stg.archive_models AS arc
   ON arc.ipdb_id = im.IpdbId
+-- One join, not two. The second leg existed only to reach Pure Mechanical
+-- through `Type` because the short name was blank there; the derived `type_code`
+-- above carries PM like any other code, so the full-text key is gone.
 LEFT JOIN ipdb_ref.technology_generation AS tg1
-  ON im.TypeShortName = tg1.type_short_name AND tg1.type_short_name IS NOT NULL
-LEFT JOIN ipdb_ref.technology_generation AS tg2
-  ON im."Type" = tg2.type_full AND tg2.type_full IS NOT NULL;
+  ON tg1.type_code = nullif(regexp_extract(im."Type", '\(([A-Z]+)\)$', 1), '');
 
 -- Distinct corporate entities parsed from IPDB manufacturer strings.
 -- Splits the structured string into company name, trade name, years, location,
@@ -841,6 +858,10 @@ FROM ipdb_stg.archive_models AS am, unnest(am.documents) AS t(d);
 
 -- Page specialties in IPDB's wording. Capture provenance stays on each unnested
 -- row rather than depending on a later join whose uniqueness is not asserted.
+--
+-- No longer the mart's source -- `ipdb_stg.model_specialties` below is, from the
+-- census. These rows are kept for the one thing the census cannot do: say what
+-- IPDB used to say. `ipdb_specialty_reclassified` diffs the two.
 CREATE OR REPLACE VIEW ipdb_stg.archive_model_specialties AS
 SELECT
   ipdb_id,
@@ -849,6 +870,116 @@ SELECT
   archive_capture_date
 FROM ipdb_stg.archive_models
 WHERE len(specialties) > 0;
+
+------------------------------------------------------------
+-- IPDB specialty census
+------------------------------------------------------------
+
+-- The census, cut down to the models xantari knows.
+--
+-- Same restriction as `ipdb_stg.archive_models`, for a weaker reason. There the
+-- rule keeps a decade-old capture from asserting a listing still exists; here
+-- the census is hours old, so a machine it lists and the dump does not is almost
+-- certainly one IPDB has ADDED since. It is still dropped, because xantari
+-- remains the source of which models exist and half a model -- specialties but
+-- no name, date or manufacturer -- is worse than none. Reading through
+-- `models_merged` also inherits the retraction filter.
+-- `ipdb_specialty_census_model_not_in_dump` reports what this drops, and a
+-- growing count there means it is time for a fresh dump.
+CREATE OR REPLACE VIEW ipdb_stg.specialty_census AS
+SELECT c.*
+FROM ipdb_raw.specialty_census AS c
+WHERE EXISTS (
+  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = c.ipdb_id
+);
+
+-- One row per model per specialty IPDB currently assigns it.
+--
+-- The mart's source. Provenance rides on the row rather than joining for it: the
+-- struct already carries the search URL the assignment was read from, so a
+-- consumer citing this needs no join whose uniqueness nobody asserted.
+--
+-- `observed_on` is one date for every row, which is the point: unlike the archive
+-- captures this replaced, the whole census was taken at one moment.
+--
+-- Taken from `ingest.watermarks` rather than `ref.artifact_acquisitions`
+-- directly, so it inherits that view's count gate. The pages state no date about
+-- themselves, so the acquisition log is the only source for it and is kept by
+-- hand -- which means a new download dropped in without touching the log would
+-- otherwise stamp every published row with the PREVIOUS download's date. Gated,
+-- that case publishes NULL instead, and `artifact_acquisition_log_stale` says
+-- why.
+CREATE OR REPLACE VIEW ipdb_stg.model_specialties AS
+SELECT
+  c.ipdb_id,
+  s.specialty,
+  s.specialty_id,
+  s.source_url,
+  (SELECT acquired_on FROM ingest.watermarks
+   WHERE artifact = 'ipdb/ipdb_specialty/census.jsonl') AS observed_on
+FROM ipdb_stg.specialty_census AS c, unnest(c.specialties) AS t(s);
+
+-- Where the census and the xantari dump disagree about the same model.
+--
+-- The census's non-specialty columns are not published as rival values -- the
+-- dump is the field-level source and this view does not overrule it. They are
+-- carried to be a LIVE READ against a dump that is months old, on thousands of
+-- models at once, which is a cross-check nothing else in this build performs.
+--
+-- Long rather than wide: one row per disagreeing field, so a new field joins the
+-- comparison by adding a leg rather than a column, and the warning that counts
+-- these needs no list of what to look at.
+--
+-- Rating is deliberately absent. IPDB recomputes it as votes arrive, so it
+-- differs on a tenth of the overlap by design and would drown the rows that mean
+-- something. Dates compare only where both state one: xantari scraped Date Of
+-- Manufacture alone, so IPDB's several hundred Project Date models are simply
+-- blank there, and that absence is `date_is_project_date`, not a disagreement.
+CREATE OR REPLACE VIEW ipdb_stg.specialty_census_vs_dump AS
+WITH paired AS (
+  SELECT
+    c.ipdb_id,
+    c."name",
+    c.date_year, c.date_month, c.players, c.type_code,
+    c.model_number, c.production_units,
+    m.Title, m.ModelNumber, m.ProductionNumber,
+    m.Players AS dump_players,
+    -- From `ipdb_stg.models`, which is where the dump's blank-on-PM short name is
+    -- corrected. The other columns come from `models_merged` instead, because
+    -- `ipdb_stg.models` fills production and rating from archive pages and this
+    -- view compares the census against the DUMP, not against the dump's fills.
+    sm.type_code AS dump_type_code,
+    CAST(m.DateOfManufacture AS DATE) AS dump_date
+  FROM ipdb_stg.specialty_census AS c
+  INNER JOIN ipdb_stg.models_merged AS m ON m.IpdbId = c.ipdb_id
+  INNER JOIN ipdb_stg.models AS sm ON sm.IpdbId = c.ipdb_id
+)
+-- `nullif(..., '')` on every dump string: xantari writes an empty string where
+-- IPDB is silent, and an empty string is an absence rather than a differing
+-- value. Without this each one reads as a disagreement.
+SELECT ipdb_id, 'name' AS field, "name" AS census_value, Title AS dump_value
+FROM paired WHERE "name" IS NOT NULL AND nullif(Title, '') IS NOT NULL AND "name" <> Title
+UNION ALL
+SELECT ipdb_id, 'players', CAST(players AS VARCHAR), CAST(dump_players AS VARCHAR)
+FROM paired WHERE players IS NOT NULL AND dump_players IS NOT NULL AND players <> dump_players
+UNION ALL
+SELECT ipdb_id, 'type_code', type_code, dump_type_code
+FROM paired WHERE type_code IS NOT NULL AND dump_type_code IS NOT NULL
+  AND type_code <> dump_type_code
+UNION ALL
+SELECT ipdb_id, 'model_number', model_number, ModelNumber
+FROM paired WHERE model_number IS NOT NULL AND nullif(ModelNumber, '') IS NOT NULL
+  AND model_number <> ModelNumber
+UNION ALL
+SELECT ipdb_id, 'production_units', CAST(production_units AS VARCHAR), CAST(ProductionNumber AS VARCHAR)
+FROM paired WHERE production_units IS NOT NULL AND ProductionNumber IS NOT NULL
+  AND production_units <> ProductionNumber
+UNION ALL
+SELECT ipdb_id, 'date_year', CAST(date_year AS VARCHAR), CAST(year(dump_date) AS VARCHAR)
+FROM paired WHERE date_year IS NOT NULL AND dump_date IS NOT NULL AND date_year <> year(dump_date)
+UNION ALL
+SELECT ipdb_id, 'date_month', CAST(date_month AS VARCHAR), CAST(month(dump_date) AS VARCHAR)
+FROM paired WHERE date_month IS NOT NULL AND dump_date IS NOT NULL AND date_month <> month(dump_date);
 
 ------------------------------------------------------------
 -- Fandom staged

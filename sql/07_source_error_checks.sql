@@ -289,21 +289,109 @@ WHERE NOT EXISTS (
 );
 
 ------------------------------------------------------------
+-- IPDB machine type
+------------------------------------------------------------
+
+-- A `Type` the code cannot be sliced out of.
+--
+-- `ipdb_stg.models` reads the code from the parenthesis in IPDB's type text
+-- rather than from the dump's `TypeShortName`, which is blank on every Pure
+-- Mechanical machine. The text has only ever held three values, but the slice is
+-- a regex over upstream prose: a fourth type, or a rewording of an existing one,
+-- yields NULL and reads exactly like a model IPDB states no type for.
+--
+-- Fatal because the silence is total otherwise. `technology_generation_slug`
+-- joins on this code, so an underivable type loses the catalog value too, and
+-- the row still looks like an ordinary absence.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_type_code_underivable',
+  '"' || "Type" || '" states no (CODE); ' || count(*) || ' model(s) affected'
+FROM ipdb_stg.models_merged
+WHERE "Type" IS NOT NULL
+  AND nullif(regexp_extract("Type", '\(([A-Z]+)\)$', 1), '') IS NULL
+GROUP BY "Type";
+
+-- A derived type code that `ipdb_ref.technology_generation` does not decode.
+--
+-- The join is LEFT, so an unmapped code publishes a NULL slug rather than
+-- dropping the model -- which is why nothing else notices. Separate from the
+-- check above because they fail on different things: that one is IPDB rewording
+-- its type text, this one is IPDB adding a type we have no catalog value for.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_type_code_unmapped',
+  type_code || ' on ' || count(*) || ' model(s) and no ipdb_ref.technology_generation row'
+FROM ipdb_stg.models
+WHERE type_code IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM ipdb_ref.technology_generation AS tg WHERE tg.type_code = ipdb_stg.models.type_code
+  )
+GROUP BY type_code;
+
+------------------------------------------------------------
 -- Specialty vocabulary
 ------------------------------------------------------------
 
--- An INNER join publishes only ruled specialties, so an unruled page value would
--- otherwise vanish. This first surfaces after a fetch campaign, when the new
--- value enters the archive corpus.
+-- An INNER join publishes only ruled specialties, so an unruled census value
+-- would otherwise vanish. This first surfaces after a fresh download, when a
+-- specialty IPDB has added enters the census.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_unmapped',
-  '"' || ams.specialty || '" is stated by ' || count(*)
-    || ' archive page(s) and no ipdb_ref.specialty row decodes it'
-FROM ipdb_stg.archive_model_specialties AS ams
+  '"' || ms.specialty || '" is stated for ' || count(*)
+    || ' model(s) and no ipdb_ref.specialty row decodes it'
+FROM ipdb_stg.model_specialties AS ms
 WHERE NOT EXISTS (
-  SELECT 1 FROM ipdb_ref.specialty AS sp WHERE sp.ipdb_specialty = ams.specialty
+  SELECT 1 FROM ipdb_ref.specialty AS sp WHERE sp.ipdb_specialty = ms.specialty
 )
-GROUP BY ams.specialty;
+GROUP BY ms.specialty;
+
+-- IPDB's Specialty vocabulary against the rules written for it, BOTH WAYS.
+--
+-- `ipdb_ref.specialty` is hand-written, one rule per Specialty, and the mart
+-- publishes it whole. The census download echoes IPDB's own dropdown back, so
+-- for the first time the hand-written side can be checked against the source
+-- rather than against someone's memory of it.
+--
+-- Both directions matter and they fail differently. A term IPDB has and we have
+-- not is a Specialty added since the vocabulary was transcribed: it needs a rule
+-- AND a saved search page, and until it has both, the machines carrying only it
+-- are missing from the census entirely -- which is invisible, because a census
+-- reads complete whether or not it is. A term we have and IPDB does not is a
+-- rule for a Specialty that has been renamed or withdrawn, which joins to
+-- nothing and quietly publishes zero rows forever.
+--
+-- Fatal rather than a warning because the whole basis for the census replacing
+-- the archive pages is that it is COMPLETE. A vocabulary that has moved under it
+-- means it is not, and nothing downstream can tell.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_specialty_vocabulary_drifted',
+  'IPDB lists Specialty "' || v.specialty || '" (id ' || v.specialty_id
+    || ') and no ipdb_ref.specialty rule decodes it'
+FROM ipdb_raw.specialty_vocabulary AS v
+WHERE NOT EXISTS (
+  SELECT 1 FROM ipdb_ref.specialty AS sp WHERE sp.ipdb_specialty = v.specialty
+);
+
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_specialty_vocabulary_drifted',
+  'ipdb_ref.specialty rules "' || sp.ipdb_specialty
+    || '", which IPDB''s own dropdown no longer lists'
+FROM ipdb_ref.specialty AS sp
+WHERE NOT EXISTS (
+  SELECT 1 FROM ipdb_raw.specialty_vocabulary AS v WHERE v.specialty = sp.ipdb_specialty
+);
+
+-- A Specialty in the vocabulary whose own search page was never saved.
+--
+-- The extract refuses to write a census where such a term is reachable from
+-- another page's rows, so this catches the remaining case: a term no downloaded
+-- page mentions at all. Indistinguishable from IPDB classifying nothing under
+-- it, and the difference is every machine that carries it.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_specialty_not_downloaded',
+  '"' || specialty || '" (id ' || specialty_id
+    || ') has no saved search page; re-run the download for ' || source_url
+FROM ipdb_raw.specialty_vocabulary
+WHERE NOT downloaded;
 
 -- A mistyped target type would look like an honestly unresolved target in
 -- flippatch. The allowed subset is not derivable here; `model-relationship` is
@@ -324,21 +412,34 @@ FROM ipdb_ref.specialty
 GROUP BY ipdb_specialty
 HAVING count(*) > 1;
 
--- Expiry guard for archive-supplied specialties, the counterpart of the credit
--- role one above. Assignments come only from archive pages, some captured in
--- 2018; a dump that gains the field is both newer and authoritative, and
--- `ipdb_stg.archive_model_specialties` must then be rebuilt to prefer it.
--- Nothing else asks that question: the new column stars through to `ipdb.models`
--- and fails the snake_case check, but naming it there makes the build green
--- again with the archive still supplying every specialty.
+-- Expiry guard for the specialty census, the counterpart of the credit role one
+-- above.
+--
+-- The census is a MANUAL download -- 27 searches saved by hand past a bot wall --
+-- and nobody is going to keep doing that once the dump carries the field. A dump
+-- that gains Specialty is both newer and automatic, and
+-- `ipdb_stg.model_specialties` must then be rebuilt to read it. Until someone
+-- does, the mart would go on publishing a hand-saved snapshot that is now the
+-- oldest source of the field rather than the newest, and would read exactly the
+-- same as when it was the best available.
+--
+-- Nothing else asks that question. The new column stars through to `ipdb.models`
+-- and fails the snake_case check, so the field cannot arrive silently -- but
+-- that check is cleared by adding one rename line, which makes the build green
+-- again with the stale census still supplying every specialty.
+--
+-- `%special%` unanchored: `Specialty` and `Specialties` are the likely names but
+-- `MachineSpecialty` is no less plausible, and an anchored match would miss it.
+-- The name that evades this entirely -- `Classification`, say -- still fails the
+-- snake_case check, so the two together leave no silent path.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_xantari_column_appeared',
   'ipdb_raw.xantari_model_snapshots.' || column_name
-    || ' -- xantari now carries Specialty and outranks the archive pages'
+    || ' -- xantari now carries Specialty and outranks the hand-saved census'
 FROM duckdb_columns()
 WHERE database_name = current_database()
   AND schema_name = 'ipdb_raw' AND table_name = 'xantari_model_snapshots'
-  AND column_name ILIKE 'special%';
+  AND column_name ILIKE '%special%';
 
 ------------------------------------------------------------
 -- Document classification vocabulary

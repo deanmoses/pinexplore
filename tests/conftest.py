@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 SCRIPTS_WEB = Path(__file__).resolve().parent.parent / "scripts" / "web_scrape"
 sys.path.insert(0, str(SCRIPTS_WEB))
 
+# The IPDB ingest parsers are flat scripts in their own per-source dir, same as
+# the glossary ones; import them the way they are run.
+SCRIPTS_IPDB = Path(__file__).resolve().parent.parent / "scripts" / "ipdb"
+sys.path.insert(0, str(SCRIPTS_IPDB))
+
 import web_cache  # noqa: E402
 
 
