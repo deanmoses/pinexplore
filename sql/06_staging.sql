@@ -592,7 +592,38 @@ SELECT
          -- withdrew the value after the capture, so every fill is a decision
          -- someone made rather than a rule that fires on absence.
          COALESCE(im.AverageFunRating, arc.rating_score)    AS AverageFunRating,
-         COALESCE(im.ProductionNumber, arc.production_units) AS ProductionNumber
+         COALESCE(im.ProductionNumber, arc.production_units) AS ProductionNumber,
+
+         -- The dump's title, corrected against a live search where the scrape
+         -- dropped characters from it. IPDB has "Hearts & Spades" and
+         -- "Sea-Belles"; the dump has "Hearts Spades" and "Sea Belles".
+         --
+         -- A RULE rather than the hand-written list the misparsed manufacturers
+         -- get, because neither reason for that list holds here. Recognising a
+         -- manufacturer lifted out of prose means reading the page; a results
+         -- table just prints the name, and there is nothing to judge. And the
+         -- archive fills above hedge because a capture is years old and IPDB may
+         -- have moved on -- here the live read is the NEWER source and the dump
+         -- is the stale one.
+         --
+         -- Gated on the two agreeing once punctuation, spacing and case are
+         -- removed, which is the whole failure being corrected: a scrape that
+         -- lost a character, never a different name. That gate is what makes
+         -- this safe to apply blind. A parse regression pointed at the wrong
+         -- column would differ in LETTERS on thousands of rows and be refused
+         -- every time, where a count-based sanity limit would have to guess how
+         -- many corrections are too many.
+         --
+         -- What the gate refuses is not silently dropped: IPDB genuinely
+         -- renaming a machine is a real event needing a real decision, and
+         -- `ipdb_live_read_renames_a_model` is where it waits for one.
+         CASE
+           WHEN cen."name" IS NOT NULL
+            AND cen."name" <> im.Title
+            AND lower(regexp_replace(cen."name", '[^a-zA-Z0-9]', '', 'g'))
+              = lower(regexp_replace(im.Title,  '[^a-zA-Z0-9]', '', 'g'))
+           THEN cen."name" ELSE im.Title
+         END AS Title
        ),
 
   -- IPDB's type code, from the parenthesis in `Type` rather than from the dump's

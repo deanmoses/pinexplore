@@ -180,6 +180,33 @@ INSERT INTO checks.warnings
 SELECT 'ipdb_live_read_model_not_in_dump', count(*)
 FROM checks.ipdb_live_read_model_not_in_dump;
 
+-- IPDB now calls a machine something the dump does not, in LETTERS.
+--
+-- The complement of the title correction in `ipdb_stg.models`. That rule fixes a
+-- name the scrape lost characters from -- the two agree once punctuation and
+-- case come out -- and deliberately refuses anything else. This is the anything
+-- else: IPDB and the dump disagree about the actual word.
+--
+-- Which is a genuine event needing a genuine decision, and not one this repo can
+-- make. IPDB renaming a machine may mean the catalog should follow, or that IPDB
+-- has merged two listings, or that the dump scraped the wrong row. All three
+-- look identical from here, and pinexplore does not read the catalog that would
+-- tell them apart.
+--
+-- Zero rows today. A row is a research task, not a bug.
+CREATE OR REPLACE VIEW checks.ipdb_live_read_renames_a_model AS
+SELECT m.IpdbId, m.Title AS dump_name, l."name" AS live_name
+FROM ipdb_stg.models_merged AS m
+INNER JOIN ipdb_stg.live_models AS l ON l.ipdb_id = m.IpdbId
+WHERE l."name" IS NOT NULL
+  AND nullif(m.Title, '') IS NOT NULL
+  AND lower(regexp_replace(l."name", '[^a-zA-Z0-9]', '', 'g'))
+   <> lower(regexp_replace(m.Title,  '[^a-zA-Z0-9]', '', 'g'));
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_live_read_renames_a_model', count(*)
+FROM checks.ipdb_live_read_renames_a_model;
+
 -- A model the dump dates that no year search lists.
 --
 -- The year searches tile 1800 to 2026 with no gap, so between them they match
@@ -228,9 +255,13 @@ FROM checks.ipdb_dated_model_not_in_year_search;
 -- over -- hence a warning, and hence the row carrying both values rather than
 -- picking one.
 --
--- The searches do not overrule the dump anywhere. Nothing downstream reads these
--- columns as values; `ipdb.models` is unchanged and still states what xantari
--- states. This is the whole use their non-specialty columns are put to.
+-- Compared against the RAW dump, so a `name` row stays here after
+-- `ipdb_stg.models` has corrected it -- this view reports what the scrape got
+-- wrong, which does not stop being true once it is fixed downstream. It is the
+-- audit trail for that correction, and the only place the original survives.
+--
+-- Every other field is a report and nothing more. The searches overrule the dump
+-- on `Title` alone; `ipdb.models` otherwise states what xantari states.
 --
 -- Expected to be small and nearly static. A count that jumps is more likely a
 -- parse regression here than IPDB revising thousands of records.
