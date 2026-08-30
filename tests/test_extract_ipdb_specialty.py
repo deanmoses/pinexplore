@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 
 import extract_ipdb_specialty_to_jsonl as extract
+import ipdb_search
 import pytest
 
 VOCABULARY = {
@@ -131,7 +132,7 @@ def page(
 
 def write(tmp_path, pages: dict[str, str]):
     for name, body in pages.items():
-        (tmp_path / f"{name}.html").write_text(body, encoding=extract.ENCODING)
+        (tmp_path / f"{name}.html").write_text(body, encoding=ipdb_search.ENCODING)
     return tmp_path
 
 
@@ -400,7 +401,7 @@ def test_a_page_shorter_than_it_declares_is_refused(tmp_path):
             )
         },
     )
-    with pytest.raises(extract.ParseError, match="declares 32 records"):
+    with pytest.raises(ipdb_search.ParseError, match="declares 32 records"):
         extract.build(tmp_path)
 
 
@@ -415,7 +416,9 @@ def test_a_specialty_named_by_rows_with_no_page_of_its_own_is_refused(tmp_path):
             )
         },
     )
-    with pytest.raises(extract.ParseError, match="no downloaded page for specialty"):
+    with pytest.raises(
+        ipdb_search.ParseError, match="no downloaded page for specialty"
+    ):
         extract.build(tmp_path)
 
 
@@ -442,7 +445,9 @@ def test_a_machine_missing_from_its_own_specialtys_page_is_refused(tmp_path):
             ),
         },
     )
-    with pytest.raises(extract.ParseError, match="whose own page omits the machine"):
+    with pytest.raises(
+        ipdb_search.ParseError, match="whose own page omits the machine"
+    ):
         extract.build(tmp_path)
 
 
@@ -459,7 +464,7 @@ def test_a_moved_results_column_is_refused(tmp_path):
             )
         },
     )
-    with pytest.raises(extract.ParseError, match="IPDB changed the results table"):
+    with pytest.raises(ipdb_search.ParseError, match="IPDB changed the results table"):
         extract.build(tmp_path)
 
 
@@ -488,7 +493,7 @@ def test_pages_disagreeing_about_a_machine_are_refused(tmp_path):
             ),
         },
     )
-    with pytest.raises(extract.ParseError, match="spans an edit at IPDB"):
+    with pytest.raises(ipdb_search.ParseError, match="spans an edit at IPDB"):
         extract.build(tmp_path)
 
 
@@ -508,7 +513,7 @@ def test_pages_with_different_dropdowns_are_refused(tmp_path):
             ),
         },
     )
-    with pytest.raises(extract.ParseError, match="spans a vocabulary change"):
+    with pytest.raises(ipdb_search.ParseError, match="spans a vocabulary change"):
         extract.build(tmp_path)
 
 
@@ -518,10 +523,10 @@ def test_an_unfiltered_search_page_is_refused(tmp_path):
         ' selected="selected"', ""
     )
     write(tmp_path, {"widebody": body})
-    with pytest.raises(extract.ParseError, match="no specialty marked selected"):
+    with pytest.raises(ipdb_search.ParseError, match="no specialty marked selected"):
         extract.build(tmp_path)
 
 
 def test_an_empty_source_directory_is_refused(tmp_path):
-    with pytest.raises(extract.ParseError, match="no saved search pages"):
+    with pytest.raises(ipdb_search.ParseError, match="no saved search pages"):
         extract.build(tmp_path)

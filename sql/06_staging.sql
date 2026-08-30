@@ -401,7 +401,7 @@ WHERE EXISTS (
 -- remains the source of which models exist and half a model -- specialties but
 -- no name, date or manufacturer -- is worse than none. Reading through
 -- `models_merged` also inherits the retraction filter.
--- `ipdb_specialty_census_model_not_in_dump` reports what this drops, and a
+-- `ipdb_live_read_model_not_in_dump` reports what this drops, and a
 -- growing count there means it is time for a fresh dump.
 CREATE OR REPLACE VIEW ipdb_stg.specialty_census AS
 SELECT c.*
@@ -409,6 +409,78 @@ FROM ipdb_raw.specialty_census AS c
 WHERE EXISTS (
   SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = c.ipdb_id
 );
+
+-- The other saved searches, cut down to the models xantari knows.
+CREATE OR REPLACE VIEW ipdb_stg.search_observations AS
+SELECT o.*
+FROM ipdb_raw.search_observations AS o
+WHERE EXISTS (
+  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = o.ipdb_id
+);
+
+-- Every live read of a machine IPDB's advanced search has given us, whatever
+-- filter produced it. One row per machine per search.
+--
+-- The Specialty census and the other searches differ in what their ABSENCES
+-- mean -- the census is closed and proven complete, the others state only what
+-- they matched -- but their PRESENCES are the same kind of fact, a machine as
+-- IPDB rendered it on the day it was saved. Everything downstream here wants
+-- only the presences, so this is where the distinction stops mattering and one
+-- corpus begins.
+--
+-- Unioned rather than merged: a machine matched by three searches is three
+-- observations, and collapsing them here would hide whether they agree.
+-- `ipdb_stg.live_models` collapses them, and `ipdb_live_observation_conflict`
+-- is what watches the collapse.
+CREATE OR REPLACE VIEW ipdb_stg.live_observations AS
+SELECT
+  'specialty' AS search_kind,
+  'census'    AS search_name,
+  ipdb_id, "name", date_text, date_year, date_month, date_is_project_date,
+  manufacturer, manufacturer_full, type_code, type_text,
+  production_text, production_units, production_approximate,
+  players, model_number, n_photos,
+  rating_score, rating_ratings, rating_provisional
+FROM ipdb_stg.specialty_census
+UNION ALL
+SELECT
+  search_kind, search_name,
+  ipdb_id, "name", date_text, date_year, date_month, date_is_project_date,
+  manufacturer, manufacturer_full, type_code, type_text,
+  production_text, production_units, production_approximate,
+  players, model_number, n_photos,
+  rating_score, rating_ratings, rating_provisional
+FROM ipdb_stg.search_observations;
+
+-- One row per machine: what IPDB currently says about it.
+--
+-- `any_value` is safe ONLY because the observations agree, which is asserted
+-- rather than assumed -- `ipdb_live_observation_conflict` fails the build if two
+-- searches describe one machine differently. Without that this view would pick a
+-- winner silently, and the searches are saved on different days, so eventually
+-- they will disagree.
+--
+-- Rating is excluded on purpose: IPDB recomputes it as votes arrive, so two
+-- downloads days apart legitimately differ and it is not a fact to collapse.
+CREATE OR REPLACE VIEW ipdb_stg.live_models AS
+SELECT
+  ipdb_id,
+  any_value("name")                AS "name",
+  any_value(date_text)             AS date_text,
+  any_value(date_year)             AS date_year,
+  any_value(date_month)            AS date_month,
+  any_value(date_is_project_date)  AS date_is_project_date,
+  any_value(manufacturer)          AS manufacturer,
+  any_value(manufacturer_full)     AS manufacturer_full,
+  any_value(type_code)             AS type_code,
+  any_value(type_text)             AS type_text,
+  any_value(production_text)       AS production_text,
+  any_value(production_units)      AS production_units,
+  any_value(players)               AS players,
+  any_value(model_number)          AS model_number,
+  count(*)                         AS n_observations
+FROM ipdb_stg.live_observations
+GROUP BY ipdb_id;
 
 -- Parse the IPDB page header line, which xantari captured verbatim into
 -- `AdditionalDetails` without modelling its parts:
@@ -567,17 +639,17 @@ SELECT
   -- never manufactured, re-dated since. Ordering the archive above the census
   -- would publish the stale answer with nothing to show it was stale.
   --
-  -- The census is read BOTH ways, and the second way is the load-bearing one. A
+  -- The mark is read BOTH ways, and the second way is the load-bearing one. A
   -- starred date is IPDB saying "project"; an unstarred one on a dated row is
-  -- IPDB saying "manufacture", by the same rule that prints the star. So a
-  -- census row can also RETIRE an inference rather than only overturn evidence.
+  -- IPDB saying "manufacture", by the same rule that prints the star. So a live
+  -- row can also RETIRE an inference rather than only overturn evidence.
   -- That reading rests on the star still being printed, which is why its
   -- disappearance is a build failure -- `ipdb_project_date_mark_absent` -- and
   -- not a silent re-typing of every project date as a manufacture date.
   --
   -- `DateOfManufacture` stays above both. It is a labelled field rather than a
   -- rendering convention, and where it contradicts the census that is worth
-  -- seeing rather than resolving: `ipdb_specialty_census_date_kind_disagrees`
+  -- seeing rather than resolving: `ipdb_live_read_date_kind_disagrees`
   -- reports exactly that residue.
   CASE
     WHEN ad.additional_details_date_year IS NULL       THEN NULL
@@ -624,7 +696,7 @@ LEFT JOIN ipdb_stg.model_additional_details AS ad
   ON ad.IpdbId = im.IpdbId
 LEFT JOIN ipdb_stg.archive_models AS arc
   ON arc.ipdb_id = im.IpdbId
-LEFT JOIN ipdb_stg.specialty_census AS cen
+LEFT JOIN ipdb_stg.live_models AS cen
   ON cen.ipdb_id = im.IpdbId
 -- One join, not two. The second leg existed only to reach Pure Mechanical
 -- through `Type` because the short name was blank there; the derived `type_code`
@@ -940,12 +1012,13 @@ SELECT
    WHERE artifact = 'ipdb/ipdb_specialty/census.jsonl') AS observed_on
 FROM ipdb_stg.specialty_census AS c, unnest(c.specialties) AS t(s);
 
--- Where the census and the xantari dump disagree about the same model.
+-- Where IPDB's live searches and the xantari dump disagree about a model.
 --
--- The census's non-specialty columns are not published as rival values -- the
+-- The searches' non-specialty columns are not published as rival values -- the
 -- dump is the field-level source and this view does not overrule it. They are
--- carried to be a LIVE READ against a dump that is months old, on thousands of
--- models at once, which is a cross-check nothing else in this build performs.
+-- carried to be a LIVE READ against a dump that is months old, across every
+-- machine any saved search has matched, which is a cross-check nothing else in
+-- this build performs.
 --
 -- Long rather than wide: one row per disagreeing field, so a new field joins the
 -- comparison by adding a leg rather than a column, and the warning that counts
@@ -956,29 +1029,29 @@ FROM ipdb_stg.specialty_census AS c, unnest(c.specialties) AS t(s);
 -- something. Dates compare only where both state one: xantari scraped Date Of
 -- Manufacture alone, so IPDB's several hundred Project Date models are simply
 -- blank there, and that absence is `date_is_project_date`, not a disagreement.
-CREATE OR REPLACE VIEW ipdb_stg.specialty_census_vs_dump AS
+CREATE OR REPLACE VIEW ipdb_stg.live_vs_dump AS
 WITH paired AS (
   SELECT
-    c.ipdb_id,
-    c."name",
-    c.date_year, c.date_month, c.players, c.type_code,
-    c.model_number, c.production_units,
+    l.ipdb_id,
+    l."name",
+    l.date_year, l.date_month, l.players, l.type_code,
+    l.model_number, l.production_units,
     m.Title, m.ModelNumber, m.ProductionNumber,
     m.Players AS dump_players,
     -- From `ipdb_stg.models`, which is where the dump's blank-on-PM short name is
     -- corrected. The other columns come from `models_merged` instead, because
     -- `ipdb_stg.models` fills production and rating from archive pages and this
-    -- view compares the census against the DUMP, not against the dump's fills.
+    -- view compares the live read against the DUMP, not against the dump's fills.
     sm.type_code AS dump_type_code,
     CAST(m.DateOfManufacture AS DATE) AS dump_date
-  FROM ipdb_stg.specialty_census AS c
-  INNER JOIN ipdb_stg.models_merged AS m ON m.IpdbId = c.ipdb_id
-  INNER JOIN ipdb_stg.models AS sm ON sm.IpdbId = c.ipdb_id
+  FROM ipdb_stg.live_models AS l
+  INNER JOIN ipdb_stg.models_merged AS m ON m.IpdbId = l.ipdb_id
+  INNER JOIN ipdb_stg.models AS sm ON sm.IpdbId = l.ipdb_id
 )
 -- `nullif(..., '')` on every dump string: xantari writes an empty string where
 -- IPDB is silent, and an empty string is an absence rather than a differing
 -- value. Without this each one reads as a disagreement.
-SELECT ipdb_id, 'name' AS field, "name" AS census_value, Title AS dump_value
+SELECT ipdb_id, 'name' AS field, "name" AS live_value, Title AS dump_value
 FROM paired WHERE "name" IS NOT NULL AND nullif(Title, '') IS NOT NULL AND "name" <> Title
 UNION ALL
 SELECT ipdb_id, 'players', CAST(players AS VARCHAR), CAST(dump_players AS VARCHAR)

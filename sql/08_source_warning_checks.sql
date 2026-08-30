@@ -153,8 +153,8 @@ WHERE NOT EXISTS (
 INSERT INTO checks.warnings
 SELECT 'ipdb_archive_credit_role_unrecognised', count(*) FROM checks.ipdb_archive_credit_role_unrecognised;
 
--- A machine the specialty census lists that the xantari dump has never listed,
--- so `ipdb_stg.specialty_census` dropped it and its specialties are unpublished.
+-- A machine one of IPDB's live searches lists that the xantari dump has never
+-- listed, so staging dropped it and nothing about it is published.
 --
 -- The counterpart of `ipdb_archive_model_not_in_dump` above, and it means the
 -- opposite. There, a machine missing from the dump is ambiguous -- the capture
@@ -162,42 +162,85 @@ SELECT 'ipdb_archive_credit_role_unrecognised', count(*) FROM checks.ipdb_archiv
 -- lists and the dump does not is one IPDB has added since the dump was taken.
 -- The remedy is not research, it is a fresh xantari snapshot, and a count that
 -- climbs over successive censuses is how that need becomes visible.
-CREATE OR REPLACE VIEW checks.ipdb_specialty_census_model_not_in_dump AS
-SELECT c.ipdb_id, c."name", c.manufacturer, c.date_text
-FROM ipdb_raw.specialty_census AS c
+CREATE OR REPLACE VIEW checks.ipdb_live_read_model_not_in_dump AS
+SELECT DISTINCT ipdb_id, "name", manufacturer, date_text
+FROM (
+  SELECT ipdb_id, "name", manufacturer, date_text FROM ipdb_raw.specialty_census
+  UNION ALL
+  SELECT ipdb_id, "name", manufacturer, date_text FROM ipdb_raw.search_observations
+) AS live
 WHERE NOT EXISTS (
-    SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = c.ipdb_id
+    SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = live.ipdb_id
   )
   AND NOT EXISTS (
-    SELECT 1 FROM ipdb_ref.retracted AS r WHERE r.ipdb_id = c.ipdb_id
+    SELECT 1 FROM ipdb_ref.retracted AS r WHERE r.ipdb_id = live.ipdb_id
   );
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_specialty_census_model_not_in_dump', count(*)
-FROM checks.ipdb_specialty_census_model_not_in_dump;
+SELECT 'ipdb_live_read_model_not_in_dump', count(*)
+FROM checks.ipdb_live_read_model_not_in_dump;
 
--- A field where the census and the dump describe the same model differently.
+-- A model the dump dates that no year search lists.
 --
--- The census is a live read of IPDB and the dump is months old, so a
+-- The year searches tile 1800 to 2026 with no gap, so between them they match
+-- every machine IPDB puts a date on -- and a machine IPDB does not date cannot
+-- appear in any of them, whatever else is true of it. That makes the year corpus
+-- COMPLETE over the dated universe, which is a claim no single search can make
+-- and the reason this check can exist at all: absence from it is meaningful,
+-- where absence from the Type search only means "not Pure Mechanical".
+--
+-- So a row here is one of three things, and it does not say which: IPDB has
+-- deleted the listing, IPDB has removed its date, or the year downloads have
+-- gone stale against a newer dump. The first belongs in `ipdb_ref.retracted`,
+-- the third is fixed by re-saving the range the model falls in.
+--
+-- A warning rather than a gate because the third case is ordinary: a fresh
+-- xantari snapshot legitimately holds models added since the year pages were
+-- saved. It starts at zero, which is what makes it worth watching.
+--
+-- Keyed on the `years` search kind, which is the FOLDER those pages are saved
+-- in -- the coupling is real, and it is the same one the extract relies on to
+-- name a search at all.
+CREATE OR REPLACE VIEW checks.ipdb_dated_model_not_in_year_search AS
+SELECT m.IpdbId, m.Title, m.additional_details_date_string
+FROM ipdb_stg.models AS m
+WHERE m.additional_details_date_year IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM ipdb_stg.search_observations AS o
+    WHERE o.ipdb_id = m.IpdbId AND o.search_kind = 'years'
+  )
+  -- Only ask once there is a year corpus to be complete. Without this, a build
+  -- with those pages missing reports thousands of rows -- true, but the kind of
+  -- count that trains a reader to skip the block. That state has its own tell:
+  -- `ipdb_archive_header_date_inferred` fills back up.
+  AND EXISTS (SELECT 1 FROM ipdb_stg.search_observations WHERE search_kind = 'years');
+
+INSERT INTO checks.warnings
+SELECT 'ipdb_dated_model_not_in_year_search', count(*)
+FROM checks.ipdb_dated_model_not_in_year_search;
+
+-- A field where IPDB's live searches and the dump describe a model differently.
+--
+-- The searches are live reads of IPDB and the dump is months old, so a
 -- disagreement is one of three things and the row does not say which: IPDB
 -- edited the record, the dump mis-scraped it, or this build mis-parsed the
 -- results table. All three are worth a look, and none is worth failing a build
 -- over -- hence a warning, and hence the row carrying both values rather than
 -- picking one.
 --
--- The census does not overrule the dump anywhere. Nothing downstream reads these
+-- The searches do not overrule the dump anywhere. Nothing downstream reads these
 -- columns as values; `ipdb.models` is unchanged and still states what xantari
--- states. This is the whole use the census's non-specialty columns are put to.
+-- states. This is the whole use their non-specialty columns are put to.
 --
 -- Expected to be small and nearly static. A count that jumps is more likely a
 -- parse regression here than IPDB revising thousands of records.
-CREATE OR REPLACE VIEW checks.ipdb_specialty_census_disagrees_with_dump AS
-SELECT ipdb_id, field, census_value, dump_value
-FROM ipdb_stg.specialty_census_vs_dump;
+CREATE OR REPLACE VIEW checks.ipdb_live_read_disagrees_with_dump AS
+SELECT ipdb_id, field, live_value, dump_value
+FROM ipdb_stg.live_vs_dump;
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_specialty_census_disagrees_with_dump', count(*)
-FROM checks.ipdb_specialty_census_disagrees_with_dump;
+SELECT 'ipdb_live_read_disagrees_with_dump', count(*)
+FROM checks.ipdb_live_read_disagrees_with_dump;
 
 -- A specialty an archived page states that the census does not, or the reverse,
 -- for a model both describe.
@@ -243,20 +286,20 @@ SELECT 'ipdb_specialty_reclassified', count(*) FROM checks.ipdb_specialty_reclas
 -- A warning, not a gate, and the ordering is deliberate rather than provisional:
 -- a labelled field outranks a rendering convention, so the disagreement is worth
 -- seeing rather than resolving by rule.
-CREATE OR REPLACE VIEW checks.ipdb_specialty_census_date_kind_disagrees AS
+CREATE OR REPLACE VIEW checks.ipdb_live_read_date_kind_disagrees AS
 SELECT
   m.IpdbId, m.Title, m.AdditionalDetails,
   m.additional_details_date_kind AS inferred_kind,
   CASE WHEN c.date_is_project_date THEN 'project' ELSE 'manufacture' END AS census_mark
 FROM ipdb_stg.models AS m
-INNER JOIN ipdb_stg.specialty_census AS c ON c.ipdb_id = m.IpdbId
+INNER JOIN ipdb_stg.live_models AS c ON c.ipdb_id = m.IpdbId
 WHERE c.date_year IS NOT NULL
   AND m.additional_details_date_kind IS NOT NULL
   AND c.date_is_project_date <> (m.additional_details_date_kind LIKE 'project%');
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_specialty_census_date_kind_disagrees', count(*)
-FROM checks.ipdb_specialty_census_date_kind_disagrees;
+SELECT 'ipdb_live_read_date_kind_disagrees', count(*)
+FROM checks.ipdb_live_read_date_kind_disagrees;
 
 -- Models whose header-line date is being read as a project date on inference
 -- rather than on evidence -- `additional_details_date_kind = 'project_inferred'`.

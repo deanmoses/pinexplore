@@ -110,7 +110,17 @@ It is a **census**, and that is the whole reason it outranks the other two IPDB 
 
 Two things follow, and both are enforced rather than remembered. The download is only as good as its completeness, so the extract refuses to write a census that is short by any of the ways it can detect. And the census is hand-saved, so it must expire loudly: `ipdb_specialty_xantari_column_appeared` fails the build the day a dump gains the field, and `ipdb_specialty_vocabulary_drifted` fails it the day IPDB's vocabulary moves. Re-running over a fresh download rewrites both files whole, so the diff is what changed at IPDB — and the acquisition date in `ref.artifact_acquisitions` must move with it.
 
-The row also carries date, manufacturer, type, production, players, model number and rating. These are **not** rival values — `ipdb.models` still states what xantari states — they are a live read cross-checked against a months-old dump by `ipdb_specialty_census_disagrees_with_dump`.
+The row also carries date, manufacturer, type, production, players, model number and rating. These are **not** rival values — `ipdb.models` still states what xantari states — they are a live read cross-checked against a months-old dump by `ipdb_live_read_disagrees_with_dump`.
+
+### IPDB's other advanced searches
+
+The same search filters by Type and by year range too, and every filter renders the same results table. `scripts/ipdb/ipdb_search.py` parses that table for all of them; `scripts/ipdb/extract_ipdb_searches_to_jsonl.py` walks every saved page under `ingest_sources/ipdb/ipdb_*/` except the Specialty ones and writes `ipdb_searches/observations.jsonl`. **Adding a download is dropping a page in a folder and re-running the extract** — no code and no SQL changes, though `ref.artifact_acquisitions` needs its count bumped.
+
+Two things about that table are load-bearing and easy to get wrong. It is saved by hand, so pages arrive in two markups — IPDB's own HTML 4.01 (bare attributes, relative hrefs, no `tbody`) and the DOM a browser rebuilt (everything quoted, `tbody` inserted) — and nothing may depend on either. And **IPDB ships more than one column order**, so cells are located by header name; reading by position silently swaps production and specialty between the Specialty and Type searches rather than failing.
+
+No single one of these searches proves anything about completeness — only the person who ran it knows what it filtered on — so the corpus holds positive observations and the extract infers nothing from a machine's absence. The year searches are the exception, and collectively: tiled 1800–2026 without a gap they match every machine IPDB dates, and an undated machine cannot appear in any of them, so absence from them is meaningful. `ipdb_dated_model_not_in_year_search` asserts that, and a row in it is a listing IPDB deleted, a date IPDB removed, or year pages gone stale against a newer dump.
+
+`ipdb_stg.live_observations` unions the searches with the census, `ipdb_stg.live_models` collapses that to one row per machine, and `ipdb_live_observation_conflict` is what makes the collapse safe. These feed `additional_details_date_kind`, which reads IPDB's project-date mark straight off the listing — every header date in `ipdb.models` is now typed on evidence rather than inference.
 
 ## Cloudflare R2
 

@@ -412,6 +412,30 @@ FROM ipdb_ref.specialty
 GROUP BY ipdb_specialty
 HAVING count(*) > 1;
 
+-- Two saved searches describing one machine differently.
+--
+-- `ipdb_stg.live_models` collapses every observation of a machine with
+-- `any_value`, which is only honest while the observations agree. They are saved
+-- on different days, so eventually they will not, and the collapse would then
+-- pick a winner silently -- with `additional_details_date_kind` and the
+-- dump comparison both reading whichever it picked.
+--
+-- Fatal for that reason rather than because a disagreement is bad news. It is
+-- IPDB editing a record between two downloads, which is worth knowing; what is
+-- not acceptable is deciding it by evaluation order. Re-saving the older search
+-- clears it.
+--
+-- Rating is not compared: IPDB recomputes it as votes arrive, so two downloads
+-- days apart differ by design.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_live_observation_conflict',
+  'IPDB ' || ipdb_id || ' is described differently by ' || count(*) || ' searches: '
+    || string_agg(DISTINCT search_kind || '/' || search_name, ', ')
+FROM ipdb_stg.live_observations
+GROUP BY ipdb_id
+HAVING count(DISTINCT ("name", date_text, date_is_project_date, type_code,
+                       production_text, players, model_number)) > 1;
+
 -- IPDB has stopped marking project dates in its search results.
 --
 -- `additional_details_date_kind` reads the mark BOTH ways: a star means project,

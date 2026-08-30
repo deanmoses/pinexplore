@@ -48,7 +48,23 @@ SELECT
   'ipdb/ipdb_specialty/census.jsonl',
   NULL,
   count(*)
-FROM ipdb_raw.specialty_census;
+FROM ipdb_raw.specialty_census
+
+UNION ALL
+
+-- The other saved advanced searches, one row for the whole extract.
+--
+-- `observed_at` is NULL for the same reason as the census above -- a results
+-- page carries no timestamp. Unlike the census, though, `acquired_on` is a
+-- SIMPLIFICATION here rather than a fact: these searches are saved whenever one
+-- is wanted, so the corpus spans however long that has been going on, and one
+-- date describes the newest download rather than all of them.
+SELECT
+  'advanced search observations',
+  'ipdb/ipdb_searches/observations.jsonl',
+  NULL,
+  count(*)
+FROM ipdb_raw.search_observations;
 COMMENT ON VIEW ipdb.ingest_watermarks IS
   'One row per ingested IPDB artifact with its record count and best available watermark; archive extracts use latest fetch time.';
 
@@ -77,7 +93,8 @@ SELECT * FROM (VALUES
   -- carries more weight than the OPDB ones above it: `ipdb.model_specialties`
   -- publishes it as `observed_on`, making it the date a patch cites for every
   -- specialty claim, and there is nowhere else it could come from.
-  ('ipdb/ipdb_specialty/census.jsonl', DATE '2026-08-30', 3292)
+  ('ipdb/ipdb_specialty/census.jsonl', DATE '2026-08-30', 3292),
+  ('ipdb/ipdb_searches/observations.jsonl', DATE '2026-08-30', 7637)
 ) AS t(artifact, acquired_on, n_records_at_acquisition);
 
 -- Every ingested artifact, one row each, whatever source it came from.

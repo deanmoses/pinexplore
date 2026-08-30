@@ -224,6 +224,64 @@ FROM read_json_auto(
   (sample_size = -1)
 );
 
+-- IPDB's other advanced searches, as saved observations.
+--
+-- Written by `scripts/ipdb/extract_ipdb_searches_to_jsonl.py` over every saved
+-- search page EXCEPT the Specialty ones, which the census above owns. One row
+-- per machine per search, so a machine matched by two searches is observed
+-- twice; `ipdb_stg.live_observations` unions these with the census and
+-- `ipdb_live_observation_conflict` asserts the copies agree.
+--
+-- These are LIVE READS, months newer than the dump, and their whole job is to
+-- give the build something current to check the dump against. They publish no
+-- rival field values -- `ipdb.models` still states what xantari states.
+--
+-- What a search's absence means is NOT recorded, deliberately. Each download is
+-- complete for what it filtered on, but the page does not always say what that
+-- was (the Type search echoes no filter back), so the corpus holds positive
+-- observations only and nothing infers from a machine's absence.
+--
+-- The `years` searches are the exception, and they earn it COLLECTIVELY rather
+-- than one page at a time: tiled 1800 to 2026 without a gap, they match every
+-- machine IPDB dates, and a machine IPDB does not date cannot appear in any of
+-- them. That makes them complete over the dated universe, which is what
+-- `ipdb_dated_model_not_in_year_search` asserts. The property belongs here in
+-- SQL rather than in the extract, which reads folders and cannot know what any
+-- of them tile.
+CREATE OR REPLACE TABLE ipdb_raw.search_observations AS
+SELECT
+  -- The folder the page was saved in, and the file within it. Provenance for a
+  -- filter the page itself may not state.
+  search_kind,
+  search_name,
+  ipdb_id,
+  "name",
+  date_text,
+  date_year,
+  date_month,
+  date_is_project_date,
+  manufacturer,
+  manufacturer_full,
+  type_code,
+  type_text,
+  production_text,
+  production_units,
+  production_approximate,
+  players,
+  model_number,
+  n_photos,
+  rating_score,
+  rating_ratings,
+  rating_provisional,
+  -- Bare specialty strings here, where the census carries structs: this corpus
+  -- proves nothing about completeness, so a row is a sighting rather than an
+  -- assignment and has no search URL to cite.
+  specialties
+FROM read_json_auto(
+  getvariable('ingest_base') || '/ipdb/ipdb_searches/observations.jsonl',
+  (sample_size = -1)
+);
+
 -- IPDB's Specialty dropdown as the census download found it.
 --
 -- The live vocabulary, riding along with the data that was read under it. It
