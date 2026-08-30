@@ -230,17 +230,19 @@ WHERE a.specialty IS NULL OR c.specialty IS NULL;
 INSERT INTO checks.warnings
 SELECT 'ipdb_specialty_reclassified', count(*) FROM checks.ipdb_specialty_reclassified;
 
--- A model whose header-line date this build TYPED one way and IPDB's own listing
--- marks the other.
+-- A model where xantari holds a `DateOfManufacture` and IPDB's listing marks the
+-- date a Project Date.
 --
--- IPDB prints a `*` beside a date it is stating as a Project Date, and the
--- census carries that mark. `additional_details_date_kind` reaches the same
--- question by inference from the dump, on models no archive page confirms. Where
--- both speak, IPDB's mark is evidence and the inference is not, so a
--- disagreement is the inference being wrong.
+-- Narrow by construction. `additional_details_date_kind` takes the census's mark
+-- over every archive capture, so those can no longer disagree -- what is left is
+-- the one branch that outranks the census, the dump's own labelled field. A row
+-- here is xantari saying IPDB stated a manufacture date and IPDB now saying the
+-- date is a project date, which is either a record IPDB has re-dated since the
+-- dump or a field the dump mis-scraped.
 --
--- Nothing is rewired on the strength of this: `ipdb_stg.models` still types the
--- date the way it did. The rows are here to be read before that changes.
+-- A warning, not a gate, and the ordering is deliberate rather than provisional:
+-- a labelled field outranks a rendering convention, so the disagreement is worth
+-- seeing rather than resolving by rule.
 CREATE OR REPLACE VIEW checks.ipdb_specialty_census_date_kind_disagrees AS
 SELECT
   m.IpdbId, m.Title, m.AdditionalDetails,

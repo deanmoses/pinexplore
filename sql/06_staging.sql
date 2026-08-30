@@ -392,6 +392,24 @@ WHERE EXISTS (
   SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = am.ipdb_id
 );
 
+-- The census, cut down to the models xantari knows.
+--
+-- Same restriction as `ipdb_stg.archive_models`, for a weaker reason. There the
+-- rule keeps a decade-old capture from asserting a listing still exists; here
+-- the census is hours old, so a machine it lists and the dump does not is almost
+-- certainly one IPDB has ADDED since. It is still dropped, because xantari
+-- remains the source of which models exist and half a model -- specialties but
+-- no name, date or manufacturer -- is worse than none. Reading through
+-- `models_merged` also inherits the retraction filter.
+-- `ipdb_specialty_census_model_not_in_dump` reports what this drops, and a
+-- growing count there means it is time for a fresh dump.
+CREATE OR REPLACE VIEW ipdb_stg.specialty_census AS
+SELECT c.*
+FROM ipdb_raw.specialty_census AS c
+WHERE EXISTS (
+  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = c.ipdb_id
+);
+
 -- Parse the IPDB page header line, which xantari captured verbatim into
 -- `AdditionalDetails` without modelling its parts:
 --
@@ -535,14 +553,37 @@ SELECT
   -- IPDB's rule a header date with no `DateOfManufacture` IS a project date --
   -- but that reasoning trusts xantari to have captured a manufacture date
   -- wherever IPDB states one, and archive pages show plain `Date Of Manufacture`
-  -- rows that the dump simply dropped.
-  -- The inference is sound about IPDB and unreliable about xantari, so the rows
-  -- resting on it are marked and reported by
-  -- `ipdb_archive_header_date_inferred` rather than mixed in with the observed
-  -- ones.
+  -- rows that the dump simply dropped. The inference is sound about IPDB and
+  -- unreliable about xantari, so the rows resting on it are marked and reported
+  -- by `ipdb_archive_header_date_inferred` rather than mixed in with the
+  -- observed ones.
+  --
+  -- THE BRANCHES ARE ORDERED BY HOW RECENTLY IPDB SAID IT, which is the whole
+  -- reason the census outranks the archive pages here. Both are IPDB stating the
+  -- kind rather than us inferring it, so neither is better evidence in itself --
+  -- but a capture is years old and the census is one download old, and IPDB
+  -- revises these. Two 1982 prototypes carry a labelled `Date Of Manufacture` on
+  -- their 2018 captures and a project mark in the census: machines that were
+  -- never manufactured, re-dated since. Ordering the archive above the census
+  -- would publish the stale answer with nothing to show it was stale.
+  --
+  -- The census is read BOTH ways, and the second way is the load-bearing one. A
+  -- starred date is IPDB saying "project"; an unstarred one on a dated row is
+  -- IPDB saying "manufacture", by the same rule that prints the star. So a
+  -- census row can also RETIRE an inference rather than only overturn evidence.
+  -- That reading rests on the star still being printed, which is why its
+  -- disappearance is a build failure -- `ipdb_project_date_mark_absent` -- and
+  -- not a silent re-typing of every project date as a manufacture date.
+  --
+  -- `DateOfManufacture` stays above both. It is a labelled field rather than a
+  -- rendering convention, and where it contradicts the census that is worth
+  -- seeing rather than resolving: `ipdb_specialty_census_date_kind_disagrees`
+  -- reports exactly that residue.
   CASE
     WHEN ad.additional_details_date_year IS NULL       THEN NULL
     WHEN im.DateOfManufacture IS NOT NULL              THEN 'manufacture'
+    WHEN cen.date_is_project_date                      THEN 'project'
+    WHEN cen.date_year IS NOT NULL                     THEN 'manufacture'
     WHEN arc.manufacture_date_year IS NOT NULL         THEN 'manufacture'
     WHEN arc.project_date_year IS NOT NULL             THEN 'project'
     ELSE 'project_inferred'
@@ -583,6 +624,8 @@ LEFT JOIN ipdb_stg.model_additional_details AS ad
   ON ad.IpdbId = im.IpdbId
 LEFT JOIN ipdb_stg.archive_models AS arc
   ON arc.ipdb_id = im.IpdbId
+LEFT JOIN ipdb_stg.specialty_census AS cen
+  ON cen.ipdb_id = im.IpdbId
 -- One join, not two. The second leg existed only to reach Pure Mechanical
 -- through `Type` because the short name was blank there; the derived `type_code`
 -- above carries PM like any other code, so the full-text key is gone.
@@ -870,28 +913,6 @@ SELECT
   archive_capture_date
 FROM ipdb_stg.archive_models
 WHERE len(specialties) > 0;
-
-------------------------------------------------------------
--- IPDB specialty census
-------------------------------------------------------------
-
--- The census, cut down to the models xantari knows.
---
--- Same restriction as `ipdb_stg.archive_models`, for a weaker reason. There the
--- rule keeps a decade-old capture from asserting a listing still exists; here
--- the census is hours old, so a machine it lists and the dump does not is almost
--- certainly one IPDB has ADDED since. It is still dropped, because xantari
--- remains the source of which models exist and half a model -- specialties but
--- no name, date or manufacturer -- is worse than none. Reading through
--- `models_merged` also inherits the retraction filter.
--- `ipdb_specialty_census_model_not_in_dump` reports what this drops, and a
--- growing count there means it is time for a fresh dump.
-CREATE OR REPLACE VIEW ipdb_stg.specialty_census AS
-SELECT c.*
-FROM ipdb_raw.specialty_census AS c
-WHERE EXISTS (
-  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = c.ipdb_id
-);
 
 -- One row per model per specialty IPDB currently assigns it.
 --

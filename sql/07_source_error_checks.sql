@@ -412,6 +412,27 @@ FROM ipdb_ref.specialty
 GROUP BY ipdb_specialty
 HAVING count(*) > 1;
 
+-- IPDB has stopped marking project dates in its search results.
+--
+-- `additional_details_date_kind` reads the mark BOTH ways: a star means project,
+-- and its absence on a dated census row means manufacture. The second reading is
+-- what lets the census retire an inference, and it is the one that fails
+-- silently -- if IPDB drops the star from its results table, every project date
+-- in the census starts reading as a manufacture date, on hundreds of models, and
+-- every one of them looks like an ordinary observation.
+--
+-- Asserted on the corpus rather than on any model: the mark is a rendering
+-- convention IPDB could change without changing a single record, and hundreds of
+-- rows carry it today, so none carrying it is a rendering change and never a
+-- census where no machine happens to have a project date.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_project_date_mark_absent',
+  'no row in the specialty census is marked a project date; an unmarked date is '
+    || 'read as a manufacture date, so the mark going unread retypes them all'
+WHERE NOT EXISTS (
+  SELECT 1 FROM ipdb_raw.specialty_census WHERE date_is_project_date
+);
+
 -- Expiry guard for the specialty census, the counterpart of the credit role one
 -- above.
 --
