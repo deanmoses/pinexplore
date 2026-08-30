@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Parse the Kineticist pinball glossary HTML into structured JSON.
 
-Reads the saved HTML from ingest_sources/glossary_kineticist/ and extracts
+Reads the saved HTML from ingest_sources/glossary/glossary_kineticist/ and extracts
 each glossary term with its definition.
 
 Usage:
@@ -22,8 +22,8 @@ from typing import override
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pindata" / "lib"))
 from slugify import slugify
 
-DEFAULT_SRC = "ingest_sources/glossary_kineticist/glossary_kineticist"
-DEFAULT_DEST = "ingest_sources/glossary_kineticist/kineticist_glossary.json"
+DEFAULT_SRC = "ingest_sources/glossary/glossary_kineticist/glossary_kineticist"
+DEFAULT_DEST = "ingest_sources/glossary/glossary_kineticist/kineticist_glossary.json"
 
 
 class _GlossaryParser(HTMLParser):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Parse the IPDB glossary HTML into structured JSON.
 
-Reads the saved HTML from ingest_sources/glossary_ipdb/ and extracts each
+Reads the saved HTML from ingest_sources/glossary/glossary_ipdb/ and extracts each
 glossary term with its definition, cross-references, and linked games.
 
 Usage:
@@ -22,8 +22,8 @@ from typing import override
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pindata" / "lib"))
 from slugify import slugify
 
-DEFAULT_SRC = "ingest_sources/glossary_ipdb/Pinball Glossary.html"
-DEFAULT_DEST = "ingest_sources/glossary_ipdb/ipdb_glossary.json"
+DEFAULT_SRC = "ingest_sources/glossary/glossary_ipdb/Pinball Glossary.html"
+DEFAULT_DEST = "ingest_sources/glossary/glossary_ipdb/ipdb_glossary.json"
 
 
 class _GlossaryParser(HTMLParser):

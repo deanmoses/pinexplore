@@ -425,7 +425,7 @@ PDFs with a text layer are extracted to text — searchable and quotable like an
 
 ```console
 $ uv run python scripts/web_scrape/web_cache.py quote <manual-url> "Bottom Pop Bumper"
-blob: /…/pinexplore/ingest_sources/web/raw/9a83…0721.pdf ⬅️ stderr: a fact about the document
+blob: /…/pinexplore/ingest_sources/web_cache/raw/9a83…0721.pdf ⬅️ stderr: a fact about the document
 Bottom Pop Bumper
 pdf document pages: 27
 ```
@@ -498,7 +498,7 @@ The CLI prints; functions return structured data. The OCR tier rides that data r
 The **SQLite database is the system-of-record**; `make explore` materializes it into the `web_cache.pages` / `web_cache.fetches` DuckDB tables (via `03_raw_web.sql`) so web evidence can be joined against the IPDB and OPDB marts.
 
 ```text
-ingest_sources/web/          ← durable (R2-backed, gitignored), NOT in git
+ingest_sources/web_cache/    ← durable (R2-backed, gitignored), NOT in git
   cache.sqlite                 system-of-record: captures, fetch log, document
                                library, FTS indexes (tables described below)
   raw/<sha256(raw)>.<ext>      raw document blobs, content-addressed

@@ -11,7 +11,7 @@
 INSTALL sqlite;
 LOAD sqlite;
 
-ATTACH 'ingest_sources/web/cache.sqlite' AS we (TYPE sqlite, READ_ONLY);
+ATTACH 'ingest_sources/web_cache/cache.sqlite' AS we (TYPE sqlite, READ_ONLY);
 
 CREATE OR REPLACE TABLE web_cache.pages   AS SELECT * FROM we.pages;
 CREATE OR REPLACE TABLE web_cache.fetches AS SELECT * FROM we.fetches;

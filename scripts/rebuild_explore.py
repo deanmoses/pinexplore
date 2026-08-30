@@ -220,8 +220,8 @@ def main() -> None:
             skip_reason = None
             if args.remote:
                 skip_reason = "--remote: can't ATTACH sqlite over R2"
-            elif not pathlib.Path("ingest_sources/web/cache.sqlite").exists():
-                skip_reason = "no web cache at ingest_sources/web/cache.sqlite"
+            elif not pathlib.Path("ingest_sources/web_cache/cache.sqlite").exists():
+                skip_reason = "no web cache at ingest_sources/web_cache/cache.sqlite"
             if skip_reason:
                 con.execute(WEB_STUB_SQL)
                 print(f"  {layer} → empty web_cache tables ({skip_reason})")

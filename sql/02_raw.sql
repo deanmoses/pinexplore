@@ -12,17 +12,17 @@
 -- Fandom wiki exports
 CREATE OR REPLACE TABLE fandom_raw.games AS
 SELECT d.*
-FROM (SELECT unnest(games) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom_games.json'));
+FROM (SELECT unnest(games) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom/fandom_games.json'));
 
 CREATE OR REPLACE TABLE fandom_raw.manufacturers AS
 SELECT d.*
-FROM (SELECT unnest(manufacturers) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom_manufacturers.json'));
+FROM (SELECT unnest(manufacturers) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom/fandom_manufacturers.json'));
 
 -- `people`, not the source's `persons`: the catalog spells this entity's plural
 -- `people`.
 CREATE OR REPLACE TABLE fandom_raw.people AS
 SELECT d.*
-FROM (SELECT unnest(persons) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom_persons.json'));
+FROM (SELECT unnest(persons) AS d FROM read_json_auto(getvariable('ingest_base') || '/fandom/fandom_persons.json'));
 
 -- OPDB (Open Pinball Database) export.
 --
@@ -85,8 +85,8 @@ FROM (
   SELECT LastRefreshDateUtc, unnest("Data") AS d
   FROM read_json_auto(
     [
-      getvariable('ingest_base') || '/ipdb_xantari_2025_02_01.json',
-      getvariable('ingest_base') || '/ipdb_xantari_2026_04_11.json'
+      getvariable('ingest_base') || '/ipdb/ipdb_xantari_2025_02_01.json',
+      getvariable('ingest_base') || '/ipdb/ipdb_xantari_2026_04_11.json'
     ],
     (maximum_object_size = 67108864),
     (union_by_name = true)
@@ -158,7 +158,7 @@ SELECT
   content_sha,
   last_fetched_at
 FROM read_json_auto(
-  getvariable('ingest_base') || '/ipdb_archive/models.jsonl',
+  getvariable('ingest_base') || '/ipdb/ipdb_archive/models.jsonl',
   (sample_size = -1)
 );
 
@@ -172,12 +172,12 @@ SELECT
   see_also,
   aliases,
   games,
-FROM read_json_auto(getvariable('ingest_base') || '/glossary_ipdb/ipdb_glossary.json', (union_by_name = true));
+FROM read_json_auto(getvariable('ingest_base') || '/glossary/glossary_ipdb/ipdb_glossary.json', (union_by_name = true));
 
 CREATE OR REPLACE TABLE glossary.kineticist AS
 SELECT *
-FROM read_json_auto(getvariable('ingest_base') || '/glossary_kineticist/kineticist_glossary.json');
+FROM read_json_auto(getvariable('ingest_base') || '/glossary/glossary_kineticist/kineticist_glossary.json');
 
 CREATE OR REPLACE TABLE glossary.pinball_primer AS
 SELECT *
-FROM read_json_auto(getvariable('ingest_base') || '/glossary_pinball_primer/pinball_primer_glossary.json');
+FROM read_json_auto(getvariable('ingest_base') || '/glossary/glossary_pinball_primer/pinball_primer_glossary.json');

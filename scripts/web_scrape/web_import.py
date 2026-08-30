@@ -430,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # A dry run must not touch the store it is previewing: connect() would create
-    # ingest_sources/web/ and the database on a fresh checkout, and init_schema
+    # ingest_sources/web_cache/ and the database on a fresh checkout, and init_schema
     # would commit migrations — writes, however harmless, that the flag promises
     # not to make. Read-only when there's something to read, otherwise nothing.
     con: sqlite3.Connection | None

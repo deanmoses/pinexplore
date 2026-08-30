@@ -2,14 +2,14 @@
 """Web cache: schema, URL normalization, upsert, and query helpers.
 
 This is the library behind the web-scrape cache (see docs/WebCache.md). It owns
-the SQLite system-of-record at ``ingest_sources/web/cache.sqlite`` plus the raw
-blobs at ``ingest_sources/web/raw/<sha>.<ext>``. The fetcher
+the SQLite system-of-record at ``ingest_sources/web_cache/cache.sqlite`` plus the raw
+blobs at ``ingest_sources/web_cache/raw/<sha>.<ext>``. The fetcher
 (``web_fetch.py``) writes through it; patch authors read through it.
 
 Stdlib only (sqlite3, hashlib, urllib.parse, re). The SQLite ``fts5`` extension
 ships with the standard CPython build.
 
-Layout (all under ingest_sources/web/, R2-backed and gitignored):
+Layout (all under ingest_sources/web_cache/, R2-backed and gitignored):
     cache.sqlite        pages + fetches + the document-library tables +
                         three FTS5 indexes (schema below)
     raw/<sha>.<ext>     raw page blobs, content-addressed (sha = sha256(raw
@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     import argparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-WEB_DIR = REPO_ROOT / "ingest_sources" / "web"
+WEB_DIR = REPO_ROOT / "ingest_sources" / "web_cache"
 DB_PATH = WEB_DIR / "cache.sqlite"
 RAW_DIR = WEB_DIR / "raw"
 

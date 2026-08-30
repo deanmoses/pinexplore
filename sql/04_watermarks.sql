@@ -29,7 +29,7 @@ UNION ALL
 -- given model is `archive_capture_date`, on that model's own row.
 SELECT
   'archive page extract',
-  'ipdb_archive/models.jsonl',
+  'ipdb/ipdb_archive/models.jsonl',
   max(last_fetched_at),
   count(*)
 FROM ipdb_raw.archive_models;
@@ -92,11 +92,11 @@ SELECT 'opdb', 'id changelog', 'opdb/opdb_changelog.json',
   (SELECT CAST(max(createdAt) AS TIMESTAMP) FROM opdb_raw.changelog),
   (SELECT count(*) FROM opdb_raw.changelog)
 UNION ALL
-SELECT 'fandom', 'export', 'fandom_games.json', NULL, count(*) FROM fandom_raw.games
+SELECT 'fandom', 'export', 'fandom/fandom_games.json', NULL, count(*) FROM fandom_raw.games
 UNION ALL
-SELECT 'fandom', 'export', 'fandom_manufacturers.json', NULL, count(*) FROM fandom_raw.manufacturers
+SELECT 'fandom', 'export', 'fandom/fandom_manufacturers.json', NULL, count(*) FROM fandom_raw.manufacturers
 UNION ALL
-SELECT 'fandom', 'export', 'fandom_persons.json', NULL, count(*) FROM fandom_raw.people
+SELECT 'fandom', 'export', 'fandom/fandom_persons.json', NULL, count(*) FROM fandom_raw.people
 UNION ALL
 SELECT 'glossary', 'parsed html', 'ipdb_glossary.json', NULL, count(*) FROM glossary.ipdb
 UNION ALL

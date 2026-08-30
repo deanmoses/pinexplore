@@ -81,13 +81,13 @@ The build fails if integrity checks don't pass, printing every violation as it a
 
 ## Web Evidence Cache
 
-`scripts/web_scrape/web_fetch.py` fetches web pages into a durable, searchable cache used as attributed evidence for catalog corrections, falling back to archive.org's newest capture when a live fetch fails (a blocking host like `ipdb.org`, a dead site). The system-of-record is a SQLite database with raw blobs under `ingest_sources/web/`; `make explore` materializes it into `web_cache.pages` / `web_cache.fetches` via the local-only `03_raw_web.sql` layer, so those tables are absent in `--remote` mode.
+`scripts/web_scrape/web_fetch.py` fetches web pages into a durable, searchable cache used as attributed evidence for catalog corrections, falling back to archive.org's newest capture when a live fetch fails (a blocking host like `ipdb.org`, a dead site). The system-of-record is a SQLite database with raw blobs under `ingest_sources/web_cache/`; `make explore` materializes it into `web_cache.pages` / `web_cache.fetches` via the local-only `03_raw_web.sql` layer, so those tables are absent in `--remote` mode.
 
 Query it with `scripts/web_scrape/web_cache.py`. Its `search`, `quote`, `outline`, `section` and `get` are an **escalation ladder** — prefer the earlier, needle-driven rungs over whole-page reads. Read [WebCache.md](docs/WebCache.md) before a research session rather than guessing at the CLI: search scopes and syntax, OCR'd PDF sheets, citation locators, and the document library (thousands of known-but-unfetched documents) are all covered there.
 
 ### IPDB machine pages as structured data
 
-`scripts/web_scrape/parse_ipdb.py` parses a cached IPDB machine page into the fields the xantari dump never had — `Project Date`, a `Production` status, `Concept by`, `Specialty`, `Easter Eggs`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page into `ingest_sources/ipdb_archive/models.jsonl`, which this build folds in as `ipdb_raw.archive_models` and patch-authoring sessions in **flippatch** read directly.
+`scripts/web_scrape/parse_ipdb.py` parses a cached IPDB machine page into the fields the xantari dump never had — `Project Date`, a `Production` status, `Concept by`, `Specialty`, `Easter Eggs`. `scripts/web_scrape/extract_ipdb_to_jsonl.py` runs it over every cached page into `ingest_sources/ipdb/ipdb_archive/models.jsonl`, which this build folds in as `ipdb_raw.archive_models` and patch-authoring sessions in **flippatch** read directly.
 
 It is derived: re-run it after a fetch campaign and the diff is what the campaign found. The emitted shape answers to `read_json_auto` and the constraints are not optional — they are in the module docstring, which is required reading before changing the output.
 
