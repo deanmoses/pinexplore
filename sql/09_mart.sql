@@ -6,7 +6,7 @@
 --
 -- The job is translation: our spelling, NULL where the source says "nothing" in
 -- its own dialect, and a fact on the row where a consumer would otherwise have
--- to know to go and join for it. Correcting the dump against its own source is
+-- to know to go and join for it. Correcting a dump against its own source is
 -- staging's job -- `ipdb_stg.models` is where that line falls.
 --
 -- WHAT MAY BE NAMED HERE. A mart publishes Flipcommons fields, plus columns that
@@ -515,7 +515,7 @@ COMMENT ON VIEW ipdb.model_credits IS
 -- them.
 --
 -- `specialty_id` and `source_url` come from IPDB's own dropdown, captured by the
--- census download rather than transcribed, so the URL that re-runs a search is
+-- download rather than transcribed, so the URL that re-runs a search is
 -- reconstructable from this view. LEFT JOIN because the rule table is the
 -- vocabulary this repo has decided about; `ipdb_specialty_list_drifted`
 -- is what asserts the two sides still agree.
@@ -558,7 +558,7 @@ FROM ipdb_stg.model_specialties AS ms
 INNER JOIN ipdb_ref.specialty AS sp
   ON sp.ipdb_specialty = ms.specialty;
 COMMENT ON VIEW ipdb.model_specialties IS
-  'One row per model per IPDB specialty as the advanced-search census found them, keeping IPDB''s wording beside its decode, the search it was read from and the date the census was taken.';
+  'One row per model per IPDB Specialty as the advanced searches found them, keeping IPDB''s wording beside its decode, the search it was read from and the date the searches were saved.';
 
 -- IPDB's corporate entities, in our vocabulary.
 --
@@ -587,7 +587,7 @@ COMMENT ON VIEW ipdb.corporate_entities IS
 
 -- Listings IPDB deleted, which `ipdb_stg.models_merged` drops.
 --
--- Republished because it is the one fact about the dump that no column can
+-- Republished because it is the one fact about the xantari dump that no column can
 -- carry: the row it describes is absent from `ipdb.models` by construction. A
 -- consumer holding a dead IPDB id needs to know whether the absence is a
 -- confirmed deletion or a crawl that missed a page, and only this says which.

@@ -33,7 +33,7 @@ FROM (
 -- The mart is spelled the way it promises
 ------------------------------------------------------------
 
--- A dump field that reached `ipdb.models` under IPDB's spelling because nobody
+-- A xantari dump field that reached `ipdb.models` under IPDB's spelling because nobody
 -- named it. The fix is one line in the RENAME list in `09_mart.sql`.
 --
 -- A rule over whatever the view currently projects, rather than a list of

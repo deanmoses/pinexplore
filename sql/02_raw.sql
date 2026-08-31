@@ -165,13 +165,13 @@ FROM read_json_auto(
 -- IPDB's advanced searches, saved by hand past a bot wall and parsed by
 -- `scripts/ipdb/extract_ipdb_searches_to_jsonl.py`.
 --
--- A live read of IPDB, months newer than the dump, and the build checks the dump
--- against it. These are not rival field values: `ipdb.models` states what
--- xantari states, bar a title the scrape lost characters from.
+-- Newer than the xantari dump, and the build checks xantari against it. These
+-- are not rival field values: `ipdb.models` states what xantari states, bar a
+-- title the scrape lost characters from.
 --
 -- NOT MERGED. A model matched by three searches is three rows, and whether the
--- copies agree is what `ipdb_live_observation_conflict` asks; `live_models`
--- collapses them only because it does.
+-- copies agree is what `ipdb_search_result_conflict` asks;
+-- `search_models` collapses them only because it does.
 --
 -- What a row's ABSENCE means differs per search, and the page does not always
 -- say what it filtered on, so nothing here infers from it. The two cases where
@@ -224,7 +224,8 @@ FROM read_json_auto(
 
 -- IPDB's Specialties, read off the search form rather than transcribed.
 --
--- The live list, riding along with the data read under it. It exists so
+-- The list as the download found it, riding along with the rows read under
+-- it. It exists so
 -- `ipdb_ref.specialty` -- which is hand-written, and maps each Specialty onto
 -- catalog vocabulary -- can be checked against IPDB rather than against someone's
 -- memory of IPDB. `ipdb_specialty_list_drifted` compares them both ways, so a

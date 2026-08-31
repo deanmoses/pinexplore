@@ -194,7 +194,7 @@ SELECT * FROM (VALUES
   ('Music',          'music',     'MusicBy',         ['Music by']),
   ('Sound',          'sound',     'SoundBy',         ['Sound by']),
   ('Software',       'software',  'SoftwareBy',      ['Software by']),
-  -- NULL lets the archive supply Concept until the dump gains it.
+  -- NULL lets the archive supply Concept until the xantari dump gains it.
   ('Concept',        'concept',   NULL,              ['Concept by'])
 ) AS t(ipdb_role, role_slug, xantari_field, archive_label);
 
@@ -286,7 +286,7 @@ SELECT * FROM (VALUES
 ) AS t(ipdb_manufacturer_id, reason);
 
 ------------------------------------------------------------
--- IPDB records the dump misparsed
+-- IPDB records the xantari dump misparsed
 ------------------------------------------------------------
 
 -- Machines whose manufacturer fields in the xantari dump are a scrape artifact

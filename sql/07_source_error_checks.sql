@@ -295,7 +295,7 @@ WHERE NOT EXISTS (
 -- A `Type` the code cannot be sliced out of.
 --
 -- `ipdb_stg.models` reads the code from the parenthesis in IPDB's type text
--- rather than from the dump's `TypeShortName`, which is blank on every Pure
+-- rather than from the xantari dump's `TypeShortName`, which is blank on every Pure
 -- Mechanical model. The text has only ever held three values, but the slice is
 -- a regex over upstream prose: a fourth type, or a rewording of an existing one,
 -- yields NULL and reads exactly like a model IPDB states no type for.
@@ -331,9 +331,9 @@ GROUP BY type_code;
 -- Specialty vocabulary
 ------------------------------------------------------------
 
--- An INNER join publishes only ruled specialties, so an unruled census value
--- would otherwise vanish. This first surfaces after a fresh download, when a
--- specialty IPDB has added enters the census.
+-- An INNER join publishes only ruled Specialties, so an unruled one would
+-- otherwise vanish. This first surfaces after a fresh download, when a Specialty
+-- IPDB has added enters the corpus.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_unmapped',
   '"' || ms.specialty || '" is stated for ' || count(*)
@@ -378,10 +378,10 @@ WHERE NOT EXISTS (
 -- states the model's WHOLE Specialty set, so a page filtered on one Specialty
 -- still names the others -- and a Specialty named that way must have its own
 -- page listing that same model. Where it does not, a search is missing or was
--- saved before the model was classified, and the census is short.
+-- saved before the model was classified, and the set is short.
 --
 -- Fatal because the shortfall is otherwise invisible: models carrying only the
--- absent Specialty vanish, and a census reads complete whether or not it is.
+-- absent Specialty vanish, and the corpus reads complete whether or not it is.
 --
 -- Pages that state no `search_filter` are witnesses to a model's Specialties,
 -- never the page that should have listed it.
@@ -396,12 +396,12 @@ WHERE NOT EXISTS (
   WHERE own.search_filter = t.specialty_name AND own.ipdb_id = r.ipdb_id
 );
 
--- A Specialty in the vocabulary whose own search page was never saved.
+-- A Specialty in IPDB's list whose own search page was never saved.
 --
--- The extract refuses to write a census where such a term is reachable from
--- another page's rows, so this catches the remaining case: a term no downloaded
--- page mentions at all. Indistinguishable from IPDB classifying nothing under
--- it, and the difference is every model that carries it.
+-- The check above catches a missing page whose Specialty other rows still name.
+-- This catches the rest: a term no saved page searched for and no row mentions.
+-- Indistinguishable from IPDB classifying nothing under it, and the difference
+-- is every model that carries it.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_not_downloaded',
   '"' || specialty || '" (id ' || specialty_id
@@ -430,11 +430,11 @@ HAVING count(*) > 1;
 
 -- Two saved searches describing one model differently.
 --
--- `ipdb_stg.live_models` collapses every observation of a model with
+-- `ipdb_stg.search_models` collapses every observation of a model with
 -- `any_value`, which is only honest while the observations agree. They are saved
 -- on different days, so eventually they will not, and the collapse would then
 -- pick a winner silently -- with `additional_details_date_kind` and the
--- dump comparison both reading whichever it picked.
+-- xantari dump comparison both reading whichever it picked.
 --
 -- Fatal for that reason rather than because a disagreement is bad news. It is
 -- IPDB editing a record between two downloads, which is worth knowing; what is
@@ -444,7 +444,7 @@ HAVING count(*) > 1;
 -- Rating is not compared: IPDB recomputes it as votes arrive, so two downloads
 -- days apart differ by design.
 INSERT INTO checks.violations
-SELECT 'source_dumps', 'ipdb_live_observation_conflict',
+SELECT 'source_dumps', 'ipdb_search_result_conflict',
   'IPDB ' || ipdb_id || ' is described differently by ' || count(*) || ' searches: '
     || string_agg(DISTINCT search_kind || '/' || search_name, ', ')
 FROM ipdb_stg.search_results
@@ -455,16 +455,15 @@ HAVING count(DISTINCT ("name", date_text, date_is_project_date, type_code,
 -- IPDB has stopped marking project dates in its search results.
 --
 -- `additional_details_date_kind` reads the mark BOTH ways: a star means project,
--- and its absence on a dated census row means manufacture. The second reading is
--- what lets the census retire an inference, and it is the one that fails
--- silently -- if IPDB drops the star from its results table, every project date
--- in the census starts reading as a manufacture date, on hundreds of models, and
--- every one of them looks like an ordinary observation.
+-- and its absence on a dated search row means manufacture. The second reading is
+-- what retires an inference, and it is the one that fails silently -- if IPDB
+-- drops the star, every project date starts reading as a manufacture date across
+-- hundreds of models, each looking like an ordinary observation.
 --
--- Asserted on the corpus rather than on any model: the mark is a rendering
--- convention IPDB could change without changing a single record, and hundreds of
--- rows carry it today, so none carrying it is a rendering change and never a
--- census where no model happens to have a project date.
+-- Asserted on the corpus rather than any model: the mark is a rendering
+-- convention IPDB could change without touching a record, and hundreds of rows
+-- carry it today, so none carrying it is a rendering change and never a corpus
+-- in which no model happens to have a project date.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_project_date_mark_absent',
   'no saved search row is marked a project date; an unmarked date is '
@@ -476,7 +475,7 @@ WHERE NOT EXISTS (
 -- Expiry guard for the hand-saved Specialty searches, the counterpart of the
 -- credit role one above.
 --
--- A dump that gains Specialty is newer than the searches and automatic, so
+-- A xantari dump that gains Specialty is newer than the searches and automatic, so
 -- `ipdb_stg.model_specialties` must be rebuilt to read it. A stale hand-saved
 -- snapshot reads exactly like a current one, which is why this is fatal.
 --
@@ -488,7 +487,7 @@ WHERE NOT EXISTS (
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_xantari_column_appeared',
   'ipdb_raw.xantari_model_snapshots.' || column_name
-    || ' -- xantari now carries Specialty and outranks the hand-saved census'
+    || ' -- xantari now carries Specialty and outranks the hand-saved searches'
 FROM duckdb_columns()
 WHERE database_name = current_database()
   AND schema_name = 'ipdb_raw' AND table_name = 'xantari_model_snapshots'

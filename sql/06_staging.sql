@@ -352,7 +352,7 @@ QUALIFY row_number() OVER (PARTITION BY s.IpdbId ORDER BY s.snapshot_utc DESC) =
 -- models EXIST, and holding a 2018 capture of a page is not evidence IPDB still
 -- lists it. Restricting against `ipdb_stg.models_merged` rather than the raw
 -- snapshots also inherits the retraction filter, so a deleted listing stays
--- deleted. `ipdb_archive_model_not_in_dump` reports what this drops.
+-- deleted. `ipdb_archive_model_not_in_xantari` reports what this drops.
 --
 -- The array columns stay unflattened. The views below unnest them, and reading
 -- from here rather than raw is what gives them the same id restriction.
@@ -401,7 +401,7 @@ WHERE EXISTS (
 -- xantari remains the source of which models exist and half a model -- a search
 -- row with no themes, credits or notes behind it -- is worse than none. Reading
 -- through `models_merged` also inherits the retraction filter.
--- `ipdb_live_read_model_not_in_dump` reports what this drops, and a growing
+-- `ipdb_search_model_not_in_xantari` reports what this drops, and a growing
 -- count there means it is time for a fresh dump.
 CREATE OR REPLACE VIEW ipdb_stg.search_results AS
 SELECT r.*
@@ -413,14 +413,14 @@ WHERE EXISTS (
 -- One row per model: what IPDB currently says about it.
 --
 -- `any_value` is safe ONLY because the rows agree, which is asserted rather than
--- assumed -- `ipdb_live_observation_conflict` fails the build if two searches
+-- assumed -- `ipdb_search_result_conflict` fails the build if two searches
 -- describe one model differently. Without that this view would pick a winner
 -- silently, and the pages are saved on different days, so eventually they will
 -- disagree.
 --
 -- Rating is excluded on purpose: IPDB recomputes it as votes arrive, so two
 -- downloads days apart legitimately differ and it is not a fact to collapse.
-CREATE OR REPLACE VIEW ipdb_stg.live_models AS
+CREATE OR REPLACE VIEW ipdb_stg.search_models AS
 SELECT
   ipdb_id,
   any_value("name")                AS "name",
@@ -528,7 +528,7 @@ SELECT
   im.* EXCLUDE (ManufacturerShortName, TypeShortName)
   -- REPLACE nulls both manufacturer fields for the models listed in
   -- `ipdb_ref.model_corporate_entity_misparsed`, so a consumer sees the absence
-  -- IPDB's page shows rather than the company the dump invented.
+  -- IPDB's page shows rather than the company the xantari dump invented.
   --
   -- This is staging's job rather than the mart's, and the distinction is worth
   -- keeping straight: staging corrects the DUMP against the SOURCE -- here, a
@@ -552,8 +552,8 @@ SELECT
          COALESCE(im.AverageFunRating, arc.rating_score)    AS AverageFunRating,
          COALESCE(im.ProductionNumber, arc.production_units) AS ProductionNumber,
 
-         -- The dump's title, corrected where the scrape dropped characters
-         -- from it: IPDB has "Hearts & Spades", the dump has "Hearts Spades".
+         -- The xantari title, corrected where that scrape dropped characters
+         -- from it: IPDB has "Hearts & Spades", xantari has "Hearts Spades".
          --
          -- The gate is what makes a blind rule safe. Correcting only where the
          -- two agree once punctuation and case come out matches the failure
@@ -562,7 +562,7 @@ SELECT
          -- every time, which no count-based limit could promise.
          --
          -- A refusal is a rename, which needs a decision rather than a rule.
-         -- `ipdb_live_read_renames_a_model` is where it waits for one.
+         -- `ipdb_search_renames_a_model` is where it waits for one.
          CASE
            WHEN cen."name" IS NOT NULL
             AND cen."name" <> im.Title
@@ -572,7 +572,7 @@ SELECT
          END AS Title
        ),
 
-  -- IPDB's type code, from the parenthesis in `Type` rather than from the dump's
+  -- IPDB's type code, from the parenthesis in `Type` rather than from xantari's
   -- blank-on-PM short name. `Type` has only ever held four values -- the three
   -- codes and NULL -- and `ipdb_type_code_underivable` fails the build if a fifth
   -- appears rather than letting it arrive as a silent NULL.
@@ -607,19 +607,19 @@ SELECT
   -- by `ipdb_archive_header_date_inferred` rather than mixed in with the
   -- observed ones.
   --
-  -- THE BRANCHES ARE ORDERED BY HOW RECENTLY IPDB SAID IT. A live search and an
+  -- THE BRANCHES ARE ORDERED BY HOW RECENTLY IPDB SAID IT. A search result and an
   -- archive capture are both IPDB stating the kind, so what separates them is
   -- only age, and IPDB revises these records.
   --
-  -- The live mark is read BOTH ways, and the second way is load-bearing: a
+  -- The search mark is read BOTH ways, and the second way is load-bearing: a
   -- starred date is IPDB saying "project", an unstarred one on a dated row is
-  -- IPDB saying "manufacture". That is what lets a live row RETIRE an inference
+  -- IPDB saying "manufacture". That is what lets a search row RETIRE an inference
   -- and not merely overturn a capture -- and why the star going missing is fatal
   -- (`ipdb_project_date_mark_absent`) rather than silently re-typing every
   -- project date.
   --
   -- `DateOfManufacture` outranks both, being a labelled field rather than a
-  -- rendering convention. `ipdb_live_read_date_kind_disagrees` holds the
+  -- rendering convention. `ipdb_search_date_kind_disagrees_with_xantari` holds the
   -- residue where the two contradict.
   CASE
     WHEN ad.additional_details_date_year IS NULL       THEN NULL
@@ -666,7 +666,7 @@ LEFT JOIN ipdb_stg.model_additional_details AS ad
   ON ad.IpdbId = im.IpdbId
 LEFT JOIN ipdb_stg.archive_models AS arc
   ON arc.ipdb_id = im.IpdbId
-LEFT JOIN ipdb_stg.live_models AS cen
+LEFT JOIN ipdb_stg.search_models AS cen
   ON cen.ipdb_id = im.IpdbId
 -- The `type_code` expression repeated: a column of this SELECT is not in scope
 -- for its own joins.
@@ -984,13 +984,13 @@ SELECT DISTINCT
 FROM ipdb_stg.search_results AS r, unnest(r.specialties) AS t(specialty_name)
 INNER JOIN ipdb_raw.specialties AS sp ON sp.specialty = t.specialty_name;
 
--- Where IPDB's live searches and the xantari dump disagree about a model.
+-- Where IPDB's searches and the xantari dump disagree about a model.
 --
 -- The searches' non-specialty columns are not published as rival values -- the
 -- dump is the field-level source and this view does not overrule it. They are
--- carried to be a LIVE READ against a dump that is months old, across every
--- machine any saved search has matched, which is a cross-check nothing else in
--- this build performs.
+-- carried to be read against an older xantari dump, across every model any
+-- saved search has matched, which is a cross-check nothing else in this build
+-- performs.
 --
 -- Long rather than wide: one row per disagreeing field, so a new field joins the
 -- comparison by adding a leg rather than a column, and the warning that counts
@@ -1001,7 +1001,7 @@ INNER JOIN ipdb_raw.specialties AS sp ON sp.specialty = t.specialty_name;
 -- something. Dates compare only where both state one: xantari scraped Date Of
 -- Manufacture alone, so IPDB's several hundred Project Date models are simply
 -- blank there, and that absence is `date_is_project_date`, not a disagreement.
-CREATE OR REPLACE VIEW ipdb_stg.live_vs_dump AS
+CREATE OR REPLACE VIEW ipdb_stg.search_vs_xantari AS
 WITH paired AS (
   SELECT
     l.ipdb_id,
@@ -1009,29 +1009,29 @@ WITH paired AS (
     l.date_year, l.date_month, l.players, l.type_code,
     l.model_number, l.production_units,
     m.Title, m.ModelNumber, m.ProductionNumber,
-    m.Players AS dump_players,
+    m.Players AS xantari_players,
     -- From `ipdb_stg.models`, which is where the dump's blank-on-PM short name is
     -- corrected. The other columns come from `models_merged` instead, because
     -- `ipdb_stg.models` fills production and rating from archive pages and this
-    -- view compares the live read against the DUMP, not against the dump's fills.
-    sm.type_code AS dump_type_code,
-    CAST(m.DateOfManufacture AS DATE) AS dump_date
-  FROM ipdb_stg.live_models AS l
+    -- view compares the searches against XANTARI, not against xantari's fills.
+    sm.type_code AS xantari_type_code,
+    CAST(m.DateOfManufacture AS DATE) AS xantari_date
+  FROM ipdb_stg.search_models AS l
   INNER JOIN ipdb_stg.models_merged AS m ON m.IpdbId = l.ipdb_id
   INNER JOIN ipdb_stg.models AS sm ON sm.IpdbId = l.ipdb_id
 )
 -- `nullif(..., '')` on every dump string: xantari writes an empty string where
 -- IPDB is silent, and an empty string is an absence rather than a differing
 -- value. Without this each one reads as a disagreement.
-SELECT ipdb_id, 'name' AS field, "name" AS live_value, Title AS dump_value
+SELECT ipdb_id, 'name' AS field, "name" AS live_value, Title AS xantari_value
 FROM paired WHERE "name" IS NOT NULL AND nullif(Title, '') IS NOT NULL AND "name" <> Title
 UNION ALL
-SELECT ipdb_id, 'players', CAST(players AS VARCHAR), CAST(dump_players AS VARCHAR)
-FROM paired WHERE players IS NOT NULL AND dump_players IS NOT NULL AND players <> dump_players
+SELECT ipdb_id, 'players', CAST(players AS VARCHAR), CAST(xantari_players AS VARCHAR)
+FROM paired WHERE players IS NOT NULL AND xantari_players IS NOT NULL AND players <> xantari_players
 UNION ALL
-SELECT ipdb_id, 'type_code', type_code, dump_type_code
-FROM paired WHERE type_code IS NOT NULL AND dump_type_code IS NOT NULL
-  AND type_code <> dump_type_code
+SELECT ipdb_id, 'type_code', type_code, xantari_type_code
+FROM paired WHERE type_code IS NOT NULL AND xantari_type_code IS NOT NULL
+  AND type_code <> xantari_type_code
 UNION ALL
 SELECT ipdb_id, 'model_number', model_number, ModelNumber
 FROM paired WHERE model_number IS NOT NULL AND nullif(ModelNumber, '') IS NOT NULL
@@ -1041,11 +1041,11 @@ SELECT ipdb_id, 'production_units', CAST(production_units AS VARCHAR), CAST(Prod
 FROM paired WHERE production_units IS NOT NULL AND ProductionNumber IS NOT NULL
   AND production_units <> ProductionNumber
 UNION ALL
-SELECT ipdb_id, 'date_year', CAST(date_year AS VARCHAR), CAST(year(dump_date) AS VARCHAR)
-FROM paired WHERE date_year IS NOT NULL AND dump_date IS NOT NULL AND date_year <> year(dump_date)
+SELECT ipdb_id, 'date_year', CAST(date_year AS VARCHAR), CAST(year(xantari_date) AS VARCHAR)
+FROM paired WHERE date_year IS NOT NULL AND xantari_date IS NOT NULL AND date_year <> year(xantari_date)
 UNION ALL
-SELECT ipdb_id, 'date_month', CAST(date_month AS VARCHAR), CAST(month(dump_date) AS VARCHAR)
-FROM paired WHERE date_month IS NOT NULL AND dump_date IS NOT NULL AND date_month <> month(dump_date);
+SELECT ipdb_id, 'date_month', CAST(date_month AS VARCHAR), CAST(month(xantari_date) AS VARCHAR)
+FROM paired WHERE date_month IS NOT NULL AND xantari_date IS NOT NULL AND date_month <> month(xantari_date);
 
 ------------------------------------------------------------
 -- Fandom staged

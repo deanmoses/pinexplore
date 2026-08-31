@@ -61,7 +61,7 @@ COMMENT ON VIEW ipdb.ingest_watermarks IS
 -- Hand-maintained: update the date AND the record count together when dropping
 -- in a new download. The count is the forget-tripwire --
 -- `checks.artifact_acquisition_log_stale` warns when it stops matching the
--- artifact, which a new dump almost always makes it do -- and until it matches
+-- artifact, which a new download almost always makes it do -- and until it matches
 -- again, `ingest.watermarks` withholds the date rather than publish one that
 -- describes a previous download. Not derived from file mtime: the files sync
 -- through R2, and mtime on another machine dates the sync, not the download.

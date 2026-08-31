@@ -62,7 +62,7 @@ SELECT 'ipdb_retraction_contradicted', count(*) FROM checks.ipdb_retraction_cont
 -- `ipdb_stg.corporate_entities` and every count taken through it.
 --
 -- Warns rather than aborting because the cause is upstream: either IPDB now
--- issues the id for two companies, or the dump misparsed a record onto it. A new
+-- issues the id for two companies, or the xantari dump misparsed a record onto it. A new
 -- row here is usually a page to read and a row for
 -- `ipdb_ref.model_corporate_entity_misparsed`.
 CREATE OR REPLACE VIEW checks.ipdb_corporate_entity_ambiguous AS
@@ -122,7 +122,7 @@ SELECT 'ipdb_additional_details_unparsed', count(*) FROM checks.ipdb_additional_
 -- on purpose, with its evidence already filed; counting it here would leave a
 -- warning permanently non-zero and nothing to do about it, which is how a whole
 -- warning block stops being read.
-CREATE OR REPLACE VIEW checks.ipdb_archive_model_not_in_dump AS
+CREATE OR REPLACE VIEW checks.ipdb_archive_model_not_in_xantari AS
 SELECT am.ipdb_id, am."name", am.archive_capture_date, am.source_url
 FROM ipdb_raw.archive_models AS am
 WHERE NOT EXISTS (
@@ -133,7 +133,7 @@ WHERE NOT EXISTS (
   );
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_archive_model_not_in_dump', count(*) FROM checks.ipdb_archive_model_not_in_dump;
+SELECT 'ipdb_archive_model_not_in_xantari', count(*) FROM checks.ipdb_archive_model_not_in_xantari;
 
 -- A credit label on an archive page that `ipdb_ref.credit_role.archive_label`
 -- does not list, so `ipdb_stg.credits` dropped it.
@@ -153,30 +153,30 @@ WHERE NOT EXISTS (
 INSERT INTO checks.warnings
 SELECT 'ipdb_archive_credit_role_unrecognised', count(*) FROM checks.ipdb_archive_credit_role_unrecognised;
 
--- A model one of IPDB's live searches lists that the xantari dump has never
+-- A model one of IPDB's searches lists that the xantari dump has never
 -- listed, so staging dropped it and nothing about it is published.
 --
--- The counterpart of `ipdb_archive_model_not_in_dump` above, and it means the
+-- The counterpart of `ipdb_archive_model_not_in_xantari` above, and it means the
 -- opposite. There, a model missing from the dump is ambiguous -- the capture
--- may predate a deletion. Here the census is the NEWER source, so a model it
--- lists and the dump does not is one IPDB has added since the dump was taken.
--- The remedy is not research, it is a fresh xantari snapshot, and a count that
--- climbs over successive censuses is how that need becomes visible.
-CREATE OR REPLACE VIEW checks.ipdb_live_read_model_not_in_dump AS
+-- may predate a deletion. Here the searches are the NEWER source, so a model
+-- they list and the dump does not is one IPDB has added since the dump was
+-- taken. The remedy is not research, it is a fresh xantari snapshot, and a
+-- count that climbs over successive downloads is how that need becomes visible.
+CREATE OR REPLACE VIEW checks.ipdb_search_model_not_in_xantari AS
 SELECT DISTINCT ipdb_id, "name", manufacturer, date_text
-FROM ipdb_raw.search_results AS live
+FROM ipdb_raw.search_results AS r
 WHERE NOT EXISTS (
-    SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = live.ipdb_id
+    SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = r.ipdb_id
   )
   AND NOT EXISTS (
-    SELECT 1 FROM ipdb_ref.retracted AS r WHERE r.ipdb_id = live.ipdb_id
+    SELECT 1 FROM ipdb_ref.retracted AS ret WHERE ret.ipdb_id = r.ipdb_id
   );
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_live_read_model_not_in_dump', count(*)
-FROM checks.ipdb_live_read_model_not_in_dump;
+SELECT 'ipdb_search_model_not_in_xantari', count(*)
+FROM checks.ipdb_search_model_not_in_xantari;
 
--- IPDB now calls a model something the dump does not, in LETTERS.
+-- IPDB now calls a model something xantari does not, in LETTERS.
 --
 -- The complement of the title correction in `ipdb_stg.models`. That rule fixes a
 -- name the scrape lost characters from -- the two agree once punctuation and
@@ -190,20 +190,20 @@ FROM checks.ipdb_live_read_model_not_in_dump;
 -- tell them apart.
 --
 -- Zero rows today. A row is a research task, not a bug.
-CREATE OR REPLACE VIEW checks.ipdb_live_read_renames_a_model AS
-SELECT m.IpdbId, m.Title AS dump_name, l."name" AS live_name
+CREATE OR REPLACE VIEW checks.ipdb_search_renames_a_model AS
+SELECT m.IpdbId, m.Title AS xantari_name, l."name" AS live_name
 FROM ipdb_stg.models_merged AS m
-INNER JOIN ipdb_stg.live_models AS l ON l.ipdb_id = m.IpdbId
+INNER JOIN ipdb_stg.search_models AS l ON l.ipdb_id = m.IpdbId
 WHERE l."name" IS NOT NULL
   AND nullif(m.Title, '') IS NOT NULL
   AND lower(regexp_replace(l."name", '[^a-zA-Z0-9]', '', 'g'))
    <> lower(regexp_replace(m.Title,  '[^a-zA-Z0-9]', '', 'g'));
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_live_read_renames_a_model', count(*)
-FROM checks.ipdb_live_read_renames_a_model;
+SELECT 'ipdb_search_renames_a_model', count(*)
+FROM checks.ipdb_search_renames_a_model;
 
--- A model the dump dates that no year search lists.
+-- A model the xantari dump dates that no year search lists.
 --
 -- The year searches tile 1800 to 2026 with no gap, so they match every model
 -- IPDB dates, and an undated model cannot appear in any of them. That is what
@@ -235,7 +235,7 @@ INSERT INTO checks.warnings
 SELECT 'ipdb_dated_model_not_in_year_search', count(*)
 FROM checks.ipdb_dated_model_not_in_year_search;
 
--- A field where IPDB's live searches and the dump describe a model differently.
+-- A field where IPDB's searches and xantari describe a model differently.
 --
 -- A disagreement is one of three things and the row does not say which: IPDB
 -- edited the record, the dump mis-scraped it, or this build mis-parsed the
@@ -248,15 +248,15 @@ FROM checks.ipdb_dated_model_not_in_year_search;
 --
 -- A count that jumps is more likely a parse regression here than IPDB revising
 -- thousands of records.
-CREATE OR REPLACE VIEW checks.ipdb_live_read_disagrees_with_dump AS
-SELECT ipdb_id, field, live_value, dump_value
-FROM ipdb_stg.live_vs_dump;
+CREATE OR REPLACE VIEW checks.ipdb_search_disagrees_with_xantari AS
+SELECT ipdb_id, field, live_value, xantari_value
+FROM ipdb_stg.search_vs_xantari;
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_live_read_disagrees_with_dump', count(*)
-FROM checks.ipdb_live_read_disagrees_with_dump;
+SELECT 'ipdb_search_disagrees_with_xantari', count(*)
+FROM checks.ipdb_search_disagrees_with_xantari;
 
--- A specialty an archived page states that the census does not, or the reverse,
+-- A Specialty an archived page states that the searches do not, or the reverse,
 -- for a model both describe.
 --
 -- The one question a current read cannot answer: what IPDB said years ago. Each
@@ -295,20 +295,20 @@ SELECT 'ipdb_specialty_reclassified', count(*) FROM checks.ipdb_specialty_reclas
 -- A warning, not a gate, and the ordering is deliberate rather than provisional:
 -- a labelled field outranks a rendering convention, so the disagreement is worth
 -- seeing rather than resolving by rule.
-CREATE OR REPLACE VIEW checks.ipdb_live_read_date_kind_disagrees AS
+CREATE OR REPLACE VIEW checks.ipdb_search_date_kind_disagrees_with_xantari AS
 SELECT
   m.IpdbId, m.Title, m.AdditionalDetails,
   m.additional_details_date_kind AS inferred_kind,
-  CASE WHEN c.date_is_project_date THEN 'project' ELSE 'manufacture' END AS census_mark
+  CASE WHEN c.date_is_project_date THEN 'project' ELSE 'manufacture' END AS search_mark
 FROM ipdb_stg.models AS m
-INNER JOIN ipdb_stg.live_models AS c ON c.ipdb_id = m.IpdbId
+INNER JOIN ipdb_stg.search_models AS c ON c.ipdb_id = m.IpdbId
 WHERE c.date_year IS NOT NULL
   AND m.additional_details_date_kind IS NOT NULL
   AND c.date_is_project_date <> (m.additional_details_date_kind LIKE 'project%');
 
 INSERT INTO checks.warnings
-SELECT 'ipdb_live_read_date_kind_disagrees', count(*)
-FROM checks.ipdb_live_read_date_kind_disagrees;
+SELECT 'ipdb_search_date_kind_disagrees_with_xantari', count(*)
+FROM checks.ipdb_search_date_kind_disagrees_with_xantari;
 
 -- Models whose header-line date is being read as a project date on inference
 -- rather than on evidence -- `additional_details_date_kind = 'project_inferred'`.
@@ -316,7 +316,7 @@ FROM checks.ipdb_live_read_date_kind_disagrees;
 --
 -- A FETCH WORKLIST: every row is a model no archive page has confirmed, and
 -- fetching its page either confirms the project date or turns up the manufacture
--- date the dump dropped. Ordered by manufacturer, which is how to find the
+-- date the xantari dump dropped. Ordered by manufacturer, which is how to find the
 -- tractable clusters -- IPDB names the makers that routinely hold both dates,
 -- and those are where a listing in this state is project-only.
 CREATE OR REPLACE VIEW checks.ipdb_archive_header_date_inferred AS
@@ -424,7 +424,7 @@ FROM checks.opdb_variant_parent_relation_undetermined;
 -- The acquisition log no longer matches its artifact, either way: a new download
 -- landed and nobody updated `ref.artifact_acquisitions` (`acquired_on` is now
 -- confidently wrong -- worse than the NULL it replaced; the record count is the
--- tripwire, since a fresh dump almost always changes it), or the log names an
+-- tripwire, since a fresh download almost always changes it), or the log names an
 -- artifact the watermarks no longer carry (a rename orphaned the row, and the
 -- real artifact silently reverted to an unrecorded acquisition). Update date and
 -- count together; fix or remove orphaned rows.
