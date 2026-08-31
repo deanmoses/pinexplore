@@ -153,22 +153,18 @@ WHERE NOT EXISTS (
 INSERT INTO checks.warnings
 SELECT 'ipdb_archive_credit_role_unrecognised', count(*) FROM checks.ipdb_archive_credit_role_unrecognised;
 
--- A machine one of IPDB's live searches lists that the xantari dump has never
+-- A model one of IPDB's live searches lists that the xantari dump has never
 -- listed, so staging dropped it and nothing about it is published.
 --
 -- The counterpart of `ipdb_archive_model_not_in_dump` above, and it means the
--- opposite. There, a machine missing from the dump is ambiguous -- the capture
--- may predate a deletion. Here the census is the NEWER source, so a machine it
+-- opposite. There, a model missing from the dump is ambiguous -- the capture
+-- may predate a deletion. Here the census is the NEWER source, so a model it
 -- lists and the dump does not is one IPDB has added since the dump was taken.
 -- The remedy is not research, it is a fresh xantari snapshot, and a count that
 -- climbs over successive censuses is how that need becomes visible.
 CREATE OR REPLACE VIEW checks.ipdb_live_read_model_not_in_dump AS
 SELECT DISTINCT ipdb_id, "name", manufacturer, date_text
-FROM (
-  SELECT ipdb_id, "name", manufacturer, date_text FROM ipdb_raw.specialty_census
-  UNION ALL
-  SELECT ipdb_id, "name", manufacturer, date_text FROM ipdb_raw.search_observations
-) AS live
+FROM ipdb_raw.search_results AS live
 WHERE NOT EXISTS (
     SELECT 1 FROM ipdb_raw.xantari_model_snapshots AS s WHERE s.IpdbId = live.ipdb_id
   )
@@ -180,7 +176,7 @@ INSERT INTO checks.warnings
 SELECT 'ipdb_live_read_model_not_in_dump', count(*)
 FROM checks.ipdb_live_read_model_not_in_dump;
 
--- IPDB now calls a machine something the dump does not, in LETTERS.
+-- IPDB now calls a model something the dump does not, in LETTERS.
 --
 -- The complement of the title correction in `ipdb_stg.models`. That rule fixes a
 -- name the scrape lost characters from -- the two agree once punctuation and
@@ -188,7 +184,7 @@ FROM checks.ipdb_live_read_model_not_in_dump;
 -- else: IPDB and the dump disagree about the actual word.
 --
 -- Which is a genuine event needing a genuine decision, and not one this repo can
--- make. IPDB renaming a machine may mean the catalog should follow, or that IPDB
+-- make. IPDB renaming a model may mean the catalog should follow, or that IPDB
 -- has merged two listings, or that the dump scraped the wrong row. All three
 -- look identical from here, and pinexplore does not read the catalog that would
 -- tell them apart.
@@ -209,38 +205,31 @@ FROM checks.ipdb_live_read_renames_a_model;
 
 -- A model the dump dates that no year search lists.
 --
--- The year searches tile 1800 to 2026 with no gap, so between them they match
--- every machine IPDB puts a date on -- and a machine IPDB does not date cannot
--- appear in any of them, whatever else is true of it. That makes the year corpus
--- COMPLETE over the dated universe, which is a claim no single search can make
--- and the reason this check can exist at all: absence from it is meaningful,
--- where absence from the Type search only means "not Pure Mechanical".
+-- The year searches tile 1800 to 2026 with no gap, so they match every model
+-- IPDB dates, and an undated model cannot appear in any of them. That is what
+-- makes absence from them meaningful, where absence from the Type search only
+-- means "not Pure Mechanical".
 --
--- So a row here is one of three things, and it does not say which: IPDB has
--- deleted the listing, IPDB has removed its date, or the year downloads have
--- gone stale against a newer dump. The first belongs in `ipdb_ref.retracted`,
--- the third is fixed by re-saving the range the model falls in.
+-- A row is one of three things and does not say which: IPDB deleted the listing,
+-- IPDB removed its date, or the year pages have gone stale against a newer dump.
+-- The first belongs in `ipdb_ref.retracted`; the third is fixed by re-saving the
+-- range the model falls in, and is ordinary enough to keep this a warning.
 --
--- A warning rather than a gate because the third case is ordinary: a fresh
--- xantari snapshot legitimately holds models added since the year pages were
--- saved. It starts at zero, which is what makes it worth watching.
---
--- Keyed on the `years` search kind, which is the FOLDER those pages are saved
--- in -- the coupling is real, and it is the same one the extract relies on to
--- name a search at all.
+-- Keyed on the `years` folder name, the same coupling the extract uses to name a
+-- search at all.
 CREATE OR REPLACE VIEW checks.ipdb_dated_model_not_in_year_search AS
 SELECT m.IpdbId, m.Title, m.additional_details_date_string
 FROM ipdb_stg.models AS m
 WHERE m.additional_details_date_year IS NOT NULL
   AND NOT EXISTS (
-    SELECT 1 FROM ipdb_stg.search_observations AS o
+    SELECT 1 FROM ipdb_stg.search_results AS o
     WHERE o.ipdb_id = m.IpdbId AND o.search_kind = 'years'
   )
   -- Only ask once there is a year corpus to be complete. Without this, a build
   -- with those pages missing reports thousands of rows -- true, but the kind of
   -- count that trains a reader to skip the block. That state has its own tell:
   -- `ipdb_archive_header_date_inferred` fills back up.
-  AND EXISTS (SELECT 1 FROM ipdb_stg.search_observations WHERE search_kind = 'years');
+  AND EXISTS (SELECT 1 FROM ipdb_stg.search_results WHERE search_kind = 'years');
 
 INSERT INTO checks.warnings
 SELECT 'ipdb_dated_model_not_in_year_search', count(*)
@@ -248,23 +237,17 @@ FROM checks.ipdb_dated_model_not_in_year_search;
 
 -- A field where IPDB's live searches and the dump describe a model differently.
 --
--- The searches are live reads of IPDB and the dump is months old, so a
--- disagreement is one of three things and the row does not say which: IPDB
+-- A disagreement is one of three things and the row does not say which: IPDB
 -- edited the record, the dump mis-scraped it, or this build mis-parsed the
--- results table. All three are worth a look, and none is worth failing a build
--- over -- hence a warning, and hence the row carrying both values rather than
--- picking one.
+-- results table. Each is worth a look and none worth failing a build over, so
+-- the row carries both values rather than picking one.
 --
--- Compared against the RAW dump, so a `name` row stays here after
--- `ipdb_stg.models` has corrected it -- this view reports what the scrape got
--- wrong, which does not stop being true once it is fixed downstream. It is the
--- audit trail for that correction, and the only place the original survives.
+-- Read against the RAW dump, so a `name` row stays after `ipdb_stg.models` has
+-- corrected it. This is the audit trail for that correction and the only place
+-- the original survives; `Title` is the one field the searches overrule.
 --
--- Every other field is a report and nothing more. The searches overrule the dump
--- on `Title` alone; `ipdb.models` otherwise states what xantari states.
---
--- Expected to be small and nearly static. A count that jumps is more likely a
--- parse regression here than IPDB revising thousands of records.
+-- A count that jumps is more likely a parse regression here than IPDB revising
+-- thousands of records.
 CREATE OR REPLACE VIEW checks.ipdb_live_read_disagrees_with_dump AS
 SELECT ipdb_id, field, live_value, dump_value
 FROM ipdb_stg.live_vs_dump;
@@ -276,12 +259,9 @@ FROM checks.ipdb_live_read_disagrees_with_dump;
 -- A specialty an archived page states that the census does not, or the reverse,
 -- for a model both describe.
 --
--- The one question the census cannot answer alone: what IPDB used to say. The
--- archive pages no longer feed `ipdb.model_specialties` -- the census replaced
--- them outright -- and this is the reason to keep them staged anyway. Each row
--- is IPDB having RECLASSIFIED a machine between the capture and the download,
--- which is a fact about the source's own revisions and cannot be recovered once
--- the capture is dropped.
+-- The one question a current read cannot answer: what IPDB said years ago. Each
+-- row is IPDB having RECLASSIFIED a model between the capture and the download,
+-- a fact about the source's own revisions that is lost once the capture is.
 --
 -- Restricted to models the archive actually covers, because everywhere else the
 -- absence is the archive's silence rather than a removal.
@@ -307,12 +287,10 @@ SELECT 'ipdb_specialty_reclassified', count(*) FROM checks.ipdb_specialty_reclas
 -- A model where xantari holds a `DateOfManufacture` and IPDB's listing marks the
 -- date a Project Date.
 --
--- Narrow by construction. `additional_details_date_kind` takes the census's mark
--- over every archive capture, so those can no longer disagree -- what is left is
--- the one branch that outranks the census, the dump's own labelled field. A row
--- here is xantari saying IPDB stated a manufacture date and IPDB now saying the
--- date is a project date, which is either a record IPDB has re-dated since the
--- dump or a field the dump mis-scraped.
+-- Narrow by construction: `additional_details_date_kind` reads IPDB's mark ahead
+-- of everything except the dump's own labelled field, so that field is the only
+-- thing left that can disagree with it. A row is either a record IPDB has
+-- re-dated since the dump or one the dump mis-scraped.
 --
 -- A warning, not a gate, and the ordering is deliberate rather than provisional:
 -- a labelled field outranks a rendering convention, so the disagreement is worth

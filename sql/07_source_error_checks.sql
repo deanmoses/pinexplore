@@ -289,14 +289,14 @@ WHERE NOT EXISTS (
 );
 
 ------------------------------------------------------------
--- IPDB machine type
+-- IPDB model type
 ------------------------------------------------------------
 
 -- A `Type` the code cannot be sliced out of.
 --
 -- `ipdb_stg.models` reads the code from the parenthesis in IPDB's type text
 -- rather than from the dump's `TypeShortName`, which is blank on every Pure
--- Mechanical machine. The text has only ever held three values, but the slice is
+-- Mechanical model. The text has only ever held three values, but the slice is
 -- a regex over upstream prose: a fourth type, or a rewording of an existing one,
 -- yields NULL and reads exactly like a model IPDB states no type for.
 --
@@ -344,40 +344,56 @@ WHERE NOT EXISTS (
 )
 GROUP BY ms.specialty;
 
--- IPDB's Specialty vocabulary against the rules written for it, BOTH WAYS.
+-- IPDB's Specialty list against the hand-written rules for it, BOTH WAYS.
 --
--- `ipdb_ref.specialty` is hand-written, one rule per Specialty, and the mart
--- publishes it whole. The census download echoes IPDB's own dropdown back, so
--- for the first time the hand-written side can be checked against the source
--- rather than against someone's memory of it.
+-- The directions fail differently. A term IPDB has and we do not needs a rule
+-- AND a saved search page; until it has both, the models carrying only it are
+-- missing and nothing shows it. A term we have and IPDB does not is a rule for a
+-- renamed or withdrawn Specialty, joining to nothing and publishing zero rows
+-- forever.
 --
--- Both directions matter and they fail differently. A term IPDB has and we have
--- not is a Specialty added since the vocabulary was transcribed: it needs a rule
--- AND a saved search page, and until it has both, the machines carrying only it
--- are missing from the census entirely -- which is invisible, because a census
--- reads complete whether or not it is. A term we have and IPDB does not is a
--- rule for a Specialty that has been renamed or withdrawn, which joins to
--- nothing and quietly publishes zero rows forever.
---
--- Fatal rather than a warning because the whole basis for the census replacing
--- the archive pages is that it is COMPLETE. A vocabulary that has moved under it
--- means it is not, and nothing downstream can tell.
+-- Fatal because `ipdb.model_specialties` rests on the searches being complete,
+-- and a list that has moved under them means they are not.
 INSERT INTO checks.violations
-SELECT 'source_dumps', 'ipdb_specialty_vocabulary_drifted',
+SELECT 'source_dumps', 'ipdb_specialty_list_drifted',
   'IPDB lists Specialty "' || v.specialty || '" (id ' || v.specialty_id
     || ') and no ipdb_ref.specialty rule decodes it'
-FROM ipdb_raw.specialty_vocabulary AS v
+FROM ipdb_raw.specialties AS v
 WHERE NOT EXISTS (
   SELECT 1 FROM ipdb_ref.specialty AS sp WHERE sp.ipdb_specialty = v.specialty
 );
 
 INSERT INTO checks.violations
-SELECT 'source_dumps', 'ipdb_specialty_vocabulary_drifted',
+SELECT 'source_dumps', 'ipdb_specialty_list_drifted',
   'ipdb_ref.specialty rules "' || sp.ipdb_specialty
     || '", which IPDB''s own dropdown no longer lists'
 FROM ipdb_ref.specialty AS sp
 WHERE NOT EXISTS (
-  SELECT 1 FROM ipdb_raw.specialty_vocabulary AS v WHERE v.specialty = sp.ipdb_specialty
+  SELECT 1 FROM ipdb_raw.specialties AS v WHERE v.specialty = sp.ipdb_specialty
+);
+
+-- A Specialty search that is missing models other pages say belong to it.
+--
+-- THE COMPLETENESS PROOF behind `ipdb.model_specialties`. Every results row
+-- states the model's WHOLE Specialty set, so a page filtered on one Specialty
+-- still names the others -- and a Specialty named that way must have its own
+-- page listing that same model. Where it does not, a search is missing or was
+-- saved before the model was classified, and the census is short.
+--
+-- Fatal because the shortfall is otherwise invisible: models carrying only the
+-- absent Specialty vanish, and a census reads complete whether or not it is.
+--
+-- Pages that state no `search_filter` are witnesses to a model's Specialties,
+-- never the page that should have listed it.
+INSERT INTO checks.violations
+SELECT 'source_dumps', 'ipdb_specialty_search_incomplete',
+  'IPDB ' || r.ipdb_id || ' is stated to carry "' || t.specialty_name
+    || '" by ' || r.search_kind || '/' || r.search_name
+    || ', and no page searching that Specialty lists it'
+FROM ipdb_stg.search_results AS r, unnest(r.specialties) AS t(specialty_name)
+WHERE NOT EXISTS (
+  SELECT 1 FROM ipdb_stg.search_results AS own
+  WHERE own.search_filter = t.specialty_name AND own.ipdb_id = r.ipdb_id
 );
 
 -- A Specialty in the vocabulary whose own search page was never saved.
@@ -385,12 +401,12 @@ WHERE NOT EXISTS (
 -- The extract refuses to write a census where such a term is reachable from
 -- another page's rows, so this catches the remaining case: a term no downloaded
 -- page mentions at all. Indistinguishable from IPDB classifying nothing under
--- it, and the difference is every machine that carries it.
+-- it, and the difference is every model that carries it.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_not_downloaded',
   '"' || specialty || '" (id ' || specialty_id
     || ') has no saved search page; re-run the download for ' || source_url
-FROM ipdb_raw.specialty_vocabulary
+FROM ipdb_raw.specialties
 WHERE NOT downloaded;
 
 -- A mistyped target type would look like an honestly unresolved target in
@@ -412,9 +428,9 @@ FROM ipdb_ref.specialty
 GROUP BY ipdb_specialty
 HAVING count(*) > 1;
 
--- Two saved searches describing one machine differently.
+-- Two saved searches describing one model differently.
 --
--- `ipdb_stg.live_models` collapses every observation of a machine with
+-- `ipdb_stg.live_models` collapses every observation of a model with
 -- `any_value`, which is only honest while the observations agree. They are saved
 -- on different days, so eventually they will not, and the collapse would then
 -- pick a winner silently -- with `additional_details_date_kind` and the
@@ -431,7 +447,7 @@ INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_live_observation_conflict',
   'IPDB ' || ipdb_id || ' is described differently by ' || count(*) || ' searches: '
     || string_agg(DISTINCT search_kind || '/' || search_name, ', ')
-FROM ipdb_stg.live_observations
+FROM ipdb_stg.search_results
 GROUP BY ipdb_id
 HAVING count(DISTINCT ("name", date_text, date_is_project_date, type_code,
                        production_text, players, model_number)) > 1;
@@ -448,35 +464,27 @@ HAVING count(DISTINCT ("name", date_text, date_is_project_date, type_code,
 -- Asserted on the corpus rather than on any model: the mark is a rendering
 -- convention IPDB could change without changing a single record, and hundreds of
 -- rows carry it today, so none carrying it is a rendering change and never a
--- census where no machine happens to have a project date.
+-- census where no model happens to have a project date.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_project_date_mark_absent',
-  'no row in the specialty census is marked a project date; an unmarked date is '
+  'no saved search row is marked a project date; an unmarked date is '
     || 'read as a manufacture date, so the mark going unread retypes them all'
 WHERE NOT EXISTS (
-  SELECT 1 FROM ipdb_raw.specialty_census WHERE date_is_project_date
+  SELECT 1 FROM ipdb_raw.search_results WHERE date_is_project_date
 );
 
--- Expiry guard for the specialty census, the counterpart of the credit role one
--- above.
+-- Expiry guard for the hand-saved Specialty searches, the counterpart of the
+-- credit role one above.
 --
--- The census is a MANUAL download -- 27 searches saved by hand past a bot wall --
--- and nobody is going to keep doing that once the dump carries the field. A dump
--- that gains Specialty is both newer and automatic, and
--- `ipdb_stg.model_specialties` must then be rebuilt to read it. Until someone
--- does, the mart would go on publishing a hand-saved snapshot that is now the
--- oldest source of the field rather than the newest, and would read exactly the
--- same as when it was the best available.
+-- A dump that gains Specialty is newer than the searches and automatic, so
+-- `ipdb_stg.model_specialties` must be rebuilt to read it. A stale hand-saved
+-- snapshot reads exactly like a current one, which is why this is fatal.
 --
--- Nothing else asks that question. The new column stars through to `ipdb.models`
--- and fails the snake_case check, so the field cannot arrive silently -- but
--- that check is cleared by adding one rename line, which makes the build green
--- again with the stale census still supplying every specialty.
+-- The snake_case check catches the new column too, but is cleared by adding one
+-- rename line -- which greens the build without anyone asking this question.
 --
--- `%special%` unanchored: `Specialty` and `Specialties` are the likely names but
--- `MachineSpecialty` is no less plausible, and an anchored match would miss it.
--- The name that evades this entirely -- `Classification`, say -- still fails the
--- snake_case check, so the two together leave no silent path.
+-- `%special%` unanchored so `MachineSpecialty` trips it as well. A name that
+-- evades it entirely still fails snake_case, leaving no silent path.
 INSERT INTO checks.violations
 SELECT 'source_dumps', 'ipdb_specialty_xantari_column_appeared',
   'ipdb_raw.xantari_model_snapshots.' || column_name

@@ -172,12 +172,6 @@ SELECT * FROM (VALUES
 ) AS t(opdb_feature, breadth_rank);
 
 -- IPDB's three type codes in catalog vocabulary.
---
--- Keyed on the code alone. It used to carry a second key, the full `Type` text,
--- solely so Pure Mechanical could be reached that way -- the dump's
--- `TypeShortName` was blank on every PM machine. `ipdb_stg.models` now slices the
--- code out of `Type` itself, so PM has a code like the other two and the
--- full-text key has nothing left to do.
 CREATE OR REPLACE VIEW ipdb_ref.technology_generation AS
 SELECT * FROM (VALUES
   ('EM', 'electromechanical'),

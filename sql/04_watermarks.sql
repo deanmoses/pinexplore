@@ -29,42 +29,26 @@ UNION ALL
 -- given model is `archive_capture_date`, on that model's own row.
 SELECT
   'archive page extract',
-  'ipdb/ipdb_archive/models.jsonl',
+  'ipdb/web_cache/models.jsonl',
   max(last_fetched_at),
   count(*)
 FROM ipdb_raw.archive_models
 
 UNION ALL
 
--- The Specialty census, one row for the whole download.
+-- The saved advanced searches, one row for the whole extract.
 --
--- `observed_at` is NULL and cannot be otherwise: a search results page carries
--- no timestamp, so the artifact makes no claim about its own currency. What
--- dates it is `acquired_on` below, which is the strongest thing available and is
--- unusually strong here -- the searches were saved within minutes of each other,
--- so unlike the archive extract above, one date really does describe every row.
+-- `observed_at` is NULL and cannot be otherwise: a results page carries no
+-- timestamp, so the artifact makes no claim about its own currency. What dates
+-- it is `acquired_on` below, and that is a SIMPLIFICATION rather than a fact --
+-- searches are saved whenever one is wanted, so the corpus spans however long
+-- that has been going on and one date describes the newest download.
 SELECT
-  'specialty census',
-  'ipdb/ipdb_specialty/census.jsonl',
+  'advanced search results',
+  'ipdb/searches/search_results.jsonl',
   NULL,
   count(*)
-FROM ipdb_raw.specialty_census
-
-UNION ALL
-
--- The other saved advanced searches, one row for the whole extract.
---
--- `observed_at` is NULL for the same reason as the census above -- a results
--- page carries no timestamp. Unlike the census, though, `acquired_on` is a
--- SIMPLIFICATION here rather than a fact: these searches are saved whenever one
--- is wanted, so the corpus spans however long that has been going on, and one
--- date describes the newest download rather than all of them.
-SELECT
-  'advanced search observations',
-  'ipdb/ipdb_searches/observations.jsonl',
-  NULL,
-  count(*)
-FROM ipdb_raw.search_observations;
+FROM ipdb_raw.search_results;
 COMMENT ON VIEW ipdb.ingest_watermarks IS
   'One row per ingested IPDB artifact with its record count and best available watermark; archive extracts use latest fetch time.';
 
@@ -88,13 +72,12 @@ CREATE OR REPLACE VIEW ref.artifact_acquisitions AS
 SELECT * FROM (VALUES
   ('opdb/opdb_full.json',      DATE '2026-08-22', 4136),
   ('opdb/opdb_changelog.json', DATE '2026-08-22', 51),
-  -- The 27 searches were saved between 11:03 and 11:20 local, so the date
-  -- describes the whole census rather than standing in for a range. This row
-  -- carries more weight than the OPDB ones above it: `ipdb.model_specialties`
-  -- publishes it as `observed_on`, making it the date a patch cites for every
-  -- specialty claim, and there is nowhere else it could come from.
-  ('ipdb/ipdb_specialty/census.jsonl', DATE '2026-08-30', 3292),
-  ('ipdb/ipdb_searches/observations.jsonl', DATE '2026-08-30', 7637)
+  -- Every page was saved the same afternoon, so the date describes the whole
+  -- corpus rather than standing in for a range. This row carries more weight
+  -- than the OPDB ones above it: `ipdb.model_specialties` publishes it as
+  -- `observed_on`, making it the date a patch cites for every Specialty claim,
+  -- and there is nowhere else it could come from.
+  ('ipdb/searches/search_results.jsonl', DATE '2026-08-30', 11824)
 ) AS t(artifact, acquired_on, n_records_at_acquisition);
 
 -- Every ingested artifact, one row each, whatever source it came from.

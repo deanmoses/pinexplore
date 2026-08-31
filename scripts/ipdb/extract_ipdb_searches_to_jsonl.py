@@ -1,43 +1,54 @@
 #!/usr/bin/env python3
-"""Extract saved IPDB advanced searches into one observations file.
+"""Extract every saved IPDB advanced search into two JSONL files.
 
-IPDB's advanced search can filter by Specialty, by Type, by year range, and more.
-Each filter renders the same results table, so each saved page is a set of LIVE
-OBSERVATIONS of machines -- IPDB's current name, date, manufacturer, type,
-production, players, model number and specialties, read months after the xantari
-dump last spoke.
+<https://www.ipdb.org/search.pl?searchtype=advanced> filters the live database
+and renders the matches as one table. It can filter by Specialty, by Type and by
+year range, and every filter renders that same table, so every saved page is read
+the same way and this is the only extract there is.
 
-That is the whole job here: not to publish rival field values, which
-`ipdb.models` already takes from the dump, but to give the build something
-current to CHECK the dump against. `ipdb_search_observation_disagrees_with_dump`
-is the point of the corpus.
+The pages are behind a bot wall and are saved by hand under
+``ingest_sources/ipdb/searches/<kind>/``. The folder names the kind of
+search, the file names the instance, and dropping a page into a folder is the
+whole act of adding a download -- no code change and no SQL change.
 
-Every page under `ingest_sources/ipdb/ipdb_*/` is read EXCEPT the Specialty
-searches, which `extract_ipdb_specialty_to_jsonl.py` owns. Those 27 pages are a
-closed census with a vocabulary and a completeness proof behind them, and they
-feed a mart view; folding them in here would duplicate every row and lose the
-distinction. Staging unions the two into `ipdb_stg.live_observations`, which is
-what the checks read.
+Two files come out, both read by ``sql/02_raw.sql`` through ``read_json_auto``:
 
-A search is identified by WHERE IT WAS SAVED -- the folder names the kind, the
-filename names the instance -- and not by reading the filter back off the page.
-That is a deliberate retreat from what the Specialty extract does. Those pages
-echo the search form with the searched option marked `selected`, so they
-self-identify; a page saved as the server sent it may carry no such echo (the
-Type search does not), and a rule that works on one markup and not the other is
-worse than a filename.
+* ``search_results.jsonl`` -- one row per IPDB model per saved page, holding that
+  model's fields as that page's results table showed them. A model matched by
+  three searches is three rows. They are NOT merged here, and that is the point:
+  whether the copies agree is a question with an answer, and
+  ``ipdb_live_observation_conflict`` asks it in SQL rather than this file
+  quietly picking a winner.
+* ``specialties.jsonl`` -- IPDB's 27 Specialties with its own numeric ids, read
+  off the search form rather than transcribed. It is not derivable from the rows:
+  a Specialty no model currently carries appears in the dropdown and nowhere
+  else, and that is exactly the case worth catching.
 
-WHAT ABSENCE MEANS IS THE CALLER'S PROBLEM, not this file's. Each download is
-complete for whatever it filtered on -- every Pure Mechanical machine, every
-machine dated 2010 or later -- but only the person who ran the search knows what
-that filter was, so nothing here infers a machine's absence to mean anything.
-The observations are positive statements only.
+NOTHING IS INTERPRETED HERE. This module parses pages and records what each one
+said; every rule about what the corpus MEANS is a check in SQL. That includes the
+ones this file could plausibly have enforced -- that the 27 Specialty searches
+are complete as a set, that two pages describing one model agree, that IPDB's
+dropdown still matches the rules written for it. Keeping them together in SQL
+beats splitting them across two languages, and the row's own ``search_filter``
+is what makes them expressible there.
 
-Re-running rewrites the file whole, so the diff is what changed at IPDB. Adding a
-download means dropping a page in a folder and re-running; no SQL changes.
+Each row carries where it came from and what its page filtered on:
+
+* ``search_kind`` / ``search_name`` -- the folder and the file.
+* ``search_filter`` -- the Specialty the page searched for, taken from the
+  ``selected`` option in the echoed form. NULL where the page does not say, which
+  is not an oversight: the Type search echoes no such form back at all. Only the
+  Specialty pages state their filter, and they are the only ones a check needs it
+  from.
+
+What a search's absence MEANS is nowhere in this file. Each download is complete
+for whatever it filtered on, but a page does not always say what that was, so the
+corpus holds positive observations and the reader decides what to make of a gap.
+
+Re-running rewrites both files whole, so the diff is what changed at IPDB.
 
 Usage:
-    uv run python scripts/ipdb/extract_ipdb_searches_to_jsonl.py [--src DIR] [--out PATH] [--dry-run]
+    uv run python scripts/ipdb/extract_ipdb_searches_to_jsonl.py [--src DIR] [--out DIR] [--dry-run]
 """
 
 from __future__ import annotations
@@ -47,65 +58,114 @@ import json
 import sys
 from pathlib import Path
 
-from ipdb_search import ENCODING, Machine, ParseError, parse_results
+from ipdb_search import (
+    ENCODING,
+    SEARCH_URL,
+    Model,
+    ParseError,
+    parse_results,
+    parse_specialty_filter,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SRC = REPO_ROOT / "ingest_sources" / "ipdb"
-DEFAULT_OUT = DEFAULT_SRC / "ipdb_searches" / "observations.jsonl"
+DEFAULT_SRC = REPO_ROOT / "ingest_sources" / "ipdb" / "searches"
+DEFAULT_OUT = DEFAULT_SRC
 
-# Owned by the Specialty extract, which proves them complete as a set.
-SPECIALTY_DIR = "ipdb_specialty"
-
-# Where the extract looks, and what it calls what it finds.
-SEARCH_DIR_PREFIX = "ipdb_"
 PAGE_SUFFIXES = (".htm", ".html")
 
 
 def search_pages(src: Path) -> list[Path]:
-    """Every saved search page, in a stable order."""
+    """Every saved page, in a stable order. One directory level, no deeper."""
     return sorted(
         path
         for directory in src.iterdir()
         if directory.is_dir()
-        and directory.name.startswith(SEARCH_DIR_PREFIX)
-        and directory.name != SPECIALTY_DIR
         for path in directory.iterdir()
         if path.suffix.lower() in PAGE_SUFFIXES
     )
 
 
-def build(src: Path) -> list[Machine]:
-    """Every observation on every saved page, one row per machine per search."""
+def build(src: Path) -> tuple[list[Model], list[Model]]:
+    """Every saved page under `src` into the two records the raw layer reads."""
     pages = search_pages(src)
     if not pages:
-        raise ParseError(f"no saved search pages under {src}/{SEARCH_DIR_PREFIX}*/")
+        raise ParseError(f"no saved search pages under {src}/*/")
 
-    observations: list[Machine] = []
+    results: list[Model] = []
+    terms: dict[str, int] = {}
+    stated_by: dict[str, str] = {}
+
     for path in pages:
-        # The folder is the kind of search, the file is which one.
-        kind = path.parent.name.removeprefix(SEARCH_DIR_PREFIX)
-        name = path.stem
-        rows = parse_results(
-            path.read_text(encoding=ENCODING, errors="strict"), path.name
-        )
+        page = path.read_text(encoding=ENCODING, errors="strict")
+        kind, name = path.parent.name, path.stem
+
+        search_filter = None
+        echoed = parse_specialty_filter(page, path.name)
+        if echoed is not None:
+            page_terms, search_filter = echoed
+            # Every page that echoes the form echoes the same one, so a
+            # disagreement means the download spans a change at IPDB.
+            if terms and terms != page_terms:
+                raise ParseError(
+                    f"{path.name}: its Specialty dropdown differs from earlier pages' -- "
+                    "the download spans a change to IPDB's Specialty list"
+                )
+            terms = page_terms
+        if search_filter is not None:
+            if search_filter in stated_by:
+                raise ParseError(
+                    f"{path.name}: searches for {search_filter!r}, and so does "
+                    f"{stated_by[search_filter]}"
+                )
+            stated_by[search_filter] = path.name
 
         seen: set[int] = set()
-        for row in rows:
+        for row in parse_results(page, path.name):
             if row["ipdb_id"] in seen:
                 raise ParseError(f"{path.name}: IPDB {row['ipdb_id']} listed twice")
             seen.add(row["ipdb_id"])
-            observations.append({"search_kind": kind, "search_name": name} | row)
+            results.append(
+                {
+                    "search_kind": kind,
+                    "search_name": name,
+                    "search_filter": search_filter,
+                }
+                | row
+            )
 
-    observations.sort(
+    if not terms:
+        raise ParseError(
+            "no saved page echoes IPDB's Specialty dropdown, so the Specialty list "
+            "cannot be read; save one Specialty search as the server sends it"
+        )
+
+    results.sort(
         key=lambda row: (row["search_kind"], row["search_name"], row["ipdb_id"])
     )
-    return observations
+    specialties = [
+        {
+            "specialty_id": specialty_id,
+            "specialty": specialty,
+            "source_url": SEARCH_URL.format(id=specialty_id),
+            # Whether any saved page searched for this Specialty. False is not an
+            # error here; `ipdb_specialty_not_downloaded` decides what it means.
+            "downloaded": specialty in stated_by,
+        }
+        for specialty, specialty_id in sorted(terms.items())
+    ]
+    return results, specialties
+
+
+def write(records: list[Model], path: Path) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--src", type=Path, default=DEFAULT_SRC, help="the ipdb ingest dir"
+        "--src", type=Path, default=DEFAULT_SRC, help="the saved searches"
     )
     parser.add_argument(
         "--out", type=Path, default=DEFAULT_OUT, help="where the JSONL goes"
@@ -116,32 +176,30 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        observations = build(args.src)
+        results, specialties = build(args.src)
     except ParseError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    searches = {(row["search_kind"], row["search_name"]) for row in observations}
-    machines = {row["ipdb_id"] for row in observations}
+    searches = {(row["search_kind"], row["search_name"]) for row in results}
+    models = {row["ipdb_id"] for row in results}
     print(
-        f"{len(observations)} observations of {len(machines)} machines "
-        f"across {len(searches)} search(es)"
+        f"{len(results)} rows for {len(models)} models across {len(searches)} searches, "
+        f"{len(specialties)} Specialties in IPDB's list"
     )
-    for kind, name in sorted(searches):
-        n = sum(
-            1
-            for row in observations
-            if (row["search_kind"], row["search_name"]) == (kind, name)
-        )
-        print(f"  {kind}/{name}: {n}")
+    for kind in sorted({kind for kind, _ in searches}):
+        pages = sum(1 for k, _ in searches if k == kind)
+        rows = sum(1 for row in results if row["search_kind"] == kind)
+        print(f"  {kind}: {pages} page(s), {rows} rows")
     if args.dry_run:
         return 0
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as handle:
-        for row in observations:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(f"wrote {args.out}")
+    args.out.mkdir(parents=True, exist_ok=True)
+    write(results, args.out / "search_results.jsonl")
+    write(specialties, args.out / "specialties.jsonl")
+    print(
+        f"wrote {args.out / 'search_results.jsonl'} and {args.out / 'specialties.jsonl'}"
+    )
     return 0
 
 

@@ -3,7 +3,7 @@
 
 Reads the raw HTML blobs behind the web cache's ``machine.cgi?id=N`` pages,
 runs each through :func:`parse_ipdb.parse_model_page`, and writes one JSON
-object per model to ``ingest_sources/ipdb/ipdb_archive/models.jsonl``.
+object per model to ``ingest_sources/ipdb/web_cache/models.jsonl``.
 
 Two consumers read it, both through ``read_json_auto``. This repo's own build
 folds it in beside the xantari dump as ``ipdb_raw.archive_models`` (see
@@ -12,7 +12,7 @@ DuckDB alongside the Flipcommons analytics layer — the same cross-repo reach
 `flippatch/scripts/analysis/evidence.sql` already makes into this cache:
 
     SELECT * FROM read_json_auto(
-      '../pinexplore/ingest_sources/ipdb/ipdb_archive/models.jsonl', sample_size = -1);
+      '../pinexplore/ingest_sources/ipdb/web_cache/models.jsonl', sample_size = -1);
 
 ``sample_size = -1`` is not optional advice. Inference over a sample types a
 column by the rows it saw, and the rarest fields here are on a handful of
@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     from web_cache import PageRow
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-OUT_PATH = REPO_ROOT / "ingest_sources" / "ipdb" / "ipdb_archive" / "models.jsonl"
+OUT_PATH = REPO_ROOT / "ingest_sources" / "ipdb" / "web_cache" / "models.jsonl"
 
 # The cache key of a machine page. LIKE, not GLOB: `?` is a literal here and a
 # single-character wildcard there.

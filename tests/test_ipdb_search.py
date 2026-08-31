@@ -20,7 +20,7 @@ import re
 import ipdb_search as search
 import pytest
 
-from .ipdb_pages import SPECIALTY_ORDER, TYPE_ORDER, page
+from .ipdb_pages import SPECIALTIES, SPECIALTY_ORDER, TYPE_ORDER, page
 
 
 @pytest.mark.parametrize(
@@ -31,24 +31,22 @@ from .ipdb_pages import SPECIALTY_ORDER, TYPE_ORDER, page
 )
 def test_every_field_lands_in_both_markups_and_both_orders(order, browser_saved):
     """The cross product: neither the markup nor the column order may matter."""
-    (machine,) = search.parse_results(
-        page(order, browser_saved=browser_saved), "p.html"
-    )
+    (model,) = search.parse_results(page(order, browser_saved=browser_saved), "p.html")
 
-    assert machine["ipdb_id"] == 936
-    assert machine["name"] == "4 Queens"
-    assert machine["manufacturer_full"] == "Bally Manufacturing Corporation"
-    assert machine["type_code"] == "EM"
+    assert model["ipdb_id"] == 936
+    assert model["name"] == "4 Queens"
+    assert model["manufacturer_full"] == "Bally Manufacturing Corporation"
+    assert model["type_code"] == "EM"
     # The two that swap places. Reading by position puts each in the other's slot.
-    assert machine["production_units"] == 1256
-    assert machine["specialties"] == ["Zipper Flippers"]
-    assert machine["players"] == 1
-    assert machine["model_number"] == "890"
-    assert machine["rating_score"] == 7.3
+    assert model["production_units"] == 1256
+    assert model["specialties"] == ["Zipper Flippers"]
+    assert model["players"] == 1
+    assert model["model_number"] == "890"
+    assert model["rating_score"] == 7.3
 
 
 def test_reordering_columns_moves_no_value():
-    """The same row, two orders, must parse to the same machine."""
+    """The same row, two orders, must parse to the same model."""
     (as_specialty,) = search.parse_results(
         page(SPECIALTY_ORDER, browser_saved=True), "a.html"
     )
@@ -86,10 +84,10 @@ def test_a_page_shorter_than_it_declares_is_refused():
 def test_production_words_that_have_no_count(cell, text, units):
     """`unknown` is IPDB saying out loud what a blank cell leaves implied."""
     body = page(SPECIALTY_ORDER, browser_saved=True).replace(">1,256<", f">{cell}<")
-    (machine,) = search.parse_results(body, "p.html")
+    (model,) = search.parse_results(body, "p.html")
 
-    assert machine["production_text"] == text
-    assert machine["production_units"] == units
+    assert model["production_text"] == text
+    assert model["production_units"] == units
 
 
 def test_an_unknown_production_word_is_refused():
@@ -97,3 +95,41 @@ def test_an_unknown_production_word_is_refused():
     body = page(SPECIALTY_ORDER, browser_saved=True).replace(">1,256<", ">a handful<")
     with pytest.raises(search.ParseError, match="unrecognised production"):
         search.parse_results(body, "p.html")
+
+
+# --------------------------------------------------------------------------- #
+# The echoed search form, which is where a page states its own filter
+# --------------------------------------------------------------------------- #
+
+
+def test_the_form_states_the_searched_specialty_and_the_whole_list():
+    """A page that says what it filtered on also says what it chose from."""
+    body = page(SPECIALTY_ORDER, selected="Zipper Flippers")
+    terms, selected = search.parse_specialty_filter(body, "p.html")
+
+    assert selected == "Zipper Flippers"
+    assert terms == SPECIALTIES
+
+
+def test_a_page_with_no_form_states_no_filter():
+    """IPDB's Type search echoes nothing back; that is absence, not failure."""
+    assert (
+        search.parse_specialty_filter(page(TYPE_ORDER, with_form=False), "pm.htm")
+        is None
+    )
+
+
+def test_a_form_echoed_unfiltered_states_a_list_but_no_filter():
+    body = page(SPECIALTY_ORDER, selected=None)
+    terms, selected = search.parse_specialty_filter(body, "p.html")
+
+    assert selected is None
+    assert terms == SPECIALTIES
+
+
+def test_two_selected_specialties_are_refused():
+    body = page(SPECIALTY_ORDER, selected="Widebody").replace(
+        '<option value="25">', '<option selected="selected" value="25">'
+    )
+    with pytest.raises(search.ParseError, match="two Specialties marked selected"):
+        search.parse_specialty_filter(body, "p.html")

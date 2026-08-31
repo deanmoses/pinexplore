@@ -1,9 +1,9 @@
 """Saved IPDB advanced-search pages, built to order.
 
-Not a test module: the search parser and the search extract both need pages
-to read, and they must agree on what a page looks like. The two column orders
-and the two markups here are the ones IPDB and a browser-save actually
-produce, so a fixture that drifts from them stops testing anything.
+Not a test module: the search parser and the search extract both need pages to
+read, and they must agree on what a page looks like. The two column orders and
+the two markups here are the ones IPDB and a browser-save actually produce, so a
+fixture that drifts from them stops testing anything.
 """
 
 from __future__ import annotations
@@ -34,6 +34,9 @@ TYPE_ORDER = [
     "Rating",
 ]
 
+# A short stand-in for IPDB's 27, enough to have one selected and others not.
+SPECIALTIES = {"Bingo Machine": 3, "Widebody": 14, "Zipper Flippers": 25}
+
 CELLS = {
     "Date": "1970-12 ",
     "Name": '<a class="linkid" href="{href}">4 Queens</a>',
@@ -48,37 +51,68 @@ CELLS = {
 }
 
 
-def page(order: list[str], *, browser_saved: bool, rows: int = 1) -> str:
+def dropdown(selected: str | None) -> str:
+    """The Specialty select, echoed back with the searched term marked.
+
+    A page that does not filter by Specialty carries no such select at all --
+    IPDB's Type search is the real example -- so callers pass nothing for it.
+    """
+    options = ['<option value="0">Any Specialty&nbsp;</option>']
+    for name, identifier in sorted(SPECIALTIES.items()):
+        mark = ' selected="selected"' if name == selected else ""
+        options.append(f'<option{mark} value="{identifier}">{name}\n</option>')
+    return '<select name="specialty">' + "".join(options) + "</select>"
+
+
+def page(
+    order: list[str],
+    *,
+    browser_saved: bool = True,
+    rows: int = 1,
+    ipdb_id: int = 936,
+    specialties: str | None = None,
+    selected: str | None = None,
+    with_form: bool = True,
+) -> str:
     """One results page in either markup, with columns in the given order."""
     if browser_saved:
-        tr, td, th = (
-            '<tr valign="top" class="oddrow">',
-            '<td nowrap="nowrap" class="normal">',
-            "<th>",
-        )
-        href, open_body, close_body = (
-            "https://ipdb.org/machine.cgi?id=936",
-            "<tbody>",
-            "</tbody>",
-        )
+        tr = '<tr valign="top" class="oddrow">'
+        td, th = '<td nowrap="nowrap" class="normal">', "<th>"
+        href = f"https://ipdb.org/machine.cgi?id={ipdb_id}"
+        open_body, close_body = "<tbody>", "</tbody>"
     else:
-        tr, td, th = (
-            '<tr valign=top class="oddrow">',
-            "<td nowrap class=normal>",
-            "<th nowrap align=center>",
-        )
-        href, open_body, close_body = "machine.cgi?id=936", "", ""
+        tr = '<tr valign=top class="oddrow">'
+        td, th = "<td nowrap class=normal>", "<th nowrap align=center>"
+        href = f"machine.cgi?id={ipdb_id}"
+        open_body, close_body = "", ""
+
+    cells = dict(CELLS)
+    if specialties is not None:
+        cells["Specialty"] = specialties
 
     header = "".join(f"{th}<b>{name}</b></th>" for name in order)
     body = ""
     for _ in range(rows):
         body += (
             tr
-            + "".join(f"{td}{CELLS[name].format(href=href)}</td>" for name in order)
+            + "".join(f"{td}{cells[name].format(href=href)}</td>" for name in order)
             + "</tr>"
         )
+    form = f"<form>{dropdown(selected)}</form>" if with_form else ""
     return (
-        f"<b>({rows} records match)</b>"
+        f"{form}<b>({rows} records match)</b>"
         f'<table class="sortable" id="gamelist">{open_body}'
         f"<tr>{header}</tr>{body}{close_body}</table>"
     )
+
+
+def specialty_cell(*names: str, elide: bool = False) -> str:
+    """The Specialty cell, which lists a model's WHOLE set on every page."""
+    spans = []
+    for name in names:
+        # IPDB tags the Not A Pinball span with a class, so `title` is not the
+        # first attribute on every span.
+        css = ' class="notapinballspec"' if name == "Not A Pinball" else ""
+        shown = name[:15] + "..." if elide else name
+        spans.append(f'<span{css} title="{name}">{shown}</span>')
+    return "&nbsp;" + ",<br>&nbsp;".join(spans)

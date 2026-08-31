@@ -33,8 +33,8 @@ import html
 import re
 from typing import Any
 
-# One parsed machine.
-Machine = dict[str, Any]
+# One parsed model.
+Model = dict[str, Any]
 
 # IPDB serves these as windows-1252 and says so in its own meta tag. Decoding as
 # UTF-8 would mangle the punctuation in Japanese and European titles.
@@ -47,7 +47,7 @@ _ROW = re.compile(r'<tr[^>]*class="(?:odd|even)row"[^>]*>(.*?)</tr>', re.DOTALL)
 _HEADER_ROW = re.compile(r"<tr[^>]*>((?:\s*<th.*?</th>\s*)+)</tr>", re.DOTALL)
 _HEADER_CELL = re.compile(r"<th[^>]*>(.*?)</th>", re.DOTALL)
 _CELL = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL)
-# A results row links the machine page directly on a large result set, and falls
+# A results row links the model page directly on a large result set, and falls
 # back to a fragment anchor on a small one, where IPDB inlines the full records
 # below the table. The href may be absolute or relative. The id is the same.
 _MODEL_ID = re.compile(r'machine\.cgi\?id=(\d+)|href="#(\d+)"')
@@ -80,6 +80,24 @@ COLUMNS = {
     "photos": "Pics",
     "rating": "Rating",
 }
+
+
+# The advanced-search form, echoed back on pages saved as the server sent them.
+# `<select name="specialty">` carries every Specialty IPDB offers with its own
+# numeric id, and marks the one this page searched for. Not every filter echoes:
+# the Type search returns no such select at all, so callers must tolerate None.
+_SPECIALTY_SELECT = re.compile(
+    r'<select[^>]*name="specialty"[^>]*>(.*?)</select>', re.DOTALL
+)
+_OPTION = re.compile(r"<option([^>]*)>(.*?)</option>", re.DOTALL)
+_OPTION_VALUE = re.compile(r'value="(\d+)"')
+
+# The dropdown's do-not-filter option, which is not a Specialty.
+ANY_SPECIALTY_ID = "0"
+
+SEARCH_URL = (
+    "https://www.ipdb.org/search.pl?specialty={id}&sortby=name&searchtype=advanced"
+)
 
 
 class ParseError(Exception):
@@ -132,7 +150,7 @@ def _parse_date(cell: str) -> tuple[str | None, int | None, int | None, bool]:
     The star means the date is a Project Date rather than a Date Of Manufacture,
     which IPDB explains in a tooltip beside it. That distinction is the reason to
     take this column at all -- it is the same signal `ipdb_stg.archive_models`
-    goes to the machine page for -- so it is kept rather than stripped.
+    goes to the model page for -- so it is kept rather than stripped.
 
     Year and month stay separate integers. A DATE would pad a year-only value to
     January 1st and read as a day IPDB never stated.
@@ -193,8 +211,8 @@ def _parse_rating(cell: str) -> tuple[float | None, int | None, bool]:
     raise ParseError(f"unrecognised rating tooltip {tooltip!r}")
 
 
-def parse_row(row: str, index: dict[str, int], source: str) -> Machine:
-    """One results row into one machine record."""
+def parse_row(row: str, index: dict[str, int], source: str) -> Model:
+    """One results row into one model record."""
     cells: list[str] = _CELL.findall(row)
     if len(cells) <= max(index.values()):
         raise ParseError(f"{source}: row has {len(cells)} cells, fewer than the header")
@@ -204,7 +222,7 @@ def parse_row(row: str, index: dict[str, int], source: str) -> Machine:
 
     identifier = _MODEL_ID.search(cell("name"))
     if identifier is None:
-        raise ParseError(f"{source}: row links no machine id")
+        raise ParseError(f"{source}: row links no model id")
 
     date_text, year, month, is_project_date = _parse_date(cell("date"))
     production_text, production_units, production_approximate = _parse_production(
@@ -253,14 +271,14 @@ def parse_row(row: str, index: dict[str, int], source: str) -> Machine:
     }
 
 
-def parse_results(page: str, source: str) -> list[Machine]:
-    """Every machine on one saved search page.
+def parse_results(page: str, source: str) -> list[Model]:
+    """Every model on one saved search page.
 
     The page's own `(N records match)` is checked against the rows read. A
     half-saved download or a result set IPDB decided to paginate disagrees here
     rather than shipping short -- which matters because every caller is claiming
     its download is COMPLETE for whatever it filtered on, and a short page reads
-    exactly like a filter that matched fewer machines.
+    exactly like a filter that matched fewer models.
     """
     declared = _RECORDS_MATCH.search(page)
     if declared is None:
@@ -279,3 +297,40 @@ def parse_results(page: str, source: str) -> list[Machine]:
             f"{declared.group(1)} records match"
         )
     return rows
+
+
+def parse_specialty_filter(
+    page: str, source: str
+) -> tuple[dict[str, int], str | None] | None:
+    """IPDB's Specialty list and the one this page searched for, if it says.
+
+    Returns every Specialty in the dropdown as `{name: id}` alongside the name of
+    the selected one, or None where the page carries no such dropdown. Both come
+    off the same echoed form, so a page that states its filter also states the
+    full list it was chosen from -- which is what lets the download check its own
+    completeness rather than being taken on trust.
+    """
+    select = _SPECIALTY_SELECT.search(page)
+    if select is None:
+        return None
+
+    terms: dict[str, int] = {}
+    selected: str | None = None
+    for attributes, label in _OPTION.findall(select.group(1)):
+        value = _OPTION_VALUE.search(attributes)
+        if value is None or value.group(1) == ANY_SPECIALTY_ID:
+            continue
+        name = _text(label)
+        if name in terms:
+            raise ParseError(
+                f"{source}: Specialty {name!r} listed twice in the dropdown"
+            )
+        terms[name] = int(value.group(1))
+        if "selected" in attributes:
+            if selected is not None:
+                raise ParseError(f"{source}: two Specialties marked selected")
+            selected = name
+
+    if not terms:
+        raise ParseError(f"{source}: the Specialty dropdown is empty")
+    return terms, selected

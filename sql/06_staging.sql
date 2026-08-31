@@ -392,73 +392,31 @@ WHERE EXISTS (
   SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = am.ipdb_id
 );
 
--- The census, cut down to the models xantari knows.
+-- The search results, cut down to the models xantari knows.
 --
 -- Same restriction as `ipdb_stg.archive_models`, for a weaker reason. There the
 -- rule keeps a decade-old capture from asserting a listing still exists; here
--- the census is hours old, so a machine it lists and the dump does not is almost
--- certainly one IPDB has ADDED since. It is still dropped, because xantari
--- remains the source of which models exist and half a model -- specialties but
--- no name, date or manufacturer -- is worse than none. Reading through
--- `models_merged` also inherits the retraction filter.
--- `ipdb_live_read_model_not_in_dump` reports what this drops, and a
--- growing count there means it is time for a fresh dump.
-CREATE OR REPLACE VIEW ipdb_stg.specialty_census AS
-SELECT c.*
-FROM ipdb_raw.specialty_census AS c
+-- the searches are hours old, so a model they list and the dump does not is
+-- almost certainly one IPDB has ADDED since. It is still dropped, because
+-- xantari remains the source of which models exist and half a model -- a search
+-- row with no themes, credits or notes behind it -- is worse than none. Reading
+-- through `models_merged` also inherits the retraction filter.
+-- `ipdb_live_read_model_not_in_dump` reports what this drops, and a growing
+-- count there means it is time for a fresh dump.
+CREATE OR REPLACE VIEW ipdb_stg.search_results AS
+SELECT r.*
+FROM ipdb_raw.search_results AS r
 WHERE EXISTS (
-  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = c.ipdb_id
+  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = r.ipdb_id
 );
 
--- The other saved searches, cut down to the models xantari knows.
-CREATE OR REPLACE VIEW ipdb_stg.search_observations AS
-SELECT o.*
-FROM ipdb_raw.search_observations AS o
-WHERE EXISTS (
-  SELECT 1 FROM ipdb_stg.models_merged AS mm WHERE mm.IpdbId = o.ipdb_id
-);
-
--- Every live read of a machine IPDB's advanced search has given us, whatever
--- filter produced it. One row per machine per search.
+-- One row per model: what IPDB currently says about it.
 --
--- The Specialty census and the other searches differ in what their ABSENCES
--- mean -- the census is closed and proven complete, the others state only what
--- they matched -- but their PRESENCES are the same kind of fact, a machine as
--- IPDB rendered it on the day it was saved. Everything downstream here wants
--- only the presences, so this is where the distinction stops mattering and one
--- corpus begins.
---
--- Unioned rather than merged: a machine matched by three searches is three
--- observations, and collapsing them here would hide whether they agree.
--- `ipdb_stg.live_models` collapses them, and `ipdb_live_observation_conflict`
--- is what watches the collapse.
-CREATE OR REPLACE VIEW ipdb_stg.live_observations AS
-SELECT
-  'specialty' AS search_kind,
-  'census'    AS search_name,
-  ipdb_id, "name", date_text, date_year, date_month, date_is_project_date,
-  manufacturer, manufacturer_full, type_code, type_text,
-  production_text, production_units, production_approximate,
-  players, model_number, n_photos,
-  rating_score, rating_ratings, rating_provisional
-FROM ipdb_stg.specialty_census
-UNION ALL
-SELECT
-  search_kind, search_name,
-  ipdb_id, "name", date_text, date_year, date_month, date_is_project_date,
-  manufacturer, manufacturer_full, type_code, type_text,
-  production_text, production_units, production_approximate,
-  players, model_number, n_photos,
-  rating_score, rating_ratings, rating_provisional
-FROM ipdb_stg.search_observations;
-
--- One row per machine: what IPDB currently says about it.
---
--- `any_value` is safe ONLY because the observations agree, which is asserted
--- rather than assumed -- `ipdb_live_observation_conflict` fails the build if two
--- searches describe one machine differently. Without that this view would pick a
--- winner silently, and the searches are saved on different days, so eventually
--- they will disagree.
+-- `any_value` is safe ONLY because the rows agree, which is asserted rather than
+-- assumed -- `ipdb_live_observation_conflict` fails the build if two searches
+-- describe one model differently. Without that this view would pick a winner
+-- silently, and the pages are saved on different days, so eventually they will
+-- disagree.
 --
 -- Rating is excluded on purpose: IPDB recomputes it as votes arrive, so two
 -- downloads days apart legitimately differ and it is not a fact to collapse.
@@ -478,8 +436,8 @@ SELECT
   any_value(production_units)      AS production_units,
   any_value(players)               AS players,
   any_value(model_number)          AS model_number,
-  count(*)                         AS n_observations
-FROM ipdb_stg.live_observations
+  count(*)                         AS n_search_results
+FROM ipdb_stg.search_results
 GROUP BY ipdb_id;
 
 -- Parse the IPDB page header line, which xantari captured verbatim into
@@ -563,7 +521,7 @@ SELECT
   -- `TypeShortName` goes for the same reason as `ManufacturerShortName` above:
   -- it is xantari's own derivation rather than a field on the IPDB page, and it
   -- is an incomplete one. It holds EM and SS and is EMPTY on every Pure
-  -- Mechanical machine, though the dump's own `Type` says "Pure Mechanical (PM)"
+  -- Mechanical model, though the dump's own `Type` says "Pure Mechanical (PM)"
   -- on all of them, and IPDB's page and advanced search both state the code
   -- plainly. `type_code` below replaces it, sliced from the field xantari
   -- actually scraped.
@@ -594,28 +552,16 @@ SELECT
          COALESCE(im.AverageFunRating, arc.rating_score)    AS AverageFunRating,
          COALESCE(im.ProductionNumber, arc.production_units) AS ProductionNumber,
 
-         -- The dump's title, corrected against a live search where the scrape
-         -- dropped characters from it. IPDB has "Hearts & Spades" and
-         -- "Sea-Belles"; the dump has "Hearts Spades" and "Sea Belles".
+         -- The dump's title, corrected where the scrape dropped characters
+         -- from it: IPDB has "Hearts & Spades", the dump has "Hearts Spades".
          --
-         -- A RULE rather than the hand-written list the misparsed manufacturers
-         -- get, because neither reason for that list holds here. Recognising a
-         -- manufacturer lifted out of prose means reading the page; a results
-         -- table just prints the name, and there is nothing to judge. And the
-         -- archive fills above hedge because a capture is years old and IPDB may
-         -- have moved on -- here the live read is the NEWER source and the dump
-         -- is the stale one.
+         -- The gate is what makes a blind rule safe. Correcting only where the
+         -- two agree once punctuation and case come out matches the failure
+         -- exactly -- a lost character, never a different name -- so a parse
+         -- regression reading the wrong column differs in LETTERS and is refused
+         -- every time, which no count-based limit could promise.
          --
-         -- Gated on the two agreeing once punctuation, spacing and case are
-         -- removed, which is the whole failure being corrected: a scrape that
-         -- lost a character, never a different name. That gate is what makes
-         -- this safe to apply blind. A parse regression pointed at the wrong
-         -- column would differ in LETTERS on thousands of rows and be refused
-         -- every time, where a count-based sanity limit would have to guess how
-         -- many corrections are too many.
-         --
-         -- What the gate refuses is not silently dropped: IPDB genuinely
-         -- renaming a machine is a real event needing a real decision, and
+         -- A refusal is a rename, which needs a decision rather than a rule.
          -- `ipdb_live_read_renames_a_model` is where it waits for one.
          CASE
            WHEN cen."name" IS NOT NULL
@@ -661,27 +607,20 @@ SELECT
   -- by `ipdb_archive_header_date_inferred` rather than mixed in with the
   -- observed ones.
   --
-  -- THE BRANCHES ARE ORDERED BY HOW RECENTLY IPDB SAID IT, which is the whole
-  -- reason the census outranks the archive pages here. Both are IPDB stating the
-  -- kind rather than us inferring it, so neither is better evidence in itself --
-  -- but a capture is years old and the census is one download old, and IPDB
-  -- revises these. Two 1982 prototypes carry a labelled `Date Of Manufacture` on
-  -- their 2018 captures and a project mark in the census: machines that were
-  -- never manufactured, re-dated since. Ordering the archive above the census
-  -- would publish the stale answer with nothing to show it was stale.
+  -- THE BRANCHES ARE ORDERED BY HOW RECENTLY IPDB SAID IT. A live search and an
+  -- archive capture are both IPDB stating the kind, so what separates them is
+  -- only age, and IPDB revises these records.
   --
-  -- The mark is read BOTH ways, and the second way is the load-bearing one. A
-  -- starred date is IPDB saying "project"; an unstarred one on a dated row is
-  -- IPDB saying "manufacture", by the same rule that prints the star. So a live
-  -- row can also RETIRE an inference rather than only overturn evidence.
-  -- That reading rests on the star still being printed, which is why its
-  -- disappearance is a build failure -- `ipdb_project_date_mark_absent` -- and
-  -- not a silent re-typing of every project date as a manufacture date.
+  -- The live mark is read BOTH ways, and the second way is load-bearing: a
+  -- starred date is IPDB saying "project", an unstarred one on a dated row is
+  -- IPDB saying "manufacture". That is what lets a live row RETIRE an inference
+  -- and not merely overturn a capture -- and why the star going missing is fatal
+  -- (`ipdb_project_date_mark_absent`) rather than silently re-typing every
+  -- project date.
   --
-  -- `DateOfManufacture` stays above both. It is a labelled field rather than a
-  -- rendering convention, and where it contradicts the census that is worth
-  -- seeing rather than resolving: `ipdb_live_read_date_kind_disagrees`
-  -- reports exactly that residue.
+  -- `DateOfManufacture` outranks both, being a labelled field rather than a
+  -- rendering convention. `ipdb_live_read_date_kind_disagrees` holds the
+  -- residue where the two contradict.
   CASE
     WHEN ad.additional_details_date_year IS NULL       THEN NULL
     WHEN im.DateOfManufacture IS NOT NULL              THEN 'manufacture'
@@ -729,9 +668,8 @@ LEFT JOIN ipdb_stg.archive_models AS arc
   ON arc.ipdb_id = im.IpdbId
 LEFT JOIN ipdb_stg.live_models AS cen
   ON cen.ipdb_id = im.IpdbId
--- One join, not two. The second leg existed only to reach Pure Mechanical
--- through `Type` because the short name was blank there; the derived `type_code`
--- above carries PM like any other code, so the full-text key is gone.
+-- The `type_code` expression repeated: a column of this SELECT is not in scope
+-- for its own joins.
 LEFT JOIN ipdb_ref.technology_generation AS tg1
   ON tg1.type_code = nullif(regexp_extract(im."Type", '\(([A-Z]+)\)$', 1), '');
 
@@ -1002,12 +940,12 @@ SELECT
   d.credit
 FROM ipdb_stg.archive_models AS am, unnest(am.documents) AS t(d);
 
--- Page specialties in IPDB's wording. Capture provenance stays on each unnested
--- row rather than depending on a later join whose uniqueness is not asserted.
+-- Specialties as an archived page stated them, at the date it was captured.
 --
--- No longer the mart's source -- `ipdb_stg.model_specialties` below is, from the
--- census. These rows are kept for the one thing the census cannot do: say what
--- IPDB used to say. `ipdb_specialty_reclassified` diffs the two.
+-- Kept for the one thing a current read cannot give: what IPDB said years ago.
+-- `ipdb_specialty_reclassified` diffs them against what it says now. Capture
+-- provenance rides on each unnested row rather than depending on a later join
+-- whose uniqueness is not asserted.
 CREATE OR REPLACE VIEW ipdb_stg.archive_model_specialties AS
 SELECT
   ipdb_id,
@@ -1017,31 +955,34 @@ SELECT
 FROM ipdb_stg.archive_models
 WHERE len(specialties) > 0;
 
--- One row per model per specialty IPDB currently assigns it.
+-- One row per model per Specialty IPDB currently assigns it.
 --
--- The mart's source. Provenance rides on the row rather than joining for it: the
--- struct already carries the search URL the assignment was read from, so a
--- consumer citing this needs no join whose uniqueness nobody asserted.
+-- The mart's source, and a projection of `ipdb_stg.search_results` rather than a
+-- pipeline of its own. Every results row states the model's WHOLE Specialty set
+-- whatever its page filtered on, so a year page is as good a witness as a
+-- Specialty page and the assignments are simply the distinct pairs across the
+-- corpus.
 --
--- `observed_on` is one date for every row, which is the point: unlike the archive
--- captures this replaced, the whole census was taken at one moment.
+-- `specialty_id` and `source_url` come from `ipdb_raw.specialties`, IPDB's own
+-- dropdown, so the URL that re-runs a search is reconstructed rather than
+-- guessed. INNER because a Specialty stated by a row and absent from the
+-- dropdown would be IPDB contradicting itself; `ipdb_specialty_list_drifted`
+-- fails the build first.
 --
--- Taken from `ingest.watermarks` rather than `ref.artifact_acquisitions`
--- directly, so it inherits that view's count gate. The pages state no date about
--- themselves, so the acquisition log is the only source for it and is kept by
--- hand -- which means a new download dropped in without touching the log would
--- otherwise stamp every published row with the PREVIOUS download's date. Gated,
--- that case publishes NULL instead, and `artifact_acquisition_log_stale` says
--- why.
+-- `observed_on` is one date across every row, and NULL rather than a previous
+-- download's date if the acquisition log has gone stale -- read through
+-- `ingest.watermarks` so it inherits that view's count gate. The pages state no
+-- date about themselves, so the hand-kept log is the only source for it.
 CREATE OR REPLACE VIEW ipdb_stg.model_specialties AS
-SELECT
-  c.ipdb_id,
-  s.specialty,
-  s.specialty_id,
-  s.source_url,
+SELECT DISTINCT
+  r.ipdb_id,
+  t.specialty_name AS specialty,
+  sp.specialty_id,
+  sp.source_url,
   (SELECT acquired_on FROM ingest.watermarks
-   WHERE artifact = 'ipdb/ipdb_specialty/census.jsonl') AS observed_on
-FROM ipdb_stg.specialty_census AS c, unnest(c.specialties) AS t(s);
+   WHERE artifact = 'ipdb/searches/search_results.jsonl') AS observed_on
+FROM ipdb_stg.search_results AS r, unnest(r.specialties) AS t(specialty_name)
+INNER JOIN ipdb_raw.specialties AS sp ON sp.specialty = t.specialty_name;
 
 -- Where IPDB's live searches and the xantari dump disagree about a model.
 --

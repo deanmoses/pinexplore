@@ -517,7 +517,7 @@ COMMENT ON VIEW ipdb.model_credits IS
 -- `specialty_id` and `source_url` come from IPDB's own dropdown, captured by the
 -- census download rather than transcribed, so the URL that re-runs a search is
 -- reconstructable from this view. LEFT JOIN because the rule table is the
--- vocabulary this repo has decided about; `ipdb_specialty_vocabulary_drifted`
+-- vocabulary this repo has decided about; `ipdb_specialty_list_drifted`
 -- is what asserts the two sides still agree.
 CREATE OR REPLACE VIEW ipdb.specialties AS
 SELECT
@@ -527,17 +527,14 @@ SELECT
   sp.target_value,
   v.source_url
 FROM ipdb_ref.specialty AS sp
-LEFT JOIN ipdb_raw.specialty_vocabulary AS v ON v.specialty = sp.ipdb_specialty;
+LEFT JOIN ipdb_raw.specialties AS v ON v.specialty = sp.ipdb_specialty;
 COMMENT ON VIEW ipdb.specialties IS
   'IPDB''s full Specialty vocabulary with IPDB''s own id and search URL beside the Flipcommons target type and value each rule proposes, including values no model currently carries.';
 
 -- Keeps IPDB's wording beside its decode, plus the provenance of the read.
 --
--- Sourced from the advanced-search census, NOT the archive pages it used to come
--- from. The census states IPDB's whole classification at one moment, so this
--- view is complete in a way it never was: a model absent from it carries no
--- specialty, where before absence meant only that nobody had cached its page.
--- The 22-fold jump in rows is that difference, not a change of opinion.
+-- Complete: the searches behind it state IPDB's whole classification at one
+-- moment, so a model absent from this view carries no specialty.
 --
 -- `source_url` is per SPECIALTY, not per model -- the search that returned the
 -- model, which is the page the fact was actually read from. It is behind a bot

@@ -85,8 +85,8 @@ FROM (
   SELECT LastRefreshDateUtc, unnest("Data") AS d
   FROM read_json_auto(
     [
-      getvariable('ingest_base') || '/ipdb/ipdb_xantari_2025_02_01.json',
-      getvariable('ingest_base') || '/ipdb/ipdb_xantari_2026_04_11.json'
+      getvariable('ingest_base') || '/ipdb/xantari/2025_02_01.json',
+      getvariable('ingest_base') || '/ipdb/xantari/2026_04_11.json'
     ],
     (maximum_object_size = 67108864),
     (union_by_name = true)
@@ -158,45 +158,42 @@ SELECT
   content_sha,
   last_fetched_at
 FROM read_json_auto(
-  getvariable('ingest_base') || '/ipdb/ipdb_archive/models.jsonl',
+  getvariable('ingest_base') || '/ipdb/web_cache/models.jsonl',
   (sample_size = -1)
 );
 
--- IPDB's Specialty census -- the advanced search, run once per Specialty.
+-- IPDB's advanced searches, saved by hand past a bot wall and parsed by
+-- `scripts/ipdb/extract_ipdb_searches_to_jsonl.py`.
 --
--- Written by `scripts/ipdb/extract_ipdb_specialty_to_jsonl.py` over pages saved
--- by hand from <https://www.ipdb.org/search.pl?searchtype=advanced>, which is
--- behind a bot wall. That module's docstring holds the shape and the four
--- properties of the download it asserts; what matters here is why this source
--- outranks the other two on this one field.
+-- A live read of IPDB, months newer than the dump, and the build checks the dump
+-- against it. These are not rival field values: `ipdb.models` states what
+-- xantari states, bar a title the scrape lost characters from.
 --
--- It is a CENSUS, not a sample. Each search lists every machine IPDB currently
--- classifies under one Specialty, and every result row states the machine's
--- WHOLE specialty set, so the union across the searches is IPDB's complete
--- classification at one moment. That makes absence meaningful: a machine not
--- here has no specialty, which is a fact rather than a gap to backfill.
+-- NOT MERGED. A model matched by three searches is three rows, and whether the
+-- copies agree is what `ipdb_live_observation_conflict` asks; `live_models`
+-- collapses them only because it does.
 --
--- Neither other IPDB read can say that. The xantari dump has never carried the
--- field, and the archive pages carry it a page at a time from captures spanning
--- years. So nothing merges: the census REPLACES both as the source of
--- `ipdb.model_specialties`, rather than ranking against them per model. The two
--- ways that could stop being true both fail the build --
--- `ipdb_specialty_xantari_column_appeared` if the dump gains the field, and
--- `ipdb_specialty_vocabulary_drifted` if IPDB's vocabulary moves under the
--- download.
---
--- Columns are enumerated for the same reason `archive_models` above enumerates:
--- this file is ours, so a vanished key should fail here rather than downstream.
-CREATE OR REPLACE TABLE ipdb_raw.specialty_census AS
+-- What a row's ABSENCE means differs per search, and the page does not always
+-- say what it filtered on, so nothing here infers from it. The two cases where
+-- absence is meaningful are proven rather than assumed, by
+-- `ipdb_specialty_search_incomplete` and `ipdb_dated_model_not_in_year_search`.
+CREATE OR REPLACE TABLE ipdb_raw.search_results AS
 SELECT
+  -- Where the page was saved, and what it filtered on where it says so.
+  -- `search_filter` is NULL on the Type and year searches, which echo no form
+  -- back; only the Specialty pages state theirs, and they are the only ones a
+  -- check needs it from.
+  search_kind,
+  search_name,
+  search_filter,
   ipdb_id,
   "name",
   -- IPDB's date column, split rather than cast to a DATE: it states a month on
   -- most rows and a bare year on hundreds, and a DATE would pad the missing part
   -- to the 1st and read as a day IPDB never stated. `date_is_project_date` is
   -- the `*` IPDB prints to mark a Project Date -- the same distinction
-  -- `ipdb_stg.archive_models` goes to the machine page for, stated here in a
-  -- listing that covers thousands of models rather than hundreds.
+  -- `ipdb_stg.archive_models` goes to the model page for, stated here in
+  -- listings that cover thousands of models rather than hundreds.
   date_text,
   date_year,
   date_month,
@@ -206,7 +203,8 @@ SELECT
   type_code,
   type_text,
   -- `production_text` is kept beside the integer because only the text separates
-  -- IPDB saying "none" or "few" from IPDB saying nothing; both have no integer.
+  -- IPDB saying "none", "few" or "unknown" from IPDB saying nothing; none of
+  -- those has an integer.
   production_text,
   production_units,
   production_approximate,
@@ -216,92 +214,34 @@ SELECT
   rating_score,
   rating_ratings,
   rating_provisional,
-  -- One struct per assignment, each carrying the id and search URL that evidence
-  -- it. `ipdb_stg.model_specialties` unnests them.
+  -- Every results row states the model's WHOLE Specialty set, whatever the page
+  -- filtered on, so this is as complete on a year page as on a Specialty one.
   specialties
 FROM read_json_auto(
-  getvariable('ingest_base') || '/ipdb/ipdb_specialty/census.jsonl',
+  getvariable('ingest_base') || '/ipdb/searches/search_results.jsonl',
   (sample_size = -1)
 );
 
--- IPDB's other advanced searches, as saved observations.
+-- IPDB's Specialties, read off the search form rather than transcribed.
 --
--- Written by `scripts/ipdb/extract_ipdb_searches_to_jsonl.py` over every saved
--- search page EXCEPT the Specialty ones, which the census above owns. One row
--- per machine per search, so a machine matched by two searches is observed
--- twice; `ipdb_stg.live_observations` unions these with the census and
--- `ipdb_live_observation_conflict` asserts the copies agree.
+-- The live list, riding along with the data read under it. It exists so
+-- `ipdb_ref.specialty` -- which is hand-written, and maps each Specialty onto
+-- catalog vocabulary -- can be checked against IPDB rather than against someone's
+-- memory of IPDB. `ipdb_specialty_list_drifted` compares them both ways, so a
+-- Specialty IPDB adds after this download fails the build instead of going
+-- silently unmapped.
 --
--- These are LIVE READS, months newer than the dump, and their whole job is to
--- give the build something current to check the dump against. They publish no
--- rival field values -- `ipdb.models` still states what xantari states.
---
--- What a search's absence means is NOT recorded, deliberately. Each download is
--- complete for what it filtered on, but the page does not always say what that
--- was (the Type search echoes no filter back), so the corpus holds positive
--- observations only and nothing infers from a machine's absence.
---
--- The `years` searches are the exception, and they earn it COLLECTIVELY rather
--- than one page at a time: tiled 1800 to 2026 without a gap, they match every
--- machine IPDB dates, and a machine IPDB does not date cannot appear in any of
--- them. That makes them complete over the dated universe, which is what
--- `ipdb_dated_model_not_in_year_search` asserts. The property belongs here in
--- SQL rather than in the extract, which reads folders and cannot know what any
--- of them tile.
-CREATE OR REPLACE TABLE ipdb_raw.search_observations AS
-SELECT
-  -- The folder the page was saved in, and the file within it. Provenance for a
-  -- filter the page itself may not state.
-  search_kind,
-  search_name,
-  ipdb_id,
-  "name",
-  date_text,
-  date_year,
-  date_month,
-  date_is_project_date,
-  manufacturer,
-  manufacturer_full,
-  type_code,
-  type_text,
-  production_text,
-  production_units,
-  production_approximate,
-  players,
-  model_number,
-  n_photos,
-  rating_score,
-  rating_ratings,
-  rating_provisional,
-  -- Bare specialty strings here, where the census carries structs: this corpus
-  -- proves nothing about completeness, so a row is a sighting rather than an
-  -- assignment and has no search URL to cite.
-  specialties
-FROM read_json_auto(
-  getvariable('ingest_base') || '/ipdb/ipdb_searches/observations.jsonl',
-  (sample_size = -1)
-);
-
--- IPDB's Specialty dropdown as the census download found it.
---
--- The live vocabulary, riding along with the data that was read under it. It
--- exists so `ipdb_ref.specialty` -- which is hand-written, and maps each
--- Specialty onto catalog vocabulary -- can be checked against IPDB rather than
--- against someone's memory of IPDB. `ipdb_specialty_vocabulary_drifted` compares
--- them in both directions, so a Specialty IPDB adds after this download fails
--- the build instead of going silently unmapped.
---
--- `downloaded` is false for a term whose own search page was never saved. No
--- such row today, and the extract refuses to write a census where one is
--- reachable from another page's rows.
-CREATE OR REPLACE TABLE ipdb_raw.specialty_vocabulary AS
+-- Not derivable from the search results: a Specialty no model currently carries
+-- appears in the dropdown and nowhere else, which is exactly the case worth
+-- catching. `downloaded` is false where no saved page searched for the term.
+CREATE OR REPLACE TABLE ipdb_raw.specialties AS
 SELECT
   specialty_id,
   specialty,
   source_url,
   downloaded
 FROM read_json_auto(
-  getvariable('ingest_base') || '/ipdb/ipdb_specialty/vocabulary.jsonl',
+  getvariable('ingest_base') || '/ipdb/searches/specialties.jsonl',
   (sample_size = -1)
 );
 

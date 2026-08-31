@@ -53,15 +53,15 @@ Other schemas:
 
 ### Finding your way around a mart
 
-Ask the database, rather than a list in this file that drifts from it. Each mart relation carries a one-line description as a SQL `COMMENT`, so this is the index:
+Each mart relation carries a one-line description as a SQL `COMMENT`, so this is the index:
 
 ```sql
 SELECT view_name, comment FROM duckdb_views() WHERE schema_name = 'opdb' ORDER BY view_name;
 ```
 
-`opdb`, `ipdb` and `ingest` are described this way, and a build check keeps that coverage complete as relations are added. `glossary` and `web_cache` are not, so they return their relation names without descriptions; both hold tables as well as views, so reach for `duckdb_tables()` there too.
+`opdb`, `ipdb` and `ingest` are described this way. `glossary` and `web_cache` are not; both hold tables as well as views, so reach for `duckdb_tables()` there too.
 
-The `checks` schema is worth knowing about for a different reason: every warning the build prints is a count of a `checks.<check_name>` view, and that view holds the actual rows. When a build reports a non-zero warning, the worklist behind it is one query away.
+The `checks` schema: every warning the build prints is a count of a `checks.<check_name>` view, and that view holds the actual rows. When a build reports a non-zero warning, the worklist behind it is one query away.
 
 ## Related scripts
 
@@ -69,8 +69,7 @@ The `checks` schema is worth knowing about for a different reason: every warning
 - `scripts/cloud_store/{pull,push}_ingest_sources.py` — sync ingest sources with R2
 - `scripts/web_scrape/web_fetch.py` + `web_cache.py` — fetch and query the web evidence cache (see [WebCache.md](WebCache.md))
 - `scripts/glossary/parse_*_glossary.py` — parse saved glossary HTML dumps into JSON
-- `scripts/ipdb/extract_ipdb_specialty_to_jsonl.py` — parse saved IPDB advanced-search pages into the Specialty census
-- `scripts/ipdb/extract_ipdb_searches_to_jsonl.py` — parse IPDB's other saved advanced searches into live observations
+- `scripts/ipdb/extract_ipdb_searches_to_jsonl.py` — parse IPDB's saved advanced-search pages into search results
 
 ## Cloudflare R2
 
