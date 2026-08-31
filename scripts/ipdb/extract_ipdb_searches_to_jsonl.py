@@ -15,12 +15,9 @@ Two files come out, both read by ``sql/02_raw.sql`` through ``read_json_auto``:
 
 * ``search_results.jsonl`` -- one row per IPDB model per saved page, holding that
   model's fields as that page's results table showed them. A model matched by
-  three searches is three rows. They are NOT merged here, and that is the point:
-  whether the copies agree is a question with an answer, and
-  ``ipdb_search_result_conflict`` asks it in SQL rather than this file
-  quietly picking a winner.
-* ``specialties.jsonl`` -- IPDB's 27 Specialties with its own numeric ids, read
-  off the search form rather than transcribed. It is not derivable from the rows:
+  three searches is three rows.
+* ``specialties.jsonl`` -- each of IPDB's 20-30 odd Specialties with their own numeric ids, read
+  off the search form. It is not derivable from the rows:
   a Specialty no model currently carries appears in the dropdown and nowhere
   else, and that is exactly the case worth catching.
 
