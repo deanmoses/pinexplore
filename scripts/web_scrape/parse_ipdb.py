@@ -863,13 +863,19 @@ def _header_cell(document: HtmlElement) -> HtmlElement:
     raise NotAModelPageError("no 'IPD No.' header on this page")
 
 
+# A table's own rows, whether or not a `tbody` sits between. IPDB's HTML 4.01
+# omits `tbody`, but a page saved out of a browser carries the one the browser
+# inserted when it built the DOM, and `./tr` alone finds nothing in that copy.
+_ROWS = "./tr|./tbody/tr"
+
+
 def _model_table(header: HtmlElement) -> HtmlElement:
     """The table holding the field rows. Found by walking out from the header to
     the innermost ancestor with labeled rows as direct children, so a
     capture that wraps the page in extra layout tables still works."""
     ancestors: list[HtmlElement] = list(header.iterancestors("table"))
     for table in ancestors:
-        for row in _find(table, "./tr"):
+        for row in _find(table, _ROWS):
             cells = _find(row, "./td")
             if len(cells) > 1 and _label_of(cells[0]):
                 return table
@@ -962,7 +968,7 @@ def parse_model_page(html: bytes | str) -> IpdbModel:
     documents: dict[str, list[FileEntry]] = {}
     listing: str | None = None
 
-    for row in _find(_model_table(header_cell), "./tr"):
+    for row in _find(_model_table(header_cell), _ROWS):
         cells = _find(row, "./td")
         if len(cells) < 2:
             continue  # the header row: one cell spanning the table

@@ -541,6 +541,23 @@ def test_bytes_in_cp1252_are_decoded_like_the_browser_does():
     assert parse_model_page(raw).name == "Barrel O\u2019 Fun \u201861"
 
 
+def test_rows_wrapped_in_a_tbody_are_still_found():
+    """IPDB's own HTML 4.01 omits `tbody`, but a page saved out of a browser
+    carries the one the browser inserted when it built the DOM. Looking only
+    for a table's direct `tr` children finds no rows in that copy, and the
+    parse comes back as a model whose every field is missing."""
+    body = HEADER + row("Theme:", "Cards/Gambling")
+    html = (
+        "<html><body>"
+        '<table border=0 align=center width="80%" cellpadding=1 cellspacing=0>'
+        f"<tbody>{body}</tbody>"
+        "</table></body></html>"
+    )
+    model = parse_model_page(html)
+    assert model.ipdb_id == 2006
+    assert model.themes == ("Cards/Gambling",)
+
+
 def test_the_parse_is_pure():
     html = page(row("Theme:", "Sports - Soccer"), row("Production:", "500 units"))
     assert parse_model_page(html) == parse_model_page(html)
