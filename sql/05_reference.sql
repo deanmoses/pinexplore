@@ -219,7 +219,6 @@ SELECT * FROM (VALUES
   -- One IPDB heading over two of our cabinets, `tabletop` and `countertop`.
   -- Same shape as Payout Machine: per-model research, not new vocabulary.
   ('Table Top/Counter Game',              'cabinet',            'Table Top/Counter Game'),
-  ('Vertical Pinball Machine',            'cabinet',            'Vertical Pinball Machine'),
   ('Conversion Kit',                      'model-relationship', 'conversion_kit'),
   ('Converted Game',                      'model-relationship', 'conversion'),
   ('Re-themed Game',                      'model-relationship', 'retheme'),
@@ -244,6 +243,12 @@ SELECT * FROM (VALUES
   ('Non-Commercial Machine [Home Model]', 'tag',                'home-use'),
   ('WWII Contract',                       'tag',                'wwii-contract'),
   ('Flipperless',                         'tag',                'flipperless'),
+  -- Playfield ORIENTATION, not a form factor: IPDB hangs this heading on floor
+  -- uprights, wall boxes and counter games alike, and on eleven listings it sits
+  -- beside `Table Top/Counter Game`. A cabinet is one FK, so mapping it there
+  -- would spend the slot the footprint needs. The `upright` cabinet is the
+  -- separate per-model reading of how the machine stands.
+  ('Vertical Pinball Machine',            'tag',                'vertical'),
   ('Mechanical Backbox Animation',        'gameplay-feature',   'Mechanical Backbox Animation'),
   ('Head-to-Head Play',                   'gameplay-feature',   'Head-to-Head Play'),
   ('Zipper Flippers',                     'gameplay-feature',   'Zipper Flippers')
