@@ -234,10 +234,16 @@ SELECT * FROM (VALUES
   ('Add-A-Ball',                          'reward-type',        'add-a-ball'),
   ('Novelty Play',                        'reward-type',        'novelty'),
   ('Redemption Game',                     'reward-type',        'ticket-payout'),
-  -- IPDB's single word covers what we split into `cash-payout` and
-  -- `merchant-paid`, and the page does not say which. Reading the models is the
-  -- only way to tell them apart, so this stays a worklist rather than guessing.
-  ('Payout Machine',                      'reward-type',        'Payout Machine'),
+  -- The heading was read as spanning `cash-payout` and `merchant-paid`, needing
+  -- the models read to split. They were read (flippatch campaign 0319), and the
+  -- split is not there: IPDB defines the heading by WHO DISPENSES -- "These
+  -- machines have the ability to dispense an award ... The awards have taken many
+  -- forms (free games, tickets, candy, merchandise, etc.)" -- so `merchant-paid`,
+  -- where the machine pays nothing, is its opposite, and `ticket-payout` has its
+  -- own heading above. Nor is the residue sortable: half the notes say nothing
+  -- past the flag, and the rest usually name a factory ORDERING OPTION rather
+  -- than the machine's reward. So the heading got a term of its own.
+  ('Payout Machine',                      'reward-type',        'payout'),
   ('Bagatelle',                           'game-format',        'bagatelle'),
   ('Bat Game',                            'game-format',        'pitch-and-bat'),
   ('Bingo Machine',                       'game-format',        'bingo-pinball'),
