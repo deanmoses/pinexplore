@@ -248,8 +248,10 @@ SELECT * FROM (VALUES
   ('Bat Game',                            'game-format',        'pitch-and-bat'),
   ('Bingo Machine',                       'game-format',        'bingo-pinball'),
   ('Rolldown Game',                       'game-format',        'rolldown'),
-  ('Shaker Ball Machine',                 'game-format',        'Shaker Ball Machine'),
-  ('Cue Game',                            'game-format',        'Cue Game'),
+  -- A coin-operated table played with a hand-held cue, pool-fashion: the 1931
+  -- Karom Golf tables, the 1955-56 electric-pool wave, Electro-Pool. Minted as a
+  -- format by flippatch 0302; landed by 0326.
+  ('Cue Game',                            'game-format',        'cue-game'),
   ('Gun Game',                            'game-format',        'gun-game'),
   ('Horserace Game',                      'game-format',        'Horserace Game'),
   ('Not A Pinball',                       'game-format',        'Not A Pinball'),
@@ -258,14 +260,27 @@ SELECT * FROM (VALUES
   ('Non-Commercial Machine [Home Model]', 'tag',                'home-use'),
   ('WWII Contract',                       'tag',                'wwii-contract'),
   ('Flipperless',                         'tag',                'flipperless'),
-  -- Playfield ORIENTATION, not a form factor: IPDB hangs this heading on floor
-  -- uprights, wall boxes and counter games alike, and on eleven listings it sits
-  -- beside `Table Top/Counter Game`. A cabinet is one FK, so mapping it there
-  -- would spend the slot the footprint needs. The `upright` cabinet is the
-  -- separate per-model reading of how the machine stands.
-  ('Vertical Pinball Machine',            'tag',                'vertical'),
   ('Mechanical Backbox Animation',        'gameplay-feature',   'Mechanical Backbox Animation'),
   ('Head-to-Head Play',                   'gameplay-feature',   'Head-to-Head Play'),
+  -- A property of the PLAYFIELD, not of the machine, which is why it is neither a
+  -- cabinet nor a tag: IPDB hangs this heading on floor uprights, wall boxes and
+  -- counter games alike, and on eleven listings it sits beside `Table Top/Counter
+  -- Game`. An `upright` cabinet very often has one and not always -- the Euromats
+  -- hang on a wall with the playfield sloped toward the player.
+  ('Vertical Pinball Machine',            'gameplay-feature',   'vertical-playfields'),
+  -- A player-operated CONTROL, not a kind of machine, which is why it is not a
+  -- format: all five listings are ordinary machines of some other format carrying
+  -- an extra device. Three already hold `bingo-pinball` correctly and the two
+  -- Allied games are flipper pinballs, so spending the single-valued format slot
+  -- on the control would overwrite a correct value on three and misdescribe two.
+  -- The heading maps to the GENERIC term because IPDB borrowed one maker's
+  -- marketing name for it: `Shaker Ball` is Allied Leisure's, quoted as such in
+  -- IPDB's own Notable Features on Sea Hunt and Spooksville, and hung by IPDB on
+  -- three machines that never used the phrase -- a 1954 Bally bingo with a
+  -- "Bump-feature" and two c.1971 Japanese payout machines with a "Skill Bumper
+  -- feature". Allied's name survives as `shaker-ball`, a child of this one
+  -- (flippatch campaign 0322), asserted only on the two listings that use it.
+  ('Shaker Ball Machine',                 'gameplay-feature',   'playfield-shakers'),
   ('Zipper Flippers',                     'gameplay-feature',   'Zipper Flippers')
 ) AS t(ipdb_specialty, target_entity_type, target_value);
 
