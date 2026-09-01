@@ -216,9 +216,18 @@ SELECT * FROM (VALUES
 CREATE OR REPLACE VIEW ipdb_ref.specialty AS
 SELECT * FROM (VALUES
   ('Cocktail Table',                      'cabinet',            'cocktail'),
-  -- One IPDB heading over two of our cabinets, `tabletop` and `countertop`.
-  -- Same shape as Payout Machine: per-model research, not new vocabulary.
-  ('Table Top/Counter Game',              'cabinet',            'Table Top/Counter Game'),
+  -- Read as one IPDB heading over two of our cabinets, `tabletop` and
+  -- `countertop`, wanting per-model research to split. The research was done and
+  -- there is nothing to split: every one of the 320 catalog models the heading
+  -- reaches is a coin-operated counter game -- 236 pre-1940, and the post-war
+  -- remainder a ball gum vender, an operator's coin-view-window game, an MOA
+  -- trade show counter game and Williams' 100-unit 4-IN-1 run -- with no home or
+  -- consumer machine among them. Nor is there wording to split on: 245 of the
+  -- 320 listings say neither "counter" nor "table", and in the rest a `pin
+  -- table` is the LEGGED form, as IPDB spells out on ipdb:1694 -- "the term 'pin
+  -- table' refers to games that have legs". `tabletop` was retired for that
+  -- reason; the single heading maps to the single cabinet.
+  ('Table Top/Counter Game',              'cabinet',            'countertop'),
   ('Conversion Kit',                      'model-relationship', 'conversion_kit'),
   ('Converted Game',                      'model-relationship', 'conversion'),
   ('Re-themed Game',                      'model-relationship', 'retheme'),
